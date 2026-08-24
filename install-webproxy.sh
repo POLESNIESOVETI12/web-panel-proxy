@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="FINAL-AUTOREPAIR-3"
+VERSION="FINAL"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
