@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="FINAL-IDEMPOTENT-YT"
+VERSION="FINAL-IDEMPOTENT-CERT-3"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
@@ -180,35 +180,61 @@ check_install_port 2398 mtproto-proxy
 check_install_port 8080 tproxy-server
 check_install_port 8081 tproxy-server
 
-if [[ "$REUSE_CADDY" == "1" && -f /etc/systemd/system/caddy.service.d/tproxy.conf ]]; then
-    EXISTING_DOMAIN="$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' /etc/systemd/system/caddy.service.d/tproxy.conf | head -n1)"
+EXISTING_CADDY_CONF="/etc/systemd/system/caddy.service.d/tproxy.conf"
+EXISTING_DOMAIN=""
+EXISTING_EMAIL=""
+REUSE_EXISTING_HTTPS=0
+
+if [[ "$REUSE_CADDY" == "1" && -f "$EXISTING_CADDY_CONF" ]]; then
+    EXISTING_DOMAIN="$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' "$EXISTING_CADDY_CONF" | head -n1)"
+    EXISTING_EMAIL="$(sed -n 's/^Environment=ACME_EMAIL=//p' "$EXISTING_CADDY_CONF" | head -n1)"
+
     if [[ -n "$EXISTING_DOMAIN" && "$EXISTING_DOMAIN" != "$DOMAIN" ]]; then
         die "Existing Web Proxy uses domain ${EXISTING_DOMAIN}. Use that domain or uninstall first."
+    fi
+
+    if [[ -n "$EXISTING_DOMAIN" ]] &&
+       curl -fsSI --max-time 10 "https://${EXISTING_DOMAIN}/" >/dev/null 2>&1; then
+        REUSE_EXISTING_HTTPS=1
+        DOMAIN="$EXISTING_DOMAIN"
+        [[ -n "$EXISTING_EMAIL" ]] && EMAIL="$EXISTING_EMAIL"
+        echo "      Existing HTTPS is already working; certificate/configuration will be reused."
+    else
+        echo "      Existing Caddy found, but HTTPS is not currently working."
+        if [[ -n "$EXISTING_EMAIL" ]] && valid_email "$EXISTING_EMAIL"; then
+            EMAIL="$EXISTING_EMAIL"
+            echo "      Existing ACME email is valid; reusing it."
+        else
+            echo "      Existing ACME email is missing or invalid."
+            while true; do
+                read -r -p "ACME email (ASCII, e.g. admin@example.com): " EMAIL
+                EMAIL="$(trim "$EMAIL")"
+                valid_email "$EMAIL" && break
+                echo "Invalid email. Use Latin characters, e.g. admin@example.com"
+            done
+        fi
     fi
 fi
 
 echo
 echo "[4/10] Checking DNS..."
-if [[ "$REUSE_CADDY" == "1" && -f /etc/systemd/system/caddy.service.d/tproxy.conf ]]; then
-    EXISTING_EMAIL="$(sed -n 's/^Environment=ACME_EMAIL=//p' /etc/systemd/system/caddy.service.d/tproxy.conf | head -n1)"
-    if [[ -n "$EXISTING_EMAIL" ]]; then
-        EMAIL="$EXISTING_EMAIL"
-        echo "      Existing Caddy email will be reused."
+if [[ "$REUSE_EXISTING_HTTPS" == "1" ]]; then
+    DNS_IP="$(getent ahostsv4 "$DOMAIN" | awk 'NR==1{print $1}')"
+    [[ -n "$DNS_IP" ]] || die "Existing HTTPS works, but DNS lookup failed for $DOMAIN."
+    echo "      Existing HTTPS verified: $DOMAIN -> $DNS_IP"
+else
+    DNS_IP="$(getent ahostsv4 "$DOMAIN" | awk 'NR==1{print $1}')"
+    [[ -n "$DNS_IP" ]] || die "No IPv4 A record found for $DOMAIN."
+
+    VPS_IP="$(curl -4fsS --max-time 10 https://api.ipify.org || true)"
+    if [[ -n "$VPS_IP" && "$DNS_IP" != "$VPS_IP" ]]; then
+        echo "      DNS: $DNS_IP"
+        echo "      VPS: $VPS_IP"
+        die "DNS does not point to this VPS."
     fi
+    echo "      $DOMAIN -> $DNS_IP"
 fi
 
-DNS_IP="$(getent ahostsv4 "$DOMAIN" | awk 'NR==1{print $1}')"
-[[ -n "$DNS_IP" ]] || die "No IPv4 A record found for $DOMAIN."
-
-VPS_IP="$(curl -4fsS --max-time 10 https://api.ipify.org || true)"
-if [[ -n "$VPS_IP" && "$DNS_IP" != "$VPS_IP" ]]; then
-    echo "      DNS: $DNS_IP"
-    echo "      VPS: $VPS_IP"
-    die "DNS does not point to this VPS."
-fi
-echo "      $DOMAIN -> $DNS_IP"
-
-echo
 echo "[5/10] Creating public site..."
 rm -rf "$SITE_INPUT"
 mkdir -p "$SITE_INPUT"
@@ -610,7 +636,9 @@ else
 fi
 
 install -d -m 0755 /etc/systemd/system/caddy.service.d
-if [[ "$REUSE_CADDY" != "1" || ! -f /etc/systemd/system/caddy.service.d/tproxy.conf ]]; then
+if [[ "$REUSE_EXISTING_HTTPS" == "1" ]]; then
+    echo "      Preserving existing working Caddy environment."
+else
     cat > /etc/systemd/system/caddy.service.d/tproxy.conf <<EOF
 [Service]
 Environment=TPROXY_HOSTNAME=$DOMAIN
@@ -618,8 +646,6 @@ Environment=TPROXY_SITE_ROOT=/srv/tproxy-site
 Environment=ACME_EMAIL=$EMAIL
 ReadWritePaths=/etc/caddy
 EOF
-else
-    echo "      Preserving existing Caddy environment."
 fi
 
 install -d -o caddy -g caddy -m 0750 /etc/caddy/caddy
@@ -730,12 +756,10 @@ echo "      healthz OK"
 
 HTTPS_READY=0
 
-# If HTTPS already works, use the existing certificate/configuration immediately.
-if curl -fsSI --max-time 10 "https://${DOMAIN}/" >/dev/null 2>&1; then
+if [[ "$REUSE_EXISTING_HTTPS" == "1" ]]; then
     HTTPS_READY=1
     echo "      Existing HTTPS certificate/config is already working."
 else
-    # Otherwise, allow Caddy time to obtain a certificate.
     for _ in $(seq 1 90); do
         if curl -fsSI --max-time 5 "https://${DOMAIN}/" >/dev/null 2>&1; then
             HTTPS_READY=1
@@ -747,7 +771,7 @@ fi
 
 if [[ "$HTTPS_READY" != "1" ]]; then
     echo "      Caddy diagnostic:"
-    journalctl -u caddy -n 40 --no-pager 2>/dev/null || true
+    journalctl -u caddy -n 60 --no-pager 2>/dev/null || true
     die "HTTPS did not become ready within 180 seconds. Check Caddy/ACME/DNS."
 fi
 
