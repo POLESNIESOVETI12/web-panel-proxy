@@ -19,6 +19,8 @@
 
 Новый VPS:
 
+[АРЕНДОВАТЬ VPS И ДОМЕН МОЖНО ТУТ](https://play2go.cloud/?ref_id=m1o4quWG0sE)
+
 ```text
 Ubuntu 24.04
 x86_64
@@ -131,8 +133,6 @@ Secret:
 Telegram Web Proxy:
   https://t.me/webproxy?server=proxy.example.com&secret=************************
 
-YouTube channel:
-  https://www.youtube.com/@POLESNIESOVETI12
 
 Status:
   HTTPS          OK
@@ -146,95 +146,26 @@ Status:
 
 ---
 
-# 5. Проверка установки
+# 5. Полное удаление установки
 
-Проверить сервисы:
-
-```bash
-systemctl --no-pager --full status mtproxy tproxy-server caddy
-```
-
-Проверить порты:
+Для удаления Telegram Web Proxy используйте:
 
 ```bash
-ss -lntp | grep -E ':(2398|8080|8081|80|443)\b'
+curl -fsSL https://raw.githubusercontent.com/POLESNIESOVETI12/webtelegram/main/uninstall-webproxy.sh -o /tmp/uninstall-webproxy.sh && chmod +x /tmp/uninstall-webproxy.sh && /tmp/uninstall-webproxy.sh
 ```
 
-Проверить relay:
-
-```bash
-curl --fail http://127.0.0.1:8081/healthz && echo
-curl --fail http://127.0.0.1:8081/readyz && echo
-```
-
-Ожидается:
+Деинсталлятор попросит подтвердить удаление:
 
 ```text
-ok
-ready
+REMOVE
 ```
 
-Проверить сайт:
-
-```bash
-curl -I https://YOUR-DOMAIN/
-```
-
-Например:
-
-```bash
-curl -I https://proxy.example.com/
-```
-
-Ожидается:
-
-```text
-HTTP/2 200
-```
+После этого будут удалены компоненты Telegram Web Proxy, Caddy, конфигурация, сайт и созданные сервисы.
 
 ---
 
-# 6. Если хотите установить через Nano
 
-Это удобно для видео, если не хочется использовать GitHub напрямую.
-
-Создайте файл:
-
-```bash
-nano /root/install-webproxy.sh
-```
-
-Вставьте содержимое `install-webproxy.sh`.
-
-Сохраните:
-
-```text
-Ctrl+O
-Enter
-Ctrl+X
-```
-
-Проверьте синтаксис:
-
-```bash
-bash -n /root/install-webproxy.sh && echo "SCRIPT OK"
-```
-
-Сделайте файл исполняемым:
-
-```bash
-chmod +x /root/install-webproxy.sh
-```
-
-Запустите:
-
-```bash
-/root/install-webproxy.sh
-```
-
----
-
-# 7. Как заменить HTML-заглушку
+# 6. Как заменить HTML-заглушку
 
 Сайт-заглушка находится здесь:
 
@@ -264,7 +195,7 @@ Caddy перезапускать не требуется.
 
 ---
 
-# 8. Готовая HTML-заглушка
+# 7. Готовая HTML-заглушка
 
 Пример простой страницы:
 
@@ -373,19 +304,8 @@ Caddy перезапускать не требуется.
 
 ---
 
-# 9. Установка из уже скачанного файла
 
-Если файл уже находится на VPS:
-
-```bash
-chmod +x /root/install-webproxy.sh
-bash -n /root/install-webproxy.sh
-/root/install-webproxy.sh
-```
-
----
-
-# 10. Полное удаление установки
+# 8. Полное удаление установки
 
 Для удаления Telegram Web Proxy используйте:
 
@@ -403,7 +323,7 @@ REMOVE
 
 ---
 
-# 11. Если порт 80 или 443 занят
+# 9. Если порт 80 или 443 занят
 
 Проверьте:
 
@@ -415,75 +335,9 @@ ss -lntp | grep -E ':(80|443)\b'
 
 ---
 
-# 12. Если HTTPS не готов сразу
 
-Проверить Caddy:
 
-```bash
-systemctl --no-pager --full status caddy
-```
-
-Посмотреть последние сообщения:
-
-```bash
-journalctl -u caddy -n 100 --no-pager
-```
-
-Проверить HTTPS:
-
-```bash
-curl -I https://YOUR-DOMAIN/
-```
-
-Установщик ждёт выдачу HTTPS-сертификата до 120 секунд.
-
----
-
-# 13. Если tproxy-server не готов
-
-Проверить:
-
-```bash
-systemctl --no-pager --full status tproxy-server
-```
-
-Логи:
-
-```bash
-journalctl -u tproxy-server -n 100 --no-pager
-```
-
-Relay:
-
-```bash
-curl --fail http://127.0.0.1:8081/readyz && echo
-```
-
----
-
-# 14. Если MTProxy не запускается
-
-Проверить:
-
-```bash
-systemctl --no-pager --full status mtproxy
-```
-
-Логи:
-
-```bash
-journalctl -u mtproxy -n 100 --no-pager
-```
-
-Проверить бинарник:
-
-```bash
-namei -l /opt/MTProxy/objs/bin/mtproto-proxy
-```
-
----
-
-# 15. Что такое Telegram Web Proxy
+# 10. Что такое Telegram Web Proxy
 
 Telegram Web Proxy — это промежуточный сервер между клиентом Telegram и Telegram.
 
@@ -503,72 +357,6 @@ MTProxy
 Telegram
 ```
 
-Это **не VPN** и не универсальный SOCKS/HTTP proxy.
-
----
-
-# 16. Важно
-
-Не публикуйте:
-
-```text
-Secret
-Пароли
-SSH-ключи
-API-ключи
-```
-
-Не вставляйте реальные secrets в GitHub.
-
-Установщик генерирует secret во время установки.
-
----
-
-# 17. Репозиторий
-
-GitHub:
-
-```text
-https://github.com/POLESNIESOVETI12/webtelegram
-```
-
-Установщик:
-
-```text
-https://raw.githubusercontent.com/POLESNIESOVETI12/webtelegram/main/install-webproxy.sh
-```
-
-Удаление:
-
-```text
-https://raw.githubusercontent.com/POLESNIESOVETI12/webtelegram/main/uninstall-webproxy.sh
-```
-
----
-
-# 18. Быстрый старт для видео
-
-Самый короткий вариант для зрителя:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/POLESNIESOVETI12/webtelegram/main/install-webproxy.sh -o /root/install-webproxy.sh && chmod +x /root/install-webproxy.sh && /root/install-webproxy.sh
-```
-
-После этого введите:
-
-```text
-Домен
-Email
-Secret
-```
-
-и дождитесь:
-
-```text
-TELEGRAM WEB PROXY IS READY
-```
-
----
 
 ## Содержание репозитория
 
