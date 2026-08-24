@@ -53,13 +53,23 @@ port_has_expected_process() {
 
 find_mtproxy_port() {
     local detected
-    detected="$(ss -lntp 2>/dev/null |
-        sed -n 's/.*:\([0-9]\+\)[[:space:]].*users:(("\mtproto-proxy".*/\1/p' |
-        head -n1)"
+    detected="$(
+        ss -lntpH 2>/dev/null |
+            awk '/mtproto-proxy/ {
+                n=$4
+                sub(/^.*:/, "", n)
+                if (n ~ /^[0-9]+$/) {
+                    print n
+                    exit
+                }
+            }'
+    )"
+
     if [[ "$detected" =~ ^[0-9]+$ ]]; then
         printf '%s' "$detected"
         return 0
     fi
+
     return 1
 }
 
@@ -82,7 +92,7 @@ repair_mtproxy() {
     echo "      MTProxy recovery: fixing permissions and restarting..."
     fix_mtproxy_permissions || true
     systemctl reset-failed mtproxy.service 2>/dev/null || true
-    systemctl restart mtproxy.service
+    restart_service_reliably mtproxy.service 3 || true
 }
 
 check_install_port() {
@@ -1244,8 +1254,12 @@ runuser -u mtproxy -- test -x /opt/MTProxy/objs/bin/mtproto-proxy ||
 runuser -u tproxy -- test -r /srv/tproxy-site/index.html ||
     die "Final site permission check failed."
 
-for p in 2398 8080 8081 80 443; do
-    ss -lnt | grep -Eq ":(${p})\b" || die "Expected port ${p} is not listening."
+for p in "$MT_PORT" 8080 8081 80 443; do
+    if ! ss -lnt | grep -Eq ":(${p})\b"; then
+        echo "      Missing expected listening port: ${p}" >&2
+        ss -lntp || true
+        die "Expected port ${p} is not listening."
+    fi
 done
 
 TELEGRAM_SECRET="${SECRET#dd}"
