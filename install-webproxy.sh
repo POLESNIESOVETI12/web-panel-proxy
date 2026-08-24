@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="FINAL-IDEMPOTENT-CERT-5"
+VERSION="FINAL-IDEMPOTENT-CERT-3"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
@@ -124,6 +124,14 @@ while true; do
     echo "Invalid domain. Example: proxy.example.com"
 done
 
+while true; do
+    echo
+    read -r -p "ACME email (example: admin@example.com): " EMAIL
+    EMAIL="$(trim "$EMAIL")"
+    valid_email "$EMAIL" && break
+    echo "Invalid email. Example: admin@example.com"
+done
+
 echo
 read -r -p "Generate a secure secret automatically? [Y/n]: " MODE
 MODE="$(trim "${MODE:-Y}")"
@@ -171,28 +179,62 @@ check_install_port 443 caddy
 check_install_port 2398 mtproto-proxy
 check_install_port 8080 tproxy-server
 check_install_port 8081 tproxy-server
-if [[ -x /opt/MTProxy/objs/bin/mtproto-proxy ]] &&
-   systemctl list-unit-files mtproxy.service >/dev/null 2>&1 &&
-   port_has_expected_process 2398 mtproto-proxy; then
-    REUSE_MT=1
-    echo "      Existing MTProxy detected; reusing it."
+
+EXISTING_CADDY_CONF="/etc/systemd/system/caddy.service.d/tproxy.conf"
+EXISTING_DOMAIN=""
+EXISTING_EMAIL=""
+REUSE_EXISTING_HTTPS=0
+
+if [[ "$REUSE_CADDY" == "1" && -f "$EXISTING_CADDY_CONF" ]]; then
+    EXISTING_DOMAIN="$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' "$EXISTING_CADDY_CONF" | head -n1)"
+    EXISTING_EMAIL="$(sed -n 's/^Environment=ACME_EMAIL=//p' "$EXISTING_CADDY_CONF" | head -n1)"
+
+    if [[ -n "$EXISTING_DOMAIN" && "$EXISTING_DOMAIN" != "$DOMAIN" ]]; then
+        die "Existing Web Proxy uses domain ${EXISTING_DOMAIN}. Use that domain or uninstall first."
+    fi
+
+    if [[ -n "$EXISTING_DOMAIN" ]] &&
+       curl -fsSI --max-time 10 "https://${EXISTING_DOMAIN}/" >/dev/null 2>&1; then
+        REUSE_EXISTING_HTTPS=1
+        DOMAIN="$EXISTING_DOMAIN"
+        [[ -n "$EXISTING_EMAIL" ]] && EMAIL="$EXISTING_EMAIL"
+        echo "      Existing HTTPS is already working; certificate/configuration will be reused."
+    else
+        echo "      Existing Caddy found, but HTTPS is not currently working."
+        if [[ -n "$EXISTING_EMAIL" ]] && valid_email "$EXISTING_EMAIL"; then
+            EMAIL="$EXISTING_EMAIL"
+            echo "      Existing ACME email is valid; reusing it."
+        else
+            echo "      Existing ACME email is missing or invalid."
+            while true; do
+                read -r -p "ACME email (ASCII, e.g. admin@example.com): " EMAIL
+                EMAIL="$(trim "$EMAIL")"
+                valid_email "$EMAIL" && break
+                echo "Invalid email. Use Latin characters, e.g. admin@example.com"
+            done
+        fi
+    fi
 fi
 
-if [[ -x /usr/local/bin/tproxy-server ]] &&
-   systemctl list-unit-files tproxy-server.service >/dev/null 2>&1 &&
-   port_has_expected_process 8080 tproxy-server &&
-   port_has_expected_process 8081 tproxy-server; then
-    REUSE_RELAY=1
-    echo "      Existing tproxy-server detected; reusing it."
+echo
+echo "[4/10] Checking DNS..."
+if [[ "$REUSE_EXISTING_HTTPS" == "1" ]]; then
+    DNS_IP="$(getent ahostsv4 "$DOMAIN" | awk 'NR==1{print $1}')"
+    [[ -n "$DNS_IP" ]] || die "Existing HTTPS works, but DNS lookup failed for $DOMAIN."
+    echo "      Existing HTTPS verified: $DOMAIN -> $DNS_IP"
+else
+    DNS_IP="$(getent ahostsv4 "$DOMAIN" | awk 'NR==1{print $1}')"
+    [[ -n "$DNS_IP" ]] || die "No IPv4 A record found for $DOMAIN."
+
+    VPS_IP="$(curl -4fsS --max-time 10 https://api.ipify.org || true)"
+    if [[ -n "$VPS_IP" && "$DNS_IP" != "$VPS_IP" ]]; then
+        echo "      DNS: $DNS_IP"
+        echo "      VPS: $VPS_IP"
+        die "DNS does not point to this VPS."
+    fi
+    echo "      $DOMAIN -> $DNS_IP"
 fi
 
-if [[ -x /usr/local/bin/caddy ]] &&
-   systemctl list-unit-files caddy.service >/dev/null 2>&1 &&
-   port_has_expected_process 80 caddy &&
-   port_has_expected_process 443 caddy; then
-    REUSE_CADDY=1
-    echo "      Existing Caddy detected; reusing it."
-fi
 echo "[5/10] Creating public site..."
 rm -rf "$SITE_INPUT"
 mkdir -p "$SITE_INPUT"
@@ -415,6 +457,34 @@ echo
 echo "[6/10] Installing Telegram Web Proxy components..."
 
 
+if [[ -x /opt/MTProxy/objs/bin/mtproto-proxy ]] &&
+   systemctl list-unit-files mtproxy.service >/dev/null 2>&1 &&
+   port_has_expected_process 2398 mtproto-proxy; then
+    REUSE_MT=1
+    echo "      Existing MTProxy detected; reusing it."
+fi
+
+if [[ -x /usr/local/bin/tproxy-server ]] &&
+   systemctl list-unit-files tproxy-server.service >/dev/null 2>&1 &&
+   port_has_expected_process 8080 tproxy-server &&
+   port_has_expected_process 8081 tproxy-server; then
+    REUSE_RELAY=1
+    echo "      Existing tproxy-server detected; reusing it."
+fi
+
+if [[ -x /usr/local/bin/caddy ]] &&
+   systemctl list-unit-files caddy.service >/dev/null 2>&1 &&
+   port_has_expected_process 80 caddy &&
+   port_has_expected_process 443 caddy; then
+    REUSE_CADDY=1
+    echo "      Existing Caddy detected; reusing it."
+fi
+if [[ ! -d "$REPO_DIR/.git" ]]; then
+    rm -rf "$REPO_DIR"
+    git clone --depth 1 https://github.com/telegramdesktop/tproxy-server.git "$REPO_DIR"
+else
+    echo "      Existing tproxy-server source tree detected; reusing it."
+fi
 cd "$REPO_DIR"
 
 if [[ "$REUSE_CADDY" == "1" ]]; then
@@ -754,45 +824,4 @@ echo "  Relay          READY"
 echo "  Firewall       ACTIVE"
 echo
 echo "IMPORTANT: keep the secret private."
-echo "============================================================"EXISTING_CADDY_CONF="/etc/systemd/system/caddy.service.d/tproxy.conf"
-EXISTING_DOMAIN=""
-EXISTING_EMAIL=""
-REUSE_EXISTING_HTTPS=0
-
-if [[ "$REUSE_CADDY" == "1" && -f "$EXISTING_CADDY_CONF" ]]; then
-    EXISTING_DOMAIN="$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' "$EXISTING_CADDY_CONF" | head -n1)"
-    EXISTING_EMAIL="$(sed -n 's/^Environment=ACME_EMAIL=//p' "$EXISTING_CADDY_CONF" | head -n1)"
-
-    if [[ -n "$EXISTING_DOMAIN" && "$EXISTING_DOMAIN" != "$DOMAIN" ]]; then
-        die "Existing Web Proxy uses domain ${EXISTING_DOMAIN}. Use that domain or uninstall first."
-    fi
-
-    if [[ -n "$EXISTING_DOMAIN" ]] &&
-       curl -fsSI --max-time 10 "https://${EXISTING_DOMAIN}/" >/dev/null 2>&1; then
-        REUSE_EXISTING_HTTPS=1
-        DOMAIN="$EXISTING_DOMAIN"
-        [[ -n "$EXISTING_EMAIL" ]] && EMAIL="$EXISTING_EMAIL"
-        echo "      Existing HTTPS is already working; certificate/configuration will be reused."
-    else
-        echo "      Existing Caddy found, but HTTPS is not currently working."
-        if [[ -n "$EXISTING_EMAIL" ]] && valid_email "$EXISTING_EMAIL"; then
-            EMAIL="$EXISTING_EMAIL"
-            echo "      Existing ACME email is valid; reusing it."
-        else
-            echo "      Existing ACME email is missing or invalid."
-            while true; do
-                read -r -p "ACME email (ASCII, e.g. admin@example.com): " EMAIL
-                EMAIL="$(trim "$EMAIL")"
-                valid_email "$EMAIL" && break
-                echo "Invalid email. Use Latin characters, e.g. admin@example.com"
-            done
-        fi
-    fi
-else
-    while true; do
-        read -r -p "ACME email (ASCII, e.g. admin@example.com): " EMAIL
-        EMAIL="$(trim "$EMAIL")"
-        valid_email "$EMAIL" && break
-        echo "Invalid email. Use Latin characters, e.g. admin@example.com"
-    done
-fi
+echo "============================================================"
