@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="FINAL-YT"
+VERSION="FINAL-YT-CERT"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
@@ -28,7 +28,7 @@ valid_domain() {
 }
 
 valid_email() {
-    [[ "$1" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]
+    [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]
 }
 
 valid_secret() {
@@ -633,16 +633,27 @@ curl -fsS --max-time 5 http://127.0.0.1:8081/healthz >/dev/null ||
 echo "      healthz OK"
 
 HTTPS_READY=0
-for _ in $(seq 1 60); do
-    if curl -fsSI --max-time 5 "https://${DOMAIN}/" >/dev/null 2>&1; then
-        HTTPS_READY=1
-        break
-    fi
-    sleep 2
-done
 
-[[ "$HTTPS_READY" == "1" ]] ||
-    die "HTTPS did not become ready within 120 seconds."
+# If HTTPS already works, use the existing certificate/configuration immediately.
+if curl -fsSI --max-time 10 "https://${DOMAIN}/" >/dev/null 2>&1; then
+    HTTPS_READY=1
+    echo "      Existing HTTPS certificate/config is already working."
+else
+    # Otherwise, allow Caddy time to obtain a certificate.
+    for _ in $(seq 1 90); do
+        if curl -fsSI --max-time 5 "https://${DOMAIN}/" >/dev/null 2>&1; then
+            HTTPS_READY=1
+            break
+        fi
+        sleep 2
+    done
+fi
+
+if [[ "$HTTPS_READY" != "1" ]]; then
+    echo "      Caddy diagnostic:"
+    journalctl -u caddy -n 40 --no-pager 2>/dev/null || true
+    die "HTTPS did not become ready within 180 seconds. Check Caddy/ACME/DNS."
+fi
 
 echo "      HTTPS OK"
 
