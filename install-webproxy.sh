@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="FINAL-IDEMPOTENT-CERT-6"
+VERSION="FINAL"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
