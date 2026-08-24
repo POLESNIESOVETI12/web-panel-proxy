@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="FINAL-YT-CERT"
+VERSION="FINAL-IDEMPOTENT-YT"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
@@ -33,6 +33,36 @@ valid_email() {
 
 valid_secret() {
     [[ "$1" =~ ^([0-9a-f]{32}|dd[0-9a-f]{32})$ ]]
+}
+
+port_is_listening() {
+    local port="$1"
+    ss -lnt | grep -Eq ":${port}\b"
+}
+
+port_has_expected_process() {
+    local port="$1"
+    local process="$2"
+    ss -lntp 2>/dev/null |
+        grep -Eq ":${port}\b.*users:\(\(\"${process}\""
+}
+
+check_install_port() {
+    local port="$1"
+    local process="$2"
+
+    if ! port_is_listening "$port"; then
+        echo "      :${port} free"
+        return 0
+    fi
+
+    if port_has_expected_process "$port" "$process"; then
+        echo "      :${port} already used by ${process}; continuing."
+        return 0
+    fi
+
+    ss -lntp | grep -E ":${port}\b" || true
+    die "Port ${port} is occupied by an unexpected process."
 }
 
 show_failure() {
@@ -141,14 +171,29 @@ echo "      OK"
 
 echo
 echo "[3/10] Checking ports..."
-if ss -lnt | grep -Eq ':(80|443)\b'; then
-    ss -lntp | grep -E ':(80|443)\b' || true
-    die "Port 80 or 443 is already occupied. Use a clean VPS."
+check_install_port 80 caddy
+check_install_port 443 caddy
+check_install_port 2398 mtproto-proxy
+check_install_port 8080 tproxy-server
+check_install_port 8081 tproxy-server
+
+if [[ "$REUSE_CADDY" == "1" && -f /etc/systemd/system/caddy.service.d/tproxy.conf ]]; then
+    EXISTING_DOMAIN="$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' /etc/systemd/system/caddy.service.d/tproxy.conf | head -n1)"
+    if [[ -n "$EXISTING_DOMAIN" && "$EXISTING_DOMAIN" != "$DOMAIN" ]]; then
+        die "Existing Web Proxy uses domain ${EXISTING_DOMAIN}. Use that domain or uninstall first."
+    fi
 fi
-echo "      80/443 free"
 
 echo
 echo "[4/10] Checking DNS..."
+if [[ "$REUSE_CADDY" == "1" && -f /etc/systemd/system/caddy.service.d/tproxy.conf ]]; then
+    EXISTING_EMAIL="$(sed -n 's/^Environment=ACME_EMAIL=//p' /etc/systemd/system/caddy.service.d/tproxy.conf | head -n1)"
+    if [[ -n "$EXISTING_EMAIL" ]]; then
+        EMAIL="$EXISTING_EMAIL"
+        echo "      Existing Caddy email will be reused."
+    fi
+fi
+
 DNS_IP="$(getent ahostsv4 "$DOMAIN" | awk 'NR==1{print $1}')"
 [[ -n "$DNS_IP" ]] || die "No IPv4 A record found for $DOMAIN."
 
@@ -381,38 +426,78 @@ echo "      OK"
 
 echo
 echo "[6/10] Installing Telegram Web Proxy components..."
-rm -rf "$REPO_DIR"
-git clone --depth 1 https://github.com/telegramdesktop/tproxy-server.git "$REPO_DIR"
+
+REUSE_MT=0
+REUSE_RELAY=0
+REUSE_CADDY=0
+
+if [[ -x /opt/MTProxy/objs/bin/mtproto-proxy ]] &&
+   systemctl list-unit-files mtproxy.service >/dev/null 2>&1 &&
+   port_has_expected_process 2398 mtproto-proxy; then
+    REUSE_MT=1
+    echo "      Existing MTProxy detected; reusing it."
+fi
+
+if [[ -x /usr/local/bin/tproxy-server ]] &&
+   systemctl list-unit-files tproxy-server.service >/dev/null 2>&1 &&
+   port_has_expected_process 8080 tproxy-server &&
+   port_has_expected_process 8081 tproxy-server; then
+    REUSE_RELAY=1
+    echo "      Existing tproxy-server detected; reusing it."
+fi
+
+if [[ -x /usr/local/bin/caddy ]] &&
+   systemctl list-unit-files caddy.service >/dev/null 2>&1 &&
+   port_has_expected_process 80 caddy &&
+   port_has_expected_process 443 caddy; then
+    REUSE_CADDY=1
+    echo "      Existing Caddy detected; reusing it."
+fi
+if [[ ! -d "$REPO_DIR/.git" ]]; then
+    rm -rf "$REPO_DIR"
+    git clone --depth 1 https://github.com/telegramdesktop/tproxy-server.git "$REPO_DIR"
+else
+    echo "      Existing tproxy-server source tree detected; reusing it."
+fi
 cd "$REPO_DIR"
 
-echo "      Installing Caddy..."
-caddy_version="2.11.4"
-caddy_sha512="8220d1f013b6f27510247b2360c9e0ca9f018feebd82515f07635318b34ff9777ccc8fd0b6e6f2486ce3a33fe389fbb7db12d05baa474f4587509fb4f5ebf1c9"
+if [[ "$REUSE_CADDY" == "1" ]]; then
+    echo "      Caddy already installed; reusing it."
+else
+    echo "      Installing Caddy..."
+    caddy_version="2.11.4"
+    caddy_sha512="8220d1f013b6f27510247b2360c9e0ca9f018feebd82515f07635318b34ff9777ccc8fd0b6e6f2486ce3a33fe389fbb7db12d05baa474f4587509fb4f5ebf1c9"
 
-caddy_archive="$(mktemp /tmp/caddy-linux-amd64.XXXXXX.tar.gz)"
-caddy_directory="$(mktemp -d /tmp/caddy-linux-amd64.XXXXXX)"
+    caddy_archive="$(mktemp /tmp/caddy-linux-amd64.XXXXXX.tar.gz)"
+    caddy_directory="$(mktemp -d /tmp/caddy-linux-amd64.XXXXXX)"
 
-curl --fail --silent --show-error --location \
-    --proto '=https' --proto-redir '=https' --tlsv1.2 \
-    --output "$caddy_archive" \
-    "https://github.com/caddyserver/caddy/releases/download/v${caddy_version}/caddy_${caddy_version}_linux_amd64.tar.gz"
+    curl --fail --silent --show-error --location \
+        --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --output "$caddy_archive" \
+        "https://github.com/caddyserver/caddy/releases/download/v${caddy_version}/caddy_${caddy_version}_linux_amd64.tar.gz"
 
-test "$(sha512sum "$caddy_archive" | awk '{print $1}')" = "$caddy_sha512" ||
-    die "Caddy checksum verification failed."
+    test "$(sha512sum "$caddy_archive" | awk '{print $1}')" = "$caddy_sha512" ||
+        die "Caddy checksum verification failed."
 
-tar -C "$caddy_directory" -xzf "$caddy_archive"
-install -m 0755 "$caddy_directory/caddy" /usr/local/bin/caddy
-rm -f "$caddy_archive"
-rm -rf "$caddy_directory"
+    tar -C "$caddy_directory" -xzf "$caddy_archive"
+    install -m 0755 "$caddy_directory/caddy" /usr/local/bin/caddy
+    rm -f "$caddy_archive"
+    rm -rf "$caddy_directory"
 
-if ! id caddy >/dev/null 2>&1; then
-    useradd --system --home /var/lib/caddy --shell /usr/sbin/nologin caddy
+    if ! id caddy >/dev/null 2>&1; then
+        useradd --system --home /var/lib/caddy --shell /usr/sbin/nologin caddy
+    fi
+    install -d -o root -g caddy -m 0750 /etc/caddy
+    install -d -o caddy -g caddy -m 0750 /var/lib/caddy
+
 fi
-install -d -o root -g caddy -m 0750 /etc/caddy
-install -d -o caddy -g caddy -m 0750 /var/lib/caddy
 
 echo "      Installing official MTProxy..."
-"$REPO_DIR/deploy/install-mtproxy.sh"
+if [[ "$REUSE_MT" != "1" ]]; then
+    "$REPO_DIR/deploy/install-mtproxy.sh"
+else
+    echo "      MTProxy installation skipped; existing instance is already listening on :2398."
+fi
 
 if ! id tproxy >/dev/null 2>&1; then
     useradd --system --home /nonexistent --shell /usr/sbin/nologin tproxy
@@ -455,15 +540,18 @@ else
     go_binary="/opt/go${go_version}/bin/go"
 fi
 
-echo "      Building relay..."
-(
-    cd "$REPO_DIR"
-    "$go_binary" build -trimpath -ldflags='-s -w' \
-        -o /usr/local/bin/tproxy-server ./cmd/tproxy-server
-)
-
-chown root:root /usr/local/bin/tproxy-server
-chmod 0755 /usr/local/bin/tproxy-server
+if [[ "$REUSE_RELAY" == "1" ]]; then
+    echo "      Existing tproxy-server binary is already active; reusing it."
+else
+    echo "      Building relay..."
+    (
+        cd "$REPO_DIR"
+        "$go_binary" build -trimpath -ldflags='-s -w' \
+            -o /usr/local/bin/tproxy-server ./cmd/tproxy-server
+    )
+    chown root:root /usr/local/bin/tproxy-server
+    chmod 0755 /usr/local/bin/tproxy-server
+fi
 
 echo "      Preparing site..."
 install -d -o root -g tproxy -m 0750 "$SITE_TARGET"
@@ -514,17 +602,25 @@ chown root:mtproxy /etc/mtproxy/mtproxy.env
 chmod 0640 /etc/mtproxy/mtproxy.env
 
 echo "      Installing service files..."
-install -m 0644 "$REPO_DIR/deploy/Caddyfile" /etc/caddy/Caddyfile
-install -m 0644 "$REPO_DIR/deploy/caddy.service" /etc/systemd/system/caddy.service
+if [[ "$REUSE_CADDY" != "1" ]]; then
+    install -m 0644 "$REPO_DIR/deploy/Caddyfile" /etc/caddy/Caddyfile
+    install -m 0644 "$REPO_DIR/deploy/caddy.service" /etc/systemd/system/caddy.service
+else
+    echo "      Preserving existing Caddyfile and Caddy service."
+fi
 
 install -d -m 0755 /etc/systemd/system/caddy.service.d
-cat > /etc/systemd/system/caddy.service.d/tproxy.conf <<EOF
+if [[ "$REUSE_CADDY" != "1" || ! -f /etc/systemd/system/caddy.service.d/tproxy.conf ]]; then
+    cat > /etc/systemd/system/caddy.service.d/tproxy.conf <<EOF
 [Service]
 Environment=TPROXY_HOSTNAME=$DOMAIN
 Environment=TPROXY_SITE_ROOT=/srv/tproxy-site
 Environment=ACME_EMAIL=$EMAIL
 ReadWritePaths=/etc/caddy
 EOF
+else
+    echo "      Preserving existing Caddy environment."
+fi
 
 install -d -o caddy -g caddy -m 0750 /etc/caddy/caddy
 
