@@ -9,7 +9,6 @@ SITE_TARGET="/srv/tproxy-site"
 REUSE_MT=0
 REUSE_RELAY=0
 REUSE_CADDY=0
-MT_PORT=2398
 CHANNEL_B64="aHR0cHM6Ly93d3cueW91dHViZS5jb20vQFBPTEVTTklFU09WRVRJMTI="
 
 die() {
@@ -49,67 +48,6 @@ port_has_expected_process() {
     local process="$2"
     ss -lntp 2>/dev/null |
         grep -Eq ":${port}\b.*users:\(\(\"${process}\""
-}
-
-find_mtproxy_port() {
-    local detected=""
-
-    detected="$(
-        ss -lntpH 2>/dev/null |
-            awk '
-                /mtproto-proxy/ {
-                    addr=$4
-                    sub(/^.*:/, "", addr)
-                    if (addr ~ /^[0-9]+$/) {
-                        print addr
-                        exit
-                    }
-                }
-            '
-    )"
-
-    if [[ "$detected" =~ ^[0-9]+$ ]]; then
-        printf '%s' "$detected"
-        return 0
-    fi
-
-    # Fallback: inspect the generated MTProxy config.
-    if [[ -r /etc/mtproxy/proxy-multi.conf ]]; then
-        detected="$(
-            grep -Eo '0\.0\.0\.0:[0-9]+|127\.0\.0\.1:[0-9]+' \
-                /etc/mtproxy/proxy-multi.conf 2>/dev/null |
-            grep -Eo '[0-9]+$' |
-            head -n1 || true
-        )"
-        if [[ "$detected" =~ ^[0-9]+$ ]]; then
-            printf '%s' "$detected"
-            return 0
-        fi
-    fi
-
-    return 1
-}
-
-wait_for_mtproxy() {
-    local port=""
-    for _ in $(seq 1 30); do
-        if systemctl is-active --quiet mtproxy; then
-            port="$(find_mtproxy_port || true)"
-            if [[ -n "$port" ]]; then
-                printf '%s' "$port"
-                return 0
-            fi
-        fi
-        sleep 1
-    done
-    return 1
-}
-
-repair_mtproxy() {
-    echo "      MTProxy recovery: fixing permissions and restarting..."
-    fix_mtproxy_permissions || true
-    systemctl reset-failed mtproxy.service 2>/dev/null || true
-    restart_service_reliably mtproxy.service 3 || true
 }
 
 check_install_port() {
@@ -238,12 +176,7 @@ echo
 echo "[3/10] Checking ports..."
 check_install_port 80 caddy
 check_install_port 443 caddy
-if EXISTING_MTPROXY_PORT="$(find_mtproxy_port 2>/dev/null)"; then
-    MT_PORT="$EXISTING_MTPROXY_PORT"
-    echo "      Existing MTProxy detected on :${MT_PORT}; continuing."
-else
-    echo "      MTProxy is not running yet; its port will be detected after startup."
-fi
+check_install_port 2398 mtproto-proxy
 check_install_port 8080 tproxy-server
 check_install_port 8081 tproxy-server
 
@@ -795,12 +728,10 @@ echo "[6/10] Installing Telegram Web Proxy components..."
 
 
 if [[ -x /opt/MTProxy/objs/bin/mtproto-proxy ]] &&
-   systemctl list-unit-files mtproxy.service >/dev/null 2>&1; then
-    if EXISTING_MTPROXY_PORT="$(find_mtproxy_port 2>/dev/null)"; then
-        MT_PORT="$EXISTING_MTPROXY_PORT"
-        REUSE_MT=1
-        echo "      Existing MTProxy detected on :${MT_PORT}; reusing it."
-    fi
+   systemctl list-unit-files mtproxy.service >/dev/null 2>&1 &&
+   port_has_expected_process 2398 mtproto-proxy; then
+    REUSE_MT=1
+    echo "      Existing MTProxy detected; reusing it."
 fi
 
 if [[ -x /usr/local/bin/tproxy-server ]] &&
@@ -871,30 +802,13 @@ fi
 # The official deployment leaves the MTProxy build tree root-only.
 # Make the complete executable path traversable before systemd starts it.
 fix_mtproxy_permissions() {
-    if ! id mtproxy >/dev/null 2>&1; then
-        echo "      MTProxy user missing; creating it..."
-        useradd --system             --home /nonexistent             --no-create-home             --shell /usr/sbin/nologin             mtproxy
-    fi
-
-    chmod 0755 /opt/MTProxy 2>/dev/null || true
-    chmod 0755 /opt/MTProxy/objs 2>/dev/null || true
-    chmod 0755 /opt/MTProxy/objs/bin 2>/dev/null || true
-    chmod 0755 /opt/MTProxy/objs/bin/mtproto-proxy 2>/dev/null || true
-
-    chown root:root /opt/MTProxy/objs/bin/mtproto-proxy 2>/dev/null || true
+    chmod 0755 /opt/MTProxy
+    chmod 0755 /opt/MTProxy/objs
+    chmod 0755 /opt/MTProxy/objs/bin
     chmod 0755 /opt/MTProxy/objs/bin/mtproto-proxy
 
-    # Verify path traversal and execution as the service user.
-    if ! runuser -u mtproxy -- /bin/test -x /opt/MTProxy/objs/bin/mtproto-proxy; then
-        echo "      MTProxy permission check failed; attempting automatic repair..."
-        namei -l /opt/MTProxy/objs/bin/mtproto-proxy || true
-
-        chmod 0755 /opt /opt/MTProxy /opt/MTProxy/objs /opt/MTProxy/objs/bin
-        chown -R root:root /opt/MTProxy/objs/bin
-
-        runuser -u mtproxy -- /bin/test -x /opt/MTProxy/objs/bin/mtproto-proxy ||
-            die "MTProxy binary is not executable by the mtproxy user after automatic repair."
-    fi
+    runuser -u mtproxy -- test -x /opt/MTProxy/objs/bin/mtproto-proxy ||
+        die "mtproxy user cannot execute mtproto-proxy."
 }
 
 echo "      Installing Go relay..."
@@ -962,7 +876,7 @@ cat > /etc/tproxy-server/config.json <<EOF
 EOF
 
 cat > /etc/tproxy-server/profiles.json <<EOF
-{"profiles":[{"name":"default","secret":"$SECRET","backend":"127.0.0.1:$MT_PORT","carrier_mode":"https-lanes"}]}
+{"profiles":[{"name":"default","secret":"$SECRET","backend":"127.0.0.1:2398"}]}
 EOF
 
 chown root:tproxy /etc/tproxy-server/config.json /etc/tproxy-server/profiles.json
@@ -1014,57 +928,6 @@ install -m 0644 "$REPO_DIR/deploy/refresh-mtproxy-config.timer" /etc/systemd/sys
 install -m 0644 "$REPO_DIR/deploy/firewall.nft" /etc/tproxy-server/firewall.nft
 install -m 0755 "$REPO_DIR/deploy/refresh-mtproxy-config.sh" /usr/local/sbin/refresh-mtproxy-config
 
-
-start_service_reliably() {
-    local unit="$1"
-    local tries="${2:-3}"
-
-    systemctl daemon-reload
-    systemctl reset-failed "$unit" 2>/dev/null || true
-
-    for _ in $(seq 1 "$tries"); do
-        if systemctl is-active --quiet "$unit"; then
-            return 0
-        fi
-
-        systemctl start "$unit" 2>/dev/null || true
-
-        if systemctl is-active --quiet "$unit"; then
-            return 0
-        fi
-
-        sleep 2
-    done
-
-    return 1
-}
-
-restart_service_reliably() {
-    local unit="$1"
-    local tries="${2:-3}"
-
-    # Never stop an already healthy unit merely to reapply the same state.
-    # Only attempt a restart when the unit is inactive/failed.
-    if systemctl is-active --quiet "$unit"; then
-        return 0
-    fi
-
-    systemctl reset-failed "$unit" 2>/dev/null || true
-
-    for _ in $(seq 1 "$tries"); do
-        systemctl start "$unit" 2>/dev/null || true
-
-        if systemctl is-active --quiet "$unit"; then
-            return 0
-        fi
-
-        sleep 2
-        systemctl reset-failed "$unit" 2>/dev/null || true
-    done
-
-    return 1
-}
-
 echo "      Preflight validation..."
 fix_mtproxy_permissions
 runuser -u tproxy -- test -r "$SITE_TARGET/index.html" ||
@@ -1085,99 +948,38 @@ ACME_EMAIL="$EMAIL" \
 systemctl daemon-reload
 
 echo "      Starting firewall..."
-systemctl enable tproxy-firewall.service 2>/dev/null || true
-if ! start_service_reliably tproxy-firewall.service 3; then
-    echo "      Firewall start failed; retrying after nftables cleanup..."
-    nft delete table inet tproxy_backend 2>/dev/null || true
-    start_service_reliably tproxy-firewall.service 3 ||
-        die "tproxy-firewall could not be started."
-fi
+systemctl enable --now tproxy-firewall.service
 
 echo "      Starting MTProxy..."
 fix_mtproxy_permissions
-systemctl enable mtproxy.service 2>/dev/null || true
+systemctl enable mtproxy.service
+systemctl reset-failed mtproxy.service 2>/dev/null || true
+systemctl restart mtproxy.service
 
-MT_PORT="$(find_mtproxy_port 2>/dev/null || true)"
-
-if [[ -n "$MT_PORT" ]]; then
-    echo "      Existing MTProxy is already listening on :${MT_PORT}; keeping it running."
-else
-    if ! start_service_reliably mtproxy.service 3; then
-        echo "      MTProxy did not start; attempting automatic recovery..."
-        repair_mtproxy || true
+MT_READY=0
+for _ in $(seq 1 20); do
+    if systemctl is-active --quiet mtproxy &&
+       ss -lnt | grep -Eq ':(2398)\b'; then
+        MT_READY=1
+        break
     fi
-    MT_PORT="$(wait_for_mtproxy || true)"
-fi
-
-if [[ -z "$MT_PORT" ]]; then
-    echo "      MTProxy still has no detected listening port; attempting final recovery..."
-    repair_mtproxy || true
-    MT_PORT="$(wait_for_mtproxy || true)"
-fi
-
-if [[ -z "$MT_PORT" ]]; then
-    echo
-    echo "      MTProxy diagnostic:"
-    systemctl --no-pager --full status mtproxy.service 2>/dev/null || true
-    journalctl -u mtproxy -n 60 --no-pager 2>/dev/null || true
-    die "MTProxy did not become ready on any listening port."
-fi
-
-echo "      MTProxy :${MT_PORT} OK"
-
-if ! timeout 3 bash -c "</dev/tcp/127.0.0.1/${MT_PORT}" 2>/dev/null; then
-    echo "      MTProxy TCP check failed on :${MT_PORT}; attempting recovery..."
-    repair_mtproxy || true
-    MT_PORT="$(wait_for_mtproxy || true)"
-    [[ -n "$MT_PORT" ]] || die "MTProxy did not expose a usable TCP port."
-fi
-
-
-# Synchronize the relay backend with the port that MTProxy actually uses.
-sed -i -E "s#127\.0\.0\.1:[0-9]+#127.0.0.1:${MT_PORT}#g" /etc/tproxy-server/config.json
-cat > /etc/tproxy-server/profiles.json <<EOF
-{"profiles":[{"name":"default","secret":"$SECRET","backend":"127.0.0.1:$MT_PORT","carrier_mode":"https-lanes"}]}
-EOF
-chown root:tproxy /etc/tproxy-server/config.json /etc/tproxy-server/profiles.json
-chmod 0640 /etc/tproxy-server/config.json
-chmod 0400 /etc/tproxy-server/profiles.json
-
-grep -q '"carrier_mode":"https-lanes"' /etc/tproxy-server/profiles.json ||
-    die "WEB carrier profile was not configured correctly."
-
-echo "      WEB carrier mode: https-lanes"
+    sleep 1
+done
+[[ "$MT_READY" == "1" ]] || die "MTProxy did not start on port 2398."
+echo "      MTProxy :2398 OK"
 
 echo "      Starting relay..."
 runuser -u tproxy -- test -r "$SITE_TARGET/index.html" ||
     die "tproxy user cannot read site before relay start."
 
-systemctl enable tproxy-server.service 2>/dev/null || true
-if systemctl is-active --quiet tproxy-server.service; then
-    echo "      Existing relay is already active; keeping it running."
-else
-    if ! start_service_reliably tproxy-server.service 3; then
-        echo "      Relay start failed; attempting automatic recovery..."
-        restart_service_reliably tproxy-server.service 3 ||
-            die "tproxy-server could not be started."
-    fi
-fi
+systemctl enable tproxy-server.service
+systemctl reset-failed tproxy-server.service 2>/dev/null || true
+systemctl restart tproxy-server.service
 
 RELAY_READY=0
-
-check_relay() {
-    local health ready
-    if ! systemctl is-active --quiet tproxy-server.service; then
-        return 1
-    fi
-
-    health="$(curl -fsS --max-time 2 http://127.0.0.1:8081/healthz 2>/dev/null || true)"
-    ready="$(curl -fsS --max-time 2 http://127.0.0.1:8081/readyz 2>/dev/null || true)"
-
-    [[ "$health" == "ok" && "$ready" == "ready" ]]
-}
-
 for _ in $(seq 1 30); do
-    if check_relay; then
+    if systemctl is-active --quiet tproxy-server &&
+       curl -fsS --max-time 2 http://127.0.0.1:8081/readyz >/dev/null 2>&1; then
         RELAY_READY=1
         break
     fi
@@ -1185,55 +987,19 @@ for _ in $(seq 1 30); do
 done
 
 if [[ "$RELAY_READY" != "1" ]]; then
-    echo "      Relay not ready; collecting diagnostics and repairing..."
+    echo "      Relay not ready; running automatic recovery..."
+    fix_mtproxy_permissions
+    chown -R root:tproxy "$SITE_TARGET"
+    find "$SITE_TARGET" -type d -exec chmod 0750 {} +
+    find "$SITE_TARGET" -type f -exec chmod 0640 {} +
+    systemctl reset-failed mtproxy tproxy-server 2>/dev/null || true
+    systemctl restart mtproxy.service
+    sleep 2
+    systemctl restart tproxy-server.service
 
-    echo "      --- relay status ---"
-    systemctl --no-pager --full status tproxy-server.service 2>/dev/null || true
-
-    echo "      --- relay log ---"
-    journalctl -u tproxy-server -n 80 --no-pager 2>/dev/null || true
-
-    echo "      --- healthz ---"
-    curl -i --max-time 5 http://127.0.0.1:8081/healthz 2>/dev/null || true
-
-    echo "      --- readyz ---"
-    curl -i --max-time 5 http://127.0.0.1:8081/readyz 2>/dev/null || true
-
-    echo "      --- backend sockets ---"
-    ss -lntp 2>/dev/null | grep -E ':(2398|8888|8080|8081)\b' || true
-
-    fix_mtproxy_permissions || true
-
-    # Detect the actual MTProxy port again before rewriting the relay profile.
-    NEW_MT_PORT="$(find_mtproxy_port 2>/dev/null || true)"
-    if [[ -n "$NEW_MT_PORT" ]]; then
-        MT_PORT="$NEW_MT_PORT"
-    fi
-
-    cat > /etc/tproxy-server/profiles.json <<EOF
-{"profiles":[{"name":"default","secret":"$SECRET","backend":"127.0.0.1:$MT_PORT","carrier_mode":"https-lanes"}]}
-EOF
-
-    chown root:tproxy /etc/tproxy-server/profiles.json
-    chmod 0400 /etc/tproxy-server/profiles.json
-
-    # Verify the relay configuration before touching the service.
-    if ! /usr/local/bin/tproxy-server \
-        -config /etc/tproxy-server/config.json \
-        -profiles-file /etc/tproxy-server/profiles.json \
-        -check; then
-        echo "      Relay config check failed; reloading profile permissions/configuration..."
-        chown root:tproxy /etc/tproxy-server/config.json /etc/tproxy-server/profiles.json
-        chmod 0640 /etc/tproxy-server/config.json
-        chmod 0400 /etc/tproxy-server/profiles.json
-    fi
-
-    if ! systemctl is-active --quiet tproxy-server.service; then
-        restart_service_reliably tproxy-server.service 3 || true
-    fi
-
-    for _ in $(seq 1 30); do
-        if check_relay; then
+    for _ in $(seq 1 20); do
+        if systemctl is-active --quiet tproxy-server &&
+           curl -fsS --max-time 2 http://127.0.0.1:8081/readyz >/dev/null 2>&1; then
             RELAY_READY=1
             break
         fi
@@ -1241,48 +1007,15 @@ EOF
     done
 fi
 
-if [[ "$RELAY_READY" != "1" ]]; then
-    echo
-    echo "============================================================"
-    echo "              RELAY НЕ ГОТОВ"
-    echo "============================================================"
-    echo
-    echo "tproxy-server запущен, но не прошёл /healthz или /readyz."
-    echo
-    echo "Последнее состояние:"
-    systemctl --no-pager --full status tproxy-server.service 2>/dev/null || true
-    echo
-    echo "Проверка /healthz:"
-    curl -i --max-time 5 http://127.0.0.1:8081/healthz 2>/dev/null || true
-    echo
-    echo "Проверка /readyz:"
-    curl -i --max-time 5 http://127.0.0.1:8081/readyz 2>/dev/null || true
-    echo
-    echo "============================================================"
-    die "ПОПРОБУЙТЕ ЗАНОВО"
-fi
-
-echo "      Relay /healthz and /readyz OK"
+[[ "$RELAY_READY" == "1" ]] || die "tproxy-server did not become ready."
+echo "      Relay /readyz OK"
 
 echo "      Starting refresh timer..."
-systemctl enable refresh-mtproxy-config.timer 2>/dev/null || true
-systemctl start refresh-mtproxy-config.timer 2>/dev/null || true
+systemctl enable --now refresh-mtproxy-config.timer
 
 echo "      Starting Caddy..."
-systemctl enable caddy.service 2>/dev/null || true
-
-if systemctl is-active --quiet caddy.service &&
-   curl -fsSI --max-time 10 "https://${DOMAIN}/" >/dev/null 2>&1; then
-    echo "      Existing HTTPS is healthy; keeping Caddy running."
-else
-    if ! start_service_reliably caddy.service 3; then
-        echo "      Caddy is not healthy; attempting clean recovery..."
-        systemctl kill --kill-who=main --signal=SIGKILL caddy.service 2>/dev/null || true
-        systemctl reset-failed caddy.service 2>/dev/null || true
-        start_service_reliably caddy.service 3 ||
-            die "Caddy could not be started."
-    fi
-fi
+systemctl enable caddy.service
+systemctl restart caddy.service
 
 echo
 echo "[9/10] Running health checks..."
@@ -1290,12 +1023,6 @@ curl -fsS --max-time 5 http://127.0.0.1:8081/healthz >/dev/null ||
     die "tproxy-server healthz failed."
 
 echo "      healthz OK"
-
-if ! systemctl is-active --quiet caddy.service; then
-    echo "      Caddy is not active; attempting recovery..."
-    start_service_reliably caddy.service 3 ||
-        die "Caddy is not running."
-fi
 
 HTTPS_READY=0
 
@@ -1319,28 +1046,16 @@ if [[ "$HTTPS_READY" != "1" ]]; then
 fi
 
 echo "      HTTPS OK"
-echo "      Backend MTProxy port: ${MT_PORT}"
-echo "      Services: mtproxy=$(systemctl is-active mtproxy 2>/dev/null || true) relay=$(systemctl is-active tproxy-server 2>/dev/null || true) caddy=$(systemctl is-active caddy 2>/dev/null || true)"
-
 
 echo
 echo "[10/10] Checking persistence and ports..."
 for unit in mtproxy tproxy-server caddy; do
-    systemctl is-active --quiet "$unit" || {
-        echo "      $unit is not active; attempting final start..."
-        start_service_reliably "$unit" 3 ||
-            die "$unit is not active."
-    }
+    systemctl is-active --quiet "$unit" || die "$unit is not active."
+    systemctl is-enabled --quiet "$unit" || die "$unit is not enabled."
 done
 
-systemctl is-active --quiet tproxy-firewall || {
-    echo "      tproxy-firewall is not active; attempting final start..."
-    start_service_reliably tproxy-firewall.service 3 ||
-        die "tproxy-firewall is not active."
-}
-
-systemctl enable refresh-mtproxy-config.timer 2>/dev/null || true
-start_service_reliably refresh-mtproxy-config.timer 2 >/dev/null 2>&1 || true
+systemctl is-active --quiet tproxy-firewall || die "tproxy-firewall is not active."
+systemctl is-enabled --quiet refresh-mtproxy-config.timer || die "refresh timer is not enabled."
 
 runuser -u mtproxy -- test -x /opt/MTProxy/objs/bin/mtproto-proxy ||
     die "Final MTProxy permission check failed."
@@ -1348,12 +1063,8 @@ runuser -u mtproxy -- test -x /opt/MTProxy/objs/bin/mtproto-proxy ||
 runuser -u tproxy -- test -r /srv/tproxy-site/index.html ||
     die "Final site permission check failed."
 
-for p in "$MT_PORT" 8080 8081 80 443; do
-    if ! ss -lnt | grep -Eq ":(${p})\b"; then
-        echo "      Missing expected listening port: ${p}" >&2
-        ss -lntp || true
-        die "Expected port ${p} is not listening."
-    fi
+for p in 2398 8080 8081 80 443; do
+    ss -lnt | grep -Eq ":(${p})\b" || die "Expected port ${p} is not listening."
 done
 
 TELEGRAM_SECRET="${SECRET#dd}"
