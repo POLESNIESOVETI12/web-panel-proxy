@@ -52,22 +52,39 @@ port_has_expected_process() {
 }
 
 find_mtproxy_port() {
-    local detected
+    local detected=""
+
     detected="$(
         ss -lntpH 2>/dev/null |
-            awk '/mtproto-proxy/ {
-                n=$4
-                sub(/^.*:/, "", n)
-                if (n ~ /^[0-9]+$/) {
-                    print n
-                    exit
+            awk '
+                /mtproto-proxy/ {
+                    addr=$4
+                    sub(/^.*:/, "", addr)
+                    if (addr ~ /^[0-9]+$/) {
+                        print addr
+                        exit
+                    }
                 }
-            }'
+            '
     )"
 
     if [[ "$detected" =~ ^[0-9]+$ ]]; then
         printf '%s' "$detected"
         return 0
+    fi
+
+    # Fallback: inspect the generated MTProxy config.
+    if [[ -r /etc/mtproxy/proxy-multi.conf ]]; then
+        detected="$(
+            grep -Eo '0\.0\.0\.0:[0-9]+|127\.0\.0\.1:[0-9]+' \
+                /etc/mtproxy/proxy-multi.conf 2>/dev/null |
+            grep -Eo '[0-9]+$' |
+            head -n1 || true
+        )"
+        if [[ "$detected" =~ ^[0-9]+$ ]]; then
+            printf '%s' "$detected"
+            return 0
+        fi
     fi
 
     return 1
@@ -1027,13 +1044,15 @@ restart_service_reliably() {
     local unit="$1"
     local tries="${2:-3}"
 
+    # Never stop an already healthy unit merely to reapply the same state.
+    # Only attempt a restart when the unit is inactive/failed.
+    if systemctl is-active --quiet "$unit"; then
+        return 0
+    fi
+
     systemctl reset-failed "$unit" 2>/dev/null || true
 
     for _ in $(seq 1 "$tries"); do
-        # stop may time out for Caddy because it uses a graceful shutdown.
-        # Never leave the unit dead just because the graceful stop exceeded TimeoutStopSec.
-        systemctl stop "$unit" 2>/dev/null || true
-        systemctl reset-failed "$unit" 2>/dev/null || true
         systemctl start "$unit" 2>/dev/null || true
 
         if systemctl is-active --quiet "$unit"; then
@@ -1041,6 +1060,7 @@ restart_service_reliably() {
         fi
 
         sleep 2
+        systemctl reset-failed "$unit" 2>/dev/null || true
     done
 
     return 1
@@ -1077,18 +1097,22 @@ fi
 echo "      Starting MTProxy..."
 fix_mtproxy_permissions
 systemctl enable mtproxy.service
-systemctl reset-failed mtproxy.service 2>/dev/null || true
 
 MT_PORT="$(find_mtproxy_port 2>/dev/null || true)"
 
-if [[ -z "$MT_PORT" ]]; then
-    restart_service_reliably mtproxy.service 3 || true
+if [[ -n "$MT_PORT" ]]; then
+    echo "      Existing MTProxy is already listening on :${MT_PORT}; keeping it running."
+else
+    if ! start_service_reliably mtproxy.service 3; then
+        echo "      MTProxy did not start; attempting automatic recovery..."
+        repair_mtproxy || true
+    fi
     MT_PORT="$(wait_for_mtproxy || true)"
 fi
 
 if [[ -z "$MT_PORT" ]]; then
-    echo "      MTProxy did not expose a listening port; attempting automatic recovery..."
-    repair_mtproxy
+    echo "      MTProxy still has no detected listening port; attempting final recovery..."
+    repair_mtproxy || true
     MT_PORT="$(wait_for_mtproxy || true)"
 fi
 
@@ -1116,11 +1140,14 @@ runuser -u tproxy -- test -r "$SITE_TARGET/index.html" ||
     die "tproxy user cannot read site before relay start."
 
 systemctl enable tproxy-server.service
-if ! start_service_reliably tproxy-server.service 3; then
-    echo "      Relay start failed; attempting automatic recovery..."
-    systemctl reset-failed tproxy-server.service 2>/dev/null || true
-    restart_service_reliably tproxy-server.service 3 ||
-        die "tproxy-server could not be started."
+if systemctl is-active --quiet tproxy-server.service; then
+    echo "      Existing relay is already active; keeping it running."
+else
+    if ! start_service_reliably tproxy-server.service 3; then
+        echo "      Relay start failed; attempting automatic recovery..."
+        restart_service_reliably tproxy-server.service 3 ||
+            die "tproxy-server could not be started."
+    fi
 fi
 
 RELAY_READY=0
@@ -1187,12 +1214,12 @@ systemctl enable --now refresh-mtproxy-config.timer
 echo "      Starting Caddy..."
 systemctl enable caddy.service
 
-if [[ "$REUSE_EXISTING_HTTPS" == "1" ]] &&
+if systemctl is-active --quiet caddy.service &&
    curl -fsSI --max-time 10 "https://${DOMAIN}/" >/dev/null 2>&1; then
     echo "      Existing HTTPS is healthy; keeping Caddy running."
 else
-    if ! restart_service_reliably caddy.service 3; then
-        echo "      Caddy restart did not complete normally; forcing a clean service recovery..."
+    if ! start_service_reliably caddy.service 3; then
+        echo "      Caddy is not healthy; attempting clean recovery..."
         systemctl kill --kill-who=main --signal=SIGKILL caddy.service 2>/dev/null || true
         systemctl reset-failed caddy.service 2>/dev/null || true
         start_service_reliably caddy.service 3 ||
