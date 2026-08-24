@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="FINAL"
+VERSION="FINAL-EMAIL-FIRST"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
@@ -125,6 +125,14 @@ while true; do
 done
 
 echo
+while true; do
+    read -r -p "ACME email (example: admin@example.com): " EMAIL
+    EMAIL="$(trim "$EMAIL")"
+    valid_email "$EMAIL" && break
+    echo "Неверный email. Используйте латинские символы, например admin@example.com"
+done
+
+echo
 read -r -p "Generate a secure secret automatically? [Y/n]: " MODE
 MODE="$(trim "${MODE:-Y}")"
 
@@ -211,34 +219,74 @@ if [[ "$REUSE_CADDY" == "1" && -f "$EXISTING_CADDY_CONF" ]]; then
        curl -fsSI --max-time 10 "https://${EXISTING_DOMAIN}/" >/dev/null 2>&1; then
         REUSE_EXISTING_HTTPS=1
         DOMAIN="$EXISTING_DOMAIN"
-        [[ -n "$EXISTING_EMAIL" ]] && EMAIL="$EXISTING_EMAIL"
         echo "      Existing HTTPS is already working; certificate/configuration will be reused."
+        echo "      The email entered above will be kept for this run."
     else
         echo "      Existing Caddy found, but HTTPS is not currently working."
         if [[ -n "$EXISTING_EMAIL" ]] && valid_email "$EXISTING_EMAIL"; then
-            EMAIL="$EXISTING_EMAIL"
-            echo "      Existing ACME email is valid; reusing it."
+            echo "      Existing ACME email is valid."
         else
             echo "      Existing ACME email is missing or invalid."
-            while true; do
-                read -r -p "ACME email (ASCII, e.g. admin@example.com): " EMAIL
-                EMAIL="$(trim "$EMAIL")"
-                valid_email "$EMAIL" && break
-                echo "Invalid email. Use Latin characters, e.g. admin@example.com"
-            done
+            echo "      The email entered above will be used."
         fi
     fi
-else
-    while true; do
-        read -r -p "ACME email (ASCII, e.g. admin@example.com): " EMAIL
-        EMAIL="$(trim "$EMAIL")"
-        valid_email "$EMAIL" && break
-        echo "Invalid email. Use Latin characters, e.g. admin@example.com"
-    done
 fi
 
-echo
 echo "[4/10] Checking DNS..."
+
+if [[ "$REUSE_EXISTING_HTTPS" == "1" ]]; then
+    DNS_IP="$(getent ahostsv4 "$DOMAIN" | awk 'NR==1{print $1}')"
+    if [[ -z "$DNS_IP" ]]; then
+        echo
+        echo "============================================================"
+        echo "                DNS НЕ ПРИВЯЗАН"
+        echo "============================================================"
+        echo
+        echo "Домен не привязан к этому VPS."
+        echo
+        echo "Проверьте A-запись домена и попробуйте заново."
+        echo
+        echo "============================================================"
+        die "ПОПРОБУЙТЕ ЗАНОВО"
+    fi
+    echo "      Existing HTTPS verified: $DOMAIN -> $DNS_IP"
+else
+    DNS_IP="$(getent ahostsv4 "$DOMAIN" | awk 'NR==1{print $1}')"
+    if [[ -z "$DNS_IP" ]]; then
+        echo
+        echo "============================================================"
+        echo "                DNS НЕ ПРИВЯЗАН"
+        echo "============================================================"
+        echo
+        echo "Домен не привязан к этому VPS."
+        echo
+        echo "Проверьте A-запись домена и попробуйте заново."
+        echo
+        echo "============================================================"
+        die "ПОПРОБУЙТЕ ЗАНОВО"
+    fi
+
+    VPS_IP="$(curl -4fsS --max-time 10 https://api.ipify.org || true)"
+    if [[ -n "$VPS_IP" && "$DNS_IP" != "$VPS_IP" ]]; then
+        echo
+        echo "============================================================"
+        echo "                DNS НЕ ПРИВЯЗАН"
+        echo "============================================================"
+        echo
+        echo "Домен не привязан к этому VPS."
+        echo
+        echo "DNS: $DNS_IP"
+        echo "VPS: $VPS_IP"
+        echo
+        echo "Проверьте A-запись домена и попробуйте заново."
+        echo
+        echo "============================================================"
+        die "ПОПРОБУЙТЕ ЗАНОВО"
+    fi
+    echo "      $DOMAIN -> $DNS_IP"
+fi
+
+
 
 if [[ "$REUSE_EXISTING_HTTPS" == "1" ]]; then
     DNS_IP="$(getent ahostsv4 "$DOMAIN" | awk 'NR==1{print $1}')"
