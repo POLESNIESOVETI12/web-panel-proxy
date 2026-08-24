@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="FINAL-AUTOREPAIR-2"
+VERSION="FINAL-AUTOREPAIR-3"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
@@ -988,6 +988,54 @@ install -m 0644 "$REPO_DIR/deploy/refresh-mtproxy-config.timer" /etc/systemd/sys
 install -m 0644 "$REPO_DIR/deploy/firewall.nft" /etc/tproxy-server/firewall.nft
 install -m 0755 "$REPO_DIR/deploy/refresh-mtproxy-config.sh" /usr/local/sbin/refresh-mtproxy-config
 
+
+start_service_reliably() {
+    local unit="$1"
+    local tries="${2:-3}"
+
+    systemctl daemon-reload
+    systemctl reset-failed "$unit" 2>/dev/null || true
+
+    for _ in $(seq 1 "$tries"); do
+        if systemctl is-active --quiet "$unit"; then
+            return 0
+        fi
+
+        systemctl start "$unit" 2>/dev/null || true
+
+        if systemctl is-active --quiet "$unit"; then
+            return 0
+        fi
+
+        sleep 2
+    done
+
+    return 1
+}
+
+restart_service_reliably() {
+    local unit="$1"
+    local tries="${2:-3}"
+
+    systemctl reset-failed "$unit" 2>/dev/null || true
+
+    for _ in $(seq 1 "$tries"); do
+        # stop may time out for Caddy because it uses a graceful shutdown.
+        # Never leave the unit dead just because the graceful stop exceeded TimeoutStopSec.
+        systemctl stop "$unit" 2>/dev/null || true
+        systemctl reset-failed "$unit" 2>/dev/null || true
+        systemctl start "$unit" 2>/dev/null || true
+
+        if systemctl is-active --quiet "$unit"; then
+            return 0
+        fi
+
+        sleep 2
+    done
+
+    return 1
+}
+
 echo "      Preflight validation..."
 fix_mtproxy_permissions
 runuser -u tproxy -- test -r "$SITE_TARGET/index.html" ||
@@ -1008,7 +1056,13 @@ ACME_EMAIL="$EMAIL" \
 systemctl daemon-reload
 
 echo "      Starting firewall..."
-systemctl enable --now tproxy-firewall.service
+systemctl enable tproxy-firewall.service
+if ! start_service_reliably tproxy-firewall.service 3; then
+    echo "      Firewall start failed; retrying after nftables cleanup..."
+    nft delete table inet tproxy_backend 2>/dev/null || true
+    start_service_reliably tproxy-firewall.service 3 ||
+        die "tproxy-firewall could not be started."
+fi
 
 echo "      Starting MTProxy..."
 fix_mtproxy_permissions
@@ -1018,7 +1072,7 @@ systemctl reset-failed mtproxy.service 2>/dev/null || true
 MT_PORT="$(find_mtproxy_port 2>/dev/null || true)"
 
 if [[ -z "$MT_PORT" ]]; then
-    systemctl restart mtproxy.service
+    restart_service_reliably mtproxy.service 3 || true
     MT_PORT="$(wait_for_mtproxy || true)"
 fi
 
@@ -1052,8 +1106,12 @@ runuser -u tproxy -- test -r "$SITE_TARGET/index.html" ||
     die "tproxy user cannot read site before relay start."
 
 systemctl enable tproxy-server.service
-systemctl reset-failed tproxy-server.service 2>/dev/null || true
-systemctl restart tproxy-server.service
+if ! start_service_reliably tproxy-server.service 3; then
+    echo "      Relay start failed; attempting automatic recovery..."
+    systemctl reset-failed tproxy-server.service 2>/dev/null || true
+    restart_service_reliably tproxy-server.service 3 ||
+        die "tproxy-server could not be started."
+fi
 
 RELAY_READY=0
 for _ in $(seq 1 30); do
@@ -1087,7 +1145,7 @@ EOF
     chmod 0400 /etc/tproxy-server/profiles.json
 
     systemctl reset-failed mtproxy tproxy-server 2>/dev/null || true
-    systemctl restart mtproxy.service
+    restart_service_reliably mtproxy.service 3 || true
     sleep 2
 
     NEW_MT_PORT="$(wait_for_mtproxy || true)"
@@ -1097,7 +1155,8 @@ EOF
         sed -i -E "s#127\.0\.0\.1:[0-9]+#127.0.0.1:${MT_PORT}#g" /etc/tproxy-server/profiles.json
     fi
 
-    systemctl restart tproxy-server.service
+    restart_service_reliably tproxy-server.service 3 ||
+        true
 
     for _ in $(seq 1 30); do
         if systemctl is-active --quiet tproxy-server &&
@@ -1117,7 +1176,19 @@ systemctl enable --now refresh-mtproxy-config.timer
 
 echo "      Starting Caddy..."
 systemctl enable caddy.service
-systemctl restart caddy.service
+
+if [[ "$REUSE_EXISTING_HTTPS" == "1" ]] &&
+   curl -fsSI --max-time 10 "https://${DOMAIN}/" >/dev/null 2>&1; then
+    echo "      Existing HTTPS is healthy; keeping Caddy running."
+else
+    if ! restart_service_reliably caddy.service 3; then
+        echo "      Caddy restart did not complete normally; forcing a clean service recovery..."
+        systemctl kill --kill-who=main --signal=SIGKILL caddy.service 2>/dev/null || true
+        systemctl reset-failed caddy.service 2>/dev/null || true
+        start_service_reliably caddy.service 3 ||
+            die "Caddy could not be started."
+    fi
+fi
 
 echo
 echo "[9/10] Running health checks..."
@@ -1125,6 +1196,12 @@ curl -fsS --max-time 5 http://127.0.0.1:8081/healthz >/dev/null ||
     die "tproxy-server healthz failed."
 
 echo "      healthz OK"
+
+if ! systemctl is-active --quiet caddy.service; then
+    echo "      Caddy is not active; attempting recovery..."
+    start_service_reliably caddy.service 3 ||
+        die "Caddy is not running."
+fi
 
 HTTPS_READY=0
 
