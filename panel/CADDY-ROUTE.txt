@@ -1,0 +1,7 @@
+# Put this import INSIDE the existing {$TPROXY_HOSTNAME} site block:
+import /etc/caddy/panel-route.caddy
+
+# panel-route.caddy contains:
+handle_path /panel/* {
+    reverse_proxy 127.0.0.1:8090
+}
