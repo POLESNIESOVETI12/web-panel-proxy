@@ -2,13 +2,14 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="FINAL-IDEMPOTENT-CERT-3-COOL"
+VERSION="FINAL-AUTOREPAIR"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
 REUSE_MT=0
 REUSE_RELAY=0
 REUSE_CADDY=0
+MT_PORT=2398
 CHANNEL_B64="aHR0cHM6Ly93d3cueW91dHViZS5jb20vQFBPTEVTTklFU09WRVRJMTI="
 
 die() {
@@ -48,6 +49,40 @@ port_has_expected_process() {
     local process="$2"
     ss -lntp 2>/dev/null |
         grep -Eq ":${port}\b.*users:\(\(\"${process}\""
+}
+
+find_mtproxy_port() {
+    local detected
+    detected="$(ss -lntp 2>/dev/null |
+        sed -n 's/.*:\([0-9]\+\)[[:space:]].*users:(("\mtproto-proxy".*/\1/p' |
+        head -n1)"
+    if [[ "$detected" =~ ^[0-9]+$ ]]; then
+        printf '%s' "$detected"
+        return 0
+    fi
+    return 1
+}
+
+wait_for_mtproxy() {
+    local port=""
+    for _ in $(seq 1 30); do
+        if systemctl is-active --quiet mtproxy; then
+            port="$(find_mtproxy_port || true)"
+            if [[ -n "$port" ]]; then
+                printf '%s' "$port"
+                return 0
+            fi
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+repair_mtproxy() {
+    echo "      MTProxy recovery: fixing permissions and restarting..."
+    fix_mtproxy_permissions || true
+    systemctl reset-failed mtproxy.service 2>/dev/null || true
+    systemctl restart mtproxy.service
 }
 
 check_install_port() {
@@ -176,7 +211,12 @@ echo
 echo "[3/10] Checking ports..."
 check_install_port 80 caddy
 check_install_port 443 caddy
-check_install_port 2398 mtproto-proxy
+if EXISTING_MTPROXY_PORT="$(find_mtproxy_port 2>/dev/null)"; then
+    MT_PORT="$EXISTING_MTPROXY_PORT"
+    echo "      Existing MTProxy detected on :${MT_PORT}; continuing."
+else
+    echo "      MTProxy is not running yet; its port will be detected after startup."
+fi
 check_install_port 8080 tproxy-server
 check_install_port 8081 tproxy-server
 
@@ -728,10 +768,12 @@ echo "[6/10] Installing Telegram Web Proxy components..."
 
 
 if [[ -x /opt/MTProxy/objs/bin/mtproto-proxy ]] &&
-   systemctl list-unit-files mtproxy.service >/dev/null 2>&1 &&
-   port_has_expected_process 2398 mtproto-proxy; then
-    REUSE_MT=1
-    echo "      Existing MTProxy detected; reusing it."
+   systemctl list-unit-files mtproxy.service >/dev/null 2>&1; then
+    if EXISTING_MTPROXY_PORT="$(find_mtproxy_port 2>/dev/null)"; then
+        MT_PORT="$EXISTING_MTPROXY_PORT"
+        REUSE_MT=1
+        echo "      Existing MTProxy detected on :${MT_PORT}; reusing it."
+    fi
 fi
 
 if [[ -x /usr/local/bin/tproxy-server ]] &&
@@ -871,12 +913,13 @@ cat > /etc/tproxy-server/config.json <<EOF
   "listen": "127.0.0.1:8080",
   "admin_listen": "127.0.0.1:8081",
   "public_dir": "/srv/tproxy-site",
-  "profiles_file": "/run/credentials/tproxy-server.service/profiles.json"
+  "profiles_file": "/run/credentials/tproxy-server.service/profiles.json",
+  "backend": "127.0.0.1:$MT_PORT"
 }
 EOF
 
 cat > /etc/tproxy-server/profiles.json <<EOF
-{"profiles":[{"name":"default","secret":"$SECRET","backend":"127.0.0.1:2398"}]}
+{"profiles":[{"name":"default","secret":"$SECRET","backend":"127.0.0.1:$MT_PORT"}]}
 EOF
 
 chown root:tproxy /etc/tproxy-server/config.json /etc/tproxy-server/profiles.json
@@ -954,19 +997,38 @@ echo "      Starting MTProxy..."
 fix_mtproxy_permissions
 systemctl enable mtproxy.service
 systemctl reset-failed mtproxy.service 2>/dev/null || true
-systemctl restart mtproxy.service
 
-MT_READY=0
-for _ in $(seq 1 20); do
-    if systemctl is-active --quiet mtproxy &&
-       ss -lnt | grep -Eq ':(2398)\b'; then
-        MT_READY=1
-        break
-    fi
-    sleep 1
-done
-[[ "$MT_READY" == "1" ]] || die "MTProxy did not start on port 2398."
-echo "      MTProxy :2398 OK"
+MT_PORT="$(find_mtproxy_port 2>/dev/null || true)"
+
+if [[ -z "$MT_PORT" ]]; then
+    systemctl restart mtproxy.service
+    MT_PORT="$(wait_for_mtproxy || true)"
+fi
+
+if [[ -z "$MT_PORT" ]]; then
+    echo "      MTProxy did not expose a listening port; attempting automatic recovery..."
+    repair_mtproxy
+    MT_PORT="$(wait_for_mtproxy || true)"
+fi
+
+if [[ -z "$MT_PORT" ]]; then
+    echo
+    echo "      MTProxy diagnostic:"
+    systemctl --no-pager --full status mtproxy.service 2>/dev/null || true
+    journalctl -u mtproxy -n 60 --no-pager 2>/dev/null || true
+    die "MTProxy did not become ready on any listening port."
+fi
+
+echo "      MTProxy :${MT_PORT} OK"
+
+# Synchronize the relay backend with the port that MTProxy actually uses.
+sed -i -E "s#127\.0\.0\.1:[0-9]+#127.0.0.1:${MT_PORT}#g" /etc/tproxy-server/config.json
+cat > /etc/tproxy-server/profiles.json <<EOF
+{"profiles":[{"name":"default","secret":"$SECRET","backend":"127.0.0.1:$MT_PORT"}]}
+EOF
+chown root:tproxy /etc/tproxy-server/config.json /etc/tproxy-server/profiles.json
+chmod 0640 /etc/tproxy-server/config.json
+chmod 0400 /etc/tproxy-server/profiles.json
 
 echo "      Starting relay..."
 runuser -u tproxy -- test -r "$SITE_TARGET/index.html" ||
@@ -988,16 +1050,39 @@ done
 
 if [[ "$RELAY_READY" != "1" ]]; then
     echo "      Relay not ready; running automatic recovery..."
-    fix_mtproxy_permissions
+    fix_mtproxy_permissions || true
     chown -R root:tproxy "$SITE_TARGET"
     find "$SITE_TARGET" -type d -exec chmod 0750 {} +
     find "$SITE_TARGET" -type f -exec chmod 0640 {} +
+
+    # Re-detect MTProxy in case its listening port changed after restart.
+    NEW_MT_PORT="$(find_mtproxy_port 2>/dev/null || true)"
+    if [[ -n "$NEW_MT_PORT" ]]; then
+        MT_PORT="$NEW_MT_PORT"
+    fi
+
+    sed -i -E "s#127\.0\.0\.1:[0-9]+#127.0.0.1:${MT_PORT}#g" /etc/tproxy-server/config.json
+    cat > /etc/tproxy-server/profiles.json <<EOF
+{"profiles":[{"name":"default","secret":"$SECRET","backend":"127.0.0.1:$MT_PORT"}]}
+EOF
+    chown root:tproxy /etc/tproxy-server/config.json /etc/tproxy-server/profiles.json
+    chmod 0640 /etc/tproxy-server/config.json
+    chmod 0400 /etc/tproxy-server/profiles.json
+
     systemctl reset-failed mtproxy tproxy-server 2>/dev/null || true
     systemctl restart mtproxy.service
     sleep 2
+
+    NEW_MT_PORT="$(wait_for_mtproxy || true)"
+    if [[ -n "$NEW_MT_PORT" ]]; then
+        MT_PORT="$NEW_MT_PORT"
+        sed -i -E "s#127\.0\.0\.1:[0-9]+#127.0.0.1:${MT_PORT}#g" /etc/tproxy-server/config.json
+        sed -i -E "s#127\.0\.0\.1:[0-9]+#127.0.0.1:${MT_PORT}#g" /etc/tproxy-server/profiles.json
+    fi
+
     systemctl restart tproxy-server.service
 
-    for _ in $(seq 1 20); do
+    for _ in $(seq 1 30); do
         if systemctl is-active --quiet tproxy-server &&
            curl -fsS --max-time 2 http://127.0.0.1:8081/readyz >/dev/null 2>&1; then
             RELAY_READY=1
@@ -1046,6 +1131,8 @@ if [[ "$HTTPS_READY" != "1" ]]; then
 fi
 
 echo "      HTTPS OK"
+echo "      Backend MTProxy port: ${MT_PORT}"
+
 
 echo
 echo "[10/10] Checking persistence and ports..."
