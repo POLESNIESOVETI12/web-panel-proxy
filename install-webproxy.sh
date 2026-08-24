@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="V 1.0"
+VERSION="FINAL-RELAY-REPAIR"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
@@ -1125,6 +1125,14 @@ fi
 
 echo "      MTProxy :${MT_PORT} OK"
 
+if ! timeout 3 bash -c "</dev/tcp/127.0.0.1/${MT_PORT}" 2>/dev/null; then
+    echo "      MTProxy TCP check failed on :${MT_PORT}; attempting recovery..."
+    repair_mtproxy || true
+    MT_PORT="$(wait_for_mtproxy || true)"
+    [[ -n "$MT_PORT" ]] || die "MTProxy did not expose a usable TCP port."
+fi
+
+
 # Synchronize the relay backend with the port that MTProxy actually uses.
 sed -i -E "s#127\.0\.0\.1:[0-9]+#127.0.0.1:${MT_PORT}#g" /etc/tproxy-server/config.json
 cat > /etc/tproxy-server/profiles.json <<EOF
@@ -1150,9 +1158,21 @@ else
 fi
 
 RELAY_READY=0
+
+check_relay() {
+    local health ready
+    if ! systemctl is-active --quiet tproxy-server.service; then
+        return 1
+    fi
+
+    health="$(curl -fsS --max-time 2 http://127.0.0.1:8081/healthz 2>/dev/null || true)"
+    ready="$(curl -fsS --max-time 2 http://127.0.0.1:8081/readyz 2>/dev/null || true)"
+
+    [[ "$health" == "ok" && "$ready" == "ready" ]]
+}
+
 for _ in $(seq 1 30); do
-    if systemctl is-active --quiet tproxy-server &&
-       curl -fsS --max-time 2 http://127.0.0.1:8081/readyz >/dev/null 2>&1; then
+    if check_relay; then
         RELAY_READY=1
         break
     fi
@@ -1160,43 +1180,55 @@ for _ in $(seq 1 30); do
 done
 
 if [[ "$RELAY_READY" != "1" ]]; then
-    echo "      Relay not ready; running automatic recovery..."
-    fix_mtproxy_permissions || true
-    chown -R root:tproxy "$SITE_TARGET"
-    find "$SITE_TARGET" -type d -exec chmod 0750 {} +
-    find "$SITE_TARGET" -type f -exec chmod 0640 {} +
+    echo "      Relay not ready; collecting diagnostics and repairing..."
 
-    # Re-detect MTProxy in case its listening port changed after restart.
+    echo "      --- relay status ---"
+    systemctl --no-pager --full status tproxy-server.service 2>/dev/null || true
+
+    echo "      --- relay log ---"
+    journalctl -u tproxy-server -n 80 --no-pager 2>/dev/null || true
+
+    echo "      --- healthz ---"
+    curl -i --max-time 5 http://127.0.0.1:8081/healthz 2>/dev/null || true
+
+    echo "      --- readyz ---"
+    curl -i --max-time 5 http://127.0.0.1:8081/readyz 2>/dev/null || true
+
+    echo "      --- backend sockets ---"
+    ss -lntp 2>/dev/null | grep -E ':(2398|8888|8080|8081)\b' || true
+
+    fix_mtproxy_permissions || true
+
+    # Detect the actual MTProxy port again before rewriting the relay profile.
     NEW_MT_PORT="$(find_mtproxy_port 2>/dev/null || true)"
     if [[ -n "$NEW_MT_PORT" ]]; then
         MT_PORT="$NEW_MT_PORT"
     fi
 
-    sed -i -E "s#127\.0\.0\.1:[0-9]+#127.0.0.1:${MT_PORT}#g" /etc/tproxy-server/config.json
     cat > /etc/tproxy-server/profiles.json <<EOF
 {"profiles":[{"name":"default","secret":"$SECRET","backend":"127.0.0.1:$MT_PORT"}]}
 EOF
-    chown root:tproxy /etc/tproxy-server/config.json /etc/tproxy-server/profiles.json
-    chmod 0640 /etc/tproxy-server/config.json
+
+    chown root:tproxy /etc/tproxy-server/profiles.json
     chmod 0400 /etc/tproxy-server/profiles.json
 
-    systemctl reset-failed mtproxy tproxy-server 2>/dev/null || true
-    restart_service_reliably mtproxy.service 3 || true
-    sleep 2
-
-    NEW_MT_PORT="$(wait_for_mtproxy || true)"
-    if [[ -n "$NEW_MT_PORT" ]]; then
-        MT_PORT="$NEW_MT_PORT"
-        sed -i -E "s#127\.0\.0\.1:[0-9]+#127.0.0.1:${MT_PORT}#g" /etc/tproxy-server/config.json
-        sed -i -E "s#127\.0\.0\.1:[0-9]+#127.0.0.1:${MT_PORT}#g" /etc/tproxy-server/profiles.json
+    # Verify the relay configuration before touching the service.
+    if ! /usr/local/bin/tproxy-server \
+        -config /etc/tproxy-server/config.json \
+        -profiles-file /etc/tproxy-server/profiles.json \
+        -check; then
+        echo "      Relay config check failed; reloading profile permissions/configuration..."
+        chown root:tproxy /etc/tproxy-server/config.json /etc/tproxy-server/profiles.json
+        chmod 0640 /etc/tproxy-server/config.json
+        chmod 0400 /etc/tproxy-server/profiles.json
     fi
 
-    restart_service_reliably tproxy-server.service 3 ||
-        true
+    if ! systemctl is-active --quiet tproxy-server.service; then
+        restart_service_reliably tproxy-server.service 3 || true
+    fi
 
     for _ in $(seq 1 30); do
-        if systemctl is-active --quiet tproxy-server &&
-           curl -fsS --max-time 2 http://127.0.0.1:8081/readyz >/dev/null 2>&1; then
+        if check_relay; then
             RELAY_READY=1
             break
         fi
@@ -1204,8 +1236,28 @@ EOF
     done
 fi
 
-[[ "$RELAY_READY" == "1" ]] || die "tproxy-server did not become ready."
-echo "      Relay /readyz OK"
+if [[ "$RELAY_READY" != "1" ]]; then
+    echo
+    echo "============================================================"
+    echo "              RELAY НЕ ГОТОВ"
+    echo "============================================================"
+    echo
+    echo "tproxy-server запущен, но не прошёл /healthz или /readyz."
+    echo
+    echo "Последнее состояние:"
+    systemctl --no-pager --full status tproxy-server.service 2>/dev/null || true
+    echo
+    echo "Проверка /healthz:"
+    curl -i --max-time 5 http://127.0.0.1:8081/healthz 2>/dev/null || true
+    echo
+    echo "Проверка /readyz:"
+    curl -i --max-time 5 http://127.0.0.1:8081/readyz 2>/dev/null || true
+    echo
+    echo "============================================================"
+    die "ПОПРОБУЙТЕ ЗАНОВО"
+fi
+
+echo "      Relay /healthz and /readyz OK"
 
 echo "      Starting refresh timer..."
 systemctl enable refresh-mtproxy-config.timer 2>/dev/null || true
