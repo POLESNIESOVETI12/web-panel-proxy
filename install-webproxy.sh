@@ -6,6 +6,9 @@ VERSION="FINAL-IDEMPOTENT-YT"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
+REUSE_MT=0
+REUSE_RELAY=0
+REUSE_CADDY=0
 CHANNEL_B64="aHR0cHM6Ly93d3cueW91dHViZS5jb20vQFBPTEVTTklFU09WRVRJMTI="
 
 die() {
@@ -427,9 +430,6 @@ echo "      OK"
 echo
 echo "[6/10] Installing Telegram Web Proxy components..."
 
-REUSE_MT=0
-REUSE_RELAY=0
-REUSE_CADDY=0
 
 if [[ -x /opt/MTProxy/objs/bin/mtproto-proxy ]] &&
    systemctl list-unit-files mtproxy.service >/dev/null 2>&1 &&
