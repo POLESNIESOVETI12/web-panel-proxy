@@ -2,117 +2,143 @@
 set -Eeuo pipefail
 umask 077
 
-echo
+MANIFEST="/etc/tproxy-webproxy-install.manifest"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+[[ $EUID -eq 0 ]] || die "Run as root."
+
 echo "============================================================"
-echo "        TELEGRAM WEB PROXY COMPLETE UNINSTALLER"
+echo "          TELEGRAM WEB PROXY FULL UNINSTALLER"
 echo "============================================================"
 echo
-echo "WARNING: this removes the Telegram Web Proxy stack installed"
-echo "by install-webproxy.sh, including its configuration and data."
+echo "This removes components installed by the Web Proxy installer."
+echo "Existing components that were detected as pre-existing are kept."
 echo
-read -r -p "Type REMOVE to continue: " CONFIRM
+echo "Type REMOVE to continue:"
+read -r CONFIRM
 [[ "$CONFIRM" == "REMOVE" ]] || { echo "Cancelled."; exit 0; }
 
+REUSED_CADDY=1
+REUSED_MT=1
+REUSED_RELAY=1
+
+if [[ -r "$MANIFEST" ]]; then
+    # The manifest contains only installer-state flags.
+    while IFS='=' read -r k v; do
+        case "$k" in
+            reused_caddy) REUSED_CADDY="$v" ;;
+            reused_mtproxy) REUSED_MT="$v" ;;
+            reused_relay) REUSED_RELAY="$v" ;;
+        esac
+    done < "$MANIFEST"
+else
+    echo
+    echo "WARNING: ownership manifest not found."
+    echo "Conservative mode is enabled: pre-existing MTProxy, relay and Caddy are preserved."
+fi
+
 echo
-echo "[1/7] Stopping services..."
+echo "[1/7] Stopping installer services..."
+
 for unit in \
-    caddy.service \
-    mtproxy.service \
-    tproxy-server.service \
     tproxy-firewall.service \
     refresh-mtproxy-config.timer \
     refresh-mtproxy-config.service
 do
-    systemctl disable --now "$unit" 2>/dev/null || true
+    systemctl stop "$unit" 2>/dev/null || true
 done
 
-echo "[2/7] Removing running processes..."
-pkill -9 caddy 2>/dev/null || true
-pkill -9 mtproto-proxy 2>/dev/null || true
-pkill -9 tproxy-server 2>/dev/null || true
+[[ "$REUSED_RELAY" == "1" ]] || systemctl stop tproxy-server.service 2>/dev/null || true
+[[ "$REUSED_MT" == "1" ]] || systemctl stop mtproxy.service 2>/dev/null || true
+[[ "$REUSED_CADDY" == "1" ]] || systemctl stop caddy.service 2>/dev/null || true
 
-echo "[3/7] Removing systemd units..."
+echo "[2/7] Disabling installer services..."
+
+for unit in \
+    tproxy-firewall.service \
+    refresh-mtproxy-config.timer \
+    refresh-mtproxy-config.service
+do
+    systemctl disable "$unit" 2>/dev/null || true
+done
+
+[[ "$REUSED_RELAY" == "1" ]] || systemctl disable tproxy-server.service 2>/dev/null || true
+[[ "$REUSED_MT" == "1" ]] || systemctl disable mtproxy.service 2>/dev/null || true
+[[ "$REUSED_CADDY" == "1" ]] || systemctl disable caddy.service 2>/dev/null || true
+
+echo "[3/7] Removing installer service files..."
+
 rm -f \
-    /etc/systemd/system/caddy.service \
-    /etc/systemd/system/mtproxy.service \
-    /etc/systemd/system/tproxy-server.service \
     /etc/systemd/system/tproxy-firewall.service \
     /etc/systemd/system/refresh-mtproxy-config.service \
-    /etc/systemd/system/refresh-mtproxy-config.timer
-
-rm -rf /etc/systemd/system/caddy.service.d
-
-systemctl daemon-reload
-systemctl reset-failed 2>/dev/null || true
-
-echo "[4/7] Removing Telegram Web Proxy data..."
-rm -rf \
-    /etc/tproxy-server \
-    /etc/mtproxy \
-    /opt/MTProxy \
-    /opt/tproxy-site \
-    /srv/tproxy-site \
-    /root/tproxy-server \
-    /run/credentials/tproxy-server.service \
-    /usr/local/bin/tproxy-server \
+    /etc/systemd/system/refresh-mtproxy-config.timer \
     /usr/local/sbin/refresh-mtproxy-config
 
-echo "[5/7] Removing Caddy data..."
-rm -rf \
-    /etc/caddy \
-    /var/lib/caddy \
-    /usr/local/bin/caddy
+[[ "$REUSED_RELAY" == "1" ]] || rm -f /etc/systemd/system/tproxy-server.service
+[[ "$REUSED_MT" == "1" ]] || rm -f /etc/systemd/system/mtproxy.service
+[[ "$REUSED_CADDY" == "1" ]] || rm -f /etc/systemd/system/caddy.service
 
-echo "[6/7] Removing installer/download leftovers..."
-rm -f \
-    /root/install-webproxy.sh \
-    /root/install-webproxy-FINAL-UNIVERSAL-2.sh \
-    /root/install-webproxy-FINAL-UNIVERSAL.sh \
-    /root/install-webproxy-FINAL.sh \
-    /root/install-webproxy-COMPACT.sh \
-    /root/install-webproxy-COMPACT-FIXED.sh \
-    /root/install-webproxy-COMPACT-FIXED2.sh \
-    /root/install-webproxy-FINAL-3.sh \
-    /root/telegram-webproxy-installer-FINAL-3.sh
+rm -f /etc/systemd/system/caddy.service.d/tproxy.conf
+
+echo "[4/7] Removing proxy files..."
 
 rm -rf \
-    /root/telegram-webproxy-panel \
-    /root/tproxy-server
+    /root/tproxy-server \
+    /opt/tproxy-site \
+    /srv/tproxy-site \
+    /etc/tproxy-server \
+    /etc/caddy/caddy
 
-# This Go tree is the exact version downloaded by our installer.
-# Remove it only if it exists and is not needed by another application.
-rm -rf /opt/go1.26.5
+if [[ "$REUSED_RELAY" != "1" ]]; then
+    rm -f /usr/local/bin/tproxy-server
+    rm -rf /opt/go1.26.5
+fi
 
-echo "[7/7] Removing service users..."
-for user in tproxy mtproxy caddy; do
-    if id "$user" >/dev/null 2>&1; then
-        userdel "$user" 2>/dev/null || true
+if [[ "$REUSED_MT" != "1" ]]; then
+    rm -rf /opt/MTProxy
+    rm -rf /etc/mtproxy
+fi
+
+echo "[5/7] Removing installer users..."
+
+if [[ "$REUSED_RELAY" != "1" ]] && id tproxy >/dev/null 2>&1; then
+    home="$(getent passwd tproxy | cut -d: -f6 || true)"
+    shell="$(getent passwd tproxy | cut -d: -f7 || true)"
+    if [[ "$home" == "/nonexistent" && "$shell" == "/usr/sbin/nologin" ]]; then
+        userdel tproxy 2>/dev/null || true
     fi
-done
+fi
 
-getent group tproxy >/dev/null 2>&1 && groupdel tproxy 2>/dev/null || true
-getent group mtproxy >/dev/null 2>&1 && groupdel mtproxy 2>/dev/null || true
-getent group caddy >/dev/null 2>&1 && groupdel caddy 2>/dev/null || true
+if [[ "$REUSED_MT" != "1" ]] && id mtproxy >/dev/null 2>&1; then
+    home="$(getent passwd mtproxy | cut -d: -f6 || true)"
+    shell="$(getent passwd mtproxy | cut -d: -f7 || true)"
+    if [[ "$home" == "/nonexistent" && "$shell" == "/usr/sbin/nologin" ]]; then
+        userdel mtproxy 2>/dev/null || true
+    fi
+fi
+
+echo "[6/7] Cleaning firewall and runtime state..."
+nft delete table inet tproxy_backend 2>/dev/null || true
+rm -f /etc/tproxy-webproxy-install.manifest
 
 systemctl daemon-reload
 systemctl reset-failed 2>/dev/null || true
 
+echo "[7/7] Final verification..."
+
+echo
+echo "Remaining related units:"
+systemctl list-unit-files | grep -E '^(mtproxy|tproxy-server|tproxy-firewall|refresh-mtproxy-config)\.' || true
+
 echo
 echo "============================================================"
-echo "                    CLEANUP CHECK"
+echo "             TELEGRAM WEB PROXY REMOVED"
 echo "============================================================"
-
-ss -lntp | grep -E ':(80|443|2398|8080|8081|8090|8888)\b' \
-    || echo "Ports: CLEAN"
-
-systemctl --no-pager --full status \
-    caddy mtproxy tproxy-server tproxy-firewall tproxy-panel \
-    2>/dev/null || true
-
 echo
-echo "Telegram Web Proxy files/services removed."
+echo "The installer-owned proxy components have been removed."
+echo "Shared OS packages were intentionally NOT removed."
+echo "A pre-existing Caddy/MTProxy/relay was preserved."
 echo
-echo "NOTE: system packages installed with apt are intentionally"
-echo "not purged automatically because some may have existed before"
-echo "the Web Proxy installation."
+echo "Reboot is normally not required."
 echo "============================================================"
