@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="FINAL-AUTOREPAIR"
+VERSION="FINAL-AUTOREPAIR-2"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
@@ -844,13 +844,30 @@ fi
 # The official deployment leaves the MTProxy build tree root-only.
 # Make the complete executable path traversable before systemd starts it.
 fix_mtproxy_permissions() {
-    chmod 0755 /opt/MTProxy
-    chmod 0755 /opt/MTProxy/objs
-    chmod 0755 /opt/MTProxy/objs/bin
+    if ! id mtproxy >/dev/null 2>&1; then
+        echo "      MTProxy user missing; creating it..."
+        useradd --system             --home /nonexistent             --no-create-home             --shell /usr/sbin/nologin             mtproxy
+    fi
+
+    chmod 0755 /opt/MTProxy 2>/dev/null || true
+    chmod 0755 /opt/MTProxy/objs 2>/dev/null || true
+    chmod 0755 /opt/MTProxy/objs/bin 2>/dev/null || true
+    chmod 0755 /opt/MTProxy/objs/bin/mtproto-proxy 2>/dev/null || true
+
+    chown root:root /opt/MTProxy/objs/bin/mtproto-proxy 2>/dev/null || true
     chmod 0755 /opt/MTProxy/objs/bin/mtproto-proxy
 
-    runuser -u mtproxy -- test -x /opt/MTProxy/objs/bin/mtproto-proxy ||
-        die "mtproxy user cannot execute mtproto-proxy."
+    # Verify path traversal and execution as the service user.
+    if ! runuser -u mtproxy -- /bin/test -x /opt/MTProxy/objs/bin/mtproto-proxy; then
+        echo "      MTProxy permission check failed; attempting automatic repair..."
+        namei -l /opt/MTProxy/objs/bin/mtproto-proxy || true
+
+        chmod 0755 /opt /opt/MTProxy /opt/MTProxy/objs /opt/MTProxy/objs/bin
+        chown -R root:root /opt/MTProxy/objs/bin
+
+        runuser -u mtproxy -- /bin/test -x /opt/MTProxy/objs/bin/mtproto-proxy ||
+            die "MTProxy binary is not executable by the mtproxy user after automatic repair."
+    fi
 }
 
 echo "      Installing Go relay..."
