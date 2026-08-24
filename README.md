@@ -305,25 +305,9 @@ Caddy перезапускать не требуется.
 ---
 
 
-# 8. Полное удаление установки
 
-Для удаления Telegram Web Proxy используйте:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/POLESNIESOVETI12/webtelegram/main/uninstall-webproxy.sh -o /tmp/uninstall-webproxy.sh && chmod +x /tmp/uninstall-webproxy.sh && /tmp/uninstall-webproxy.sh
-```
-
-Деинсталлятор попросит подтвердить удаление:
-
-```text
-REMOVE
-```
-
-После этого будут удалены компоненты Telegram Web Proxy, Caddy, конфигурация, сайт и созданные сервисы.
-
----
-
-# 9. Если порт 80 или 443 занят
+# 8. Если порт 80 или 443 занят
 
 Проверьте:
 
@@ -337,7 +321,7 @@ ss -lntp | grep -E ':(80|443)\b'
 
 
 
-# 10. Что такое Telegram Web Proxy
+# 9. Что такое Telegram Web Proxy
 
 Telegram Web Proxy — это промежуточный сервер между клиентом Telegram и Telegram.
 
