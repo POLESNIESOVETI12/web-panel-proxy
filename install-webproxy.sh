@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="FINAL-IDEMPOTENT-CERT-3"
+VERSION="FINAL-IDEMPOTENT-CERT-3-COOL"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
@@ -246,18 +246,21 @@ cat > "$SITE_INPUT/index.html" <<'EOF'
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-    <title>Подключение</title>
+    <title>Система подключения</title>
     <meta name="description" content="Страница загрузки">
 
     <style>
         :root {
             color-scheme: dark;
-            --bg: #0a0d12;
-            --card: #11161f;
+            --bg: #05070b;
+            --bg-soft: #0a0e15;
+            --card: rgba(15, 21, 31, 0.78);
+            --line: rgba(255, 255, 255, 0.08);
             --text: #f5f7fb;
-            --muted: #8f99a8;
-            --line: #242c38;
-            --accent: #ffffff;
+            --muted: #8490a3;
+            --accent: #6ee7ff;
+            --accent-2: #8b7cff;
+            --success: #62f2ad;
         }
 
         * {
@@ -268,183 +271,450 @@ cat > "$SITE_INPUT/index.html" <<'EOF'
         body {
             margin: 0;
             min-height: 100%;
-            background: var(--bg);
         }
 
         body {
             min-height: 100vh;
-            display: grid;
-            place-items: center;
+            overflow-x: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             padding: 24px;
+            color: var(--text);
+            background:
+                radial-gradient(circle at 20% 20%, rgba(110, 231, 255, 0.08), transparent 30%),
+                radial-gradient(circle at 80% 80%, rgba(139, 124, 255, 0.10), transparent 30%),
+                linear-gradient(135deg, var(--bg), var(--bg-soft));
             font-family:
+                Inter,
                 system-ui,
                 -apple-system,
                 BlinkMacSystemFont,
                 "Segoe UI",
                 sans-serif;
-            color: var(--text);
+        }
+
+        .grid {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            opacity: 0.18;
+            background-image:
+                linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
+            background-size: 40px 40px;
+            mask-image: linear-gradient(to bottom, transparent, black 20%, black 80%, transparent);
+        }
+
+        .glow {
+            position: fixed;
+            width: 280px;
+            height: 280px;
+            border-radius: 50%;
+            filter: blur(80px);
+            opacity: 0.15;
+            pointer-events: none;
+            animation: float 9s ease-in-out infinite;
+        }
+
+        .glow.one {
+            top: -80px;
+            left: -80px;
+            background: var(--accent);
+        }
+
+        .glow.two {
+            right: -90px;
+            bottom: -80px;
+            background: var(--accent-2);
+            animation-delay: -4s;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translate3d(0, 0, 0); }
+            50% { transform: translate3d(20px, -20px, 0); }
         }
 
         .card {
-            width: min(100%, 560px);
-            padding: 38px 30px;
-            text-align: center;
-            background: var(--card);
+            position: relative;
+            width: min(100%, 650px);
+            padding: 36px;
             border: 1px solid var(--line);
-            border-radius: 22px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+            border-radius: 28px;
+            background: var(--card);
+            backdrop-filter: blur(22px);
+            box-shadow:
+                0 30px 100px rgba(0, 0, 0, 0.45),
+                inset 0 1px 0 rgba(255, 255, 255, 0.04);
+            overflow: hidden;
+        }
+
+        .card::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(135deg, rgba(255,255,255,0.05), transparent 40%);
+            pointer-events: none;
+        }
+
+        .top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+            margin-bottom: 34px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 14px;
         }
 
         .logo {
-            width: 64px;
-            height: 64px;
+            width: 48px;
+            height: 48px;
+            display: grid;
+            place-items: center;
+            border-radius: 15px;
+            background: linear-gradient(
+                135deg,
+                rgba(110, 231, 255, 0.16),
+                rgba(139, 124, 255, 0.16)
+            );
+            border: 1px solid var(--line);
+            font-size: 21px;
+            box-shadow: 0 0 30px rgba(110, 231, 255, 0.08);
+        }
+
+        .brand-title {
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .brand-subtitle {
+            margin-top: 3px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        .status {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            border-radius: 999px;
+            background: rgba(98, 242, 173, 0.06);
+            border: 1px solid rgba(98, 242, 173, 0.12);
+            color: #9bffca;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .status-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--success);
+            box-shadow: 0 0 12px var(--success);
+            animation: pulse 1.8s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 0.75; }
+            50% { transform: scale(1.35); opacity: 1; }
+        }
+
+        .content {
+            text-align: center;
+        }
+
+        .icon {
+            width: 82px;
+            height: 82px;
             margin: 0 auto 22px;
             display: grid;
             place-items: center;
-            border: 1px solid #36404f;
-            border-radius: 18px;
-            font-size: 28px;
-            background: #171d27;
+            border-radius: 24px;
+            border: 1px solid var(--line);
+            background: radial-gradient(
+                circle,
+                rgba(110, 231, 255, 0.10),
+                rgba(139, 124, 255, 0.06)
+            );
+            font-size: 34px;
+            box-shadow: 0 0 45px rgba(110, 231, 255, 0.06);
         }
 
         h1 {
             margin: 0;
-            font-size: 32px;
-            line-height: 1.15;
-            letter-spacing: -0.02em;
+            font-size: clamp(30px, 5vw, 46px);
+            line-height: 1.05;
+            letter-spacing: -0.04em;
         }
 
-        p {
-            margin: 12px 0 0;
+        .description {
+            max-width: 480px;
+            margin: 16px auto 0;
             color: var(--muted);
-            line-height: 1.6;
+            font-size: 15px;
+            line-height: 1.7;
         }
 
-        .loader {
+        .progress-wrap {
+            margin-top: 34px;
+        }
+
+        .progress {
             position: relative;
-            width: min(100%, 320px);
-            height: 8px;
-            margin: 28px auto 16px;
+            height: 10px;
             overflow: hidden;
             border-radius: 999px;
-            background: #202733;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255,255,255,0.04);
         }
 
-        .loader::before {
+        .progress::before {
             content: "";
             position: absolute;
-            inset: 0 auto 0 0;
-            width: 34%;
+            inset: 0 auto 0 -35%;
+            width: 35%;
             border-radius: inherit;
-            background: var(--accent);
-            animation: loading 1.25s ease-in-out infinite;
+            background: linear-gradient(
+                90deg,
+                transparent,
+                var(--accent),
+                var(--accent-2),
+                transparent
+            );
+            filter: blur(1px);
+            animation: progress 1.7s ease-in-out infinite;
         }
 
-        .dots {
-            display: inline-flex;
-            gap: 5px;
-            margin-top: 2px;
+        @keyframes progress {
+            0% { transform: translateX(0); }
+            100% { transform: translateX(380%); }
         }
 
-        .dots span {
-            width: 5px;
-            height: 5px;
-            border-radius: 50%;
-            background: #6f7887;
-            animation: blink 1.2s infinite ease-in-out;
-        }
-
-        .dots span:nth-child(2) {
-            animation-delay: 0.15s;
-        }
-
-        .dots span:nth-child(3) {
-            animation-delay: 0.3s;
-        }
-
-        .small {
-            margin-top: 24px;
+        .loading-text {
+            margin-top: 12px;
+            color: #9ca8bb;
             font-size: 12px;
-            color: #687181;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
         }
 
-        @keyframes loading {
-            0% {
-                transform: translateX(-120%);
-            }
+        .system {
+            margin-top: 30px;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+        }
 
-            50% {
-                transform: translateX(190%);
-            }
+        .system-item {
+            padding: 14px 12px;
+            text-align: left;
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.025);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
 
-            100% {
-                transform: translateX(320%);
-            }
+        .system-label {
+            color: var(--muted);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        .system-value {
+            margin-top: 5px;
+            font-size: 13px;
+            font-weight: 600;
+            color: #e8edf5;
+        }
+
+        .system-value::before {
+            content: "●";
+            margin-right: 7px;
+            color: var(--success);
+            font-size: 8px;
+            vertical-align: middle;
+        }
+
+        .terminal {
+            margin-top: 22px;
+            padding: 15px 16px;
+            border-radius: 15px;
+            background: #090c11;
+            border: 1px solid rgba(255,255,255,0.05);
+            text-align: left;
+            font-family:
+                ui-monospace,
+                SFMono-Regular,
+                Menlo,
+                Monaco,
+                Consolas,
+                monospace;
+            font-size: 12px;
+            color: #8997aa;
+        }
+
+        .terminal-line {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 7px;
+        }
+
+        .terminal-line:last-child {
+            margin-bottom: 0;
+        }
+
+        .prompt {
+            color: var(--accent);
+        }
+
+        .ok {
+            color: var(--success);
+        }
+
+        .cursor {
+            display: inline-block;
+            width: 7px;
+            height: 14px;
+            margin-left: 2px;
+            background: #dbe4ef;
+            vertical-align: middle;
+            animation: blink 0.9s step-end infinite;
         }
 
         @keyframes blink {
-            0%,
-            80%,
-            100% {
-                opacity: 0.25;
-                transform: scale(0.85);
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0; }
+        }
+
+        .footer {
+            margin-top: 22px;
+            text-align: center;
+            color: #5f6b7d;
+            font-size: 11px;
+        }
+
+        @media (max-width: 640px) {
+            .card {
+                padding: 24px 18px;
+                border-radius: 22px;
             }
 
-            40% {
-                opacity: 1;
-                transform: scale(1);
+            .top {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+
+            .status {
+                align-self: flex-start;
+            }
+
+            .system {
+                grid-template-columns: 1fr;
             }
         }
 
         @media (prefers-reduced-motion: reduce) {
-            .loader::before,
-            .dots span {
-                animation: none;
-            }
-
-            .loader::before {
-                left: 33%;
-                transform: none;
-            }
-        }
-
-        @media (max-width: 480px) {
-            .card {
-                padding: 30px 20px;
-            }
-
-            h1 {
-                font-size: 28px;
+            *,
+            *::before,
+            *::after {
+                animation: none !important;
+                scroll-behavior: auto !important;
             }
         }
     </style>
 </head>
 
 <body>
+    <div class="grid"></div>
+    <div class="glow one"></div>
+    <div class="glow two"></div>
 
     <main class="card">
-        <div class="logo">⌛</div>
+        <header class="top">
+            <div class="brand">
+                <div class="logo">◈</div>
 
-        <h1>Подключение</h1>
+                <div>
+                    <div class="brand-title">Connection Service</div>
+                    <div class="brand-subtitle">Secure infrastructure</div>
+                </div>
+            </div>
 
-        <p>
-            Пожалуйста, подождите.<br>
-            Идёт загрузка страницы.
-        </p>
+            <div class="status">
+                <span class="status-dot"></span>
+                SYSTEM ONLINE
+            </div>
+        </header>
 
-        <div class="loader" aria-hidden="true"></div>
+        <section class="content">
+            <div class="icon">⚡</div>
 
-        <div class="dots" aria-hidden="true">
-            <span></span>
-            <span></span>
-            <span></span>
-        </div>
+            <h1>Подключение</h1>
 
-        <div class="small">
-            Страница загружается
-        </div>
+            <p class="description">
+                Система подготавливает соединение.
+                Пожалуйста, оставайтесь на этой странице.
+            </p>
+
+            <div class="progress-wrap">
+                <div class="progress"></div>
+
+                <div class="loading-text">
+                    Initializing secure connection
+                </div>
+            </div>
+        </section>
+
+        <section class="system">
+            <div class="system-item">
+                <div class="system-label">Network</div>
+                <div class="system-value">Online</div>
+            </div>
+
+            <div class="system-item">
+                <div class="system-label">Security</div>
+                <div class="system-value">Protected</div>
+            </div>
+
+            <div class="system-item">
+                <div class="system-label">Status</div>
+                <div class="system-value">Ready</div>
+            </div>
+        </section>
+
+        <section class="terminal">
+            <div class="terminal-line">
+                <span class="prompt">$</span>
+                <span>initializing connection...</span>
+                <span class="ok">OK</span>
+            </div>
+
+            <div class="terminal-line">
+                <span class="prompt">$</span>
+                <span>checking secure channel...</span>
+                <span class="ok">OK</span>
+            </div>
+
+            <div class="terminal-line">
+                <span class="prompt">$</span>
+                <span>waiting for response...</span>
+                <span class="cursor"></span>
+            </div>
+        </section>
+
+        <footer class="footer">
+            Please wait while the connection is being established.
+        </footer>
     </main>
-
 </body>
 </html>
 EOF
