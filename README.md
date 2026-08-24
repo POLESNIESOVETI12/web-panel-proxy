@@ -321,34 +321,3 @@ ss -lntp | grep -E ':(80|443)\b'
 
 
 
-# 9. Что такое Telegram Web Proxy
-
-Telegram Web Proxy — это промежуточный сервер между клиентом Telegram и Telegram.
-
-Упрощённо:
-
-```text
-Телефон
-   ↓
-HTTPS
-   ↓
-Caddy
-   ↓
-tproxy-server
-   ↓
-MTProxy
-   ↓
-Telegram
-```
-
-
-## Содержание репозитория
-
-```text
-webtelegram/
-├── README.md
-├── install-webproxy.sh
-└── uninstall-webproxy.sh
-```
-
-Панель управления в этой версии не используется.
