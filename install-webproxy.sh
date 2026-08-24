@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="V 1.0"
+VERSION="FINAL-WEB-LANES"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
@@ -962,7 +962,7 @@ cat > /etc/tproxy-server/config.json <<EOF
 EOF
 
 cat > /etc/tproxy-server/profiles.json <<EOF
-{"profiles":[{"name":"default","secret":"$SECRET","backend":"127.0.0.1:$MT_PORT"}]}
+{"profiles":[{"name":"default","secret":"$SECRET","backend":"127.0.0.1:$MT_PORT","carrier_mode":"https-lanes"}]}
 EOF
 
 chown root:tproxy /etc/tproxy-server/config.json /etc/tproxy-server/profiles.json
@@ -1136,11 +1136,16 @@ fi
 # Synchronize the relay backend with the port that MTProxy actually uses.
 sed -i -E "s#127\.0\.0\.1:[0-9]+#127.0.0.1:${MT_PORT}#g" /etc/tproxy-server/config.json
 cat > /etc/tproxy-server/profiles.json <<EOF
-{"profiles":[{"name":"default","secret":"$SECRET","backend":"127.0.0.1:$MT_PORT"}]}
+{"profiles":[{"name":"default","secret":"$SECRET","backend":"127.0.0.1:$MT_PORT","carrier_mode":"https-lanes"}]}
 EOF
 chown root:tproxy /etc/tproxy-server/config.json /etc/tproxy-server/profiles.json
 chmod 0640 /etc/tproxy-server/config.json
 chmod 0400 /etc/tproxy-server/profiles.json
+
+grep -q '"carrier_mode":"https-lanes"' /etc/tproxy-server/profiles.json ||
+    die "WEB carrier profile was not configured correctly."
+
+echo "      WEB carrier mode: https-lanes"
 
 echo "      Starting relay..."
 runuser -u tproxy -- test -r "$SITE_TARGET/index.html" ||
@@ -1206,7 +1211,7 @@ if [[ "$RELAY_READY" != "1" ]]; then
     fi
 
     cat > /etc/tproxy-server/profiles.json <<EOF
-{"profiles":[{"name":"default","secret":"$SECRET","backend":"127.0.0.1:$MT_PORT"}]}
+{"profiles":[{"name":"default","secret":"$SECRET","backend":"127.0.0.1:$MT_PORT","carrier_mode":"https-lanes"}]}
 EOF
 
     chown root:tproxy /etc/tproxy-server/profiles.json
