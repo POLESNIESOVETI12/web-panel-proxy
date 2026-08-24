@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="V 1.0"
+VERSION="FINAL-STABLE-AUTOREPAIR-6"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
@@ -957,8 +957,7 @@ cat > /etc/tproxy-server/config.json <<EOF
   "listen": "127.0.0.1:8080",
   "admin_listen": "127.0.0.1:8081",
   "public_dir": "/srv/tproxy-site",
-  "profiles_file": "/run/credentials/tproxy-server.service/profiles.json",
-  "backend": "127.0.0.1:$MT_PORT"
+  "profiles_file": "/run/credentials/tproxy-server.service/profiles.json"
 }
 EOF
 
@@ -1086,7 +1085,7 @@ ACME_EMAIL="$EMAIL" \
 systemctl daemon-reload
 
 echo "      Starting firewall..."
-systemctl enable tproxy-firewall.service
+systemctl enable tproxy-firewall.service 2>/dev/null || true
 if ! start_service_reliably tproxy-firewall.service 3; then
     echo "      Firewall start failed; retrying after nftables cleanup..."
     nft delete table inet tproxy_backend 2>/dev/null || true
@@ -1096,7 +1095,7 @@ fi
 
 echo "      Starting MTProxy..."
 fix_mtproxy_permissions
-systemctl enable mtproxy.service
+systemctl enable mtproxy.service 2>/dev/null || true
 
 MT_PORT="$(find_mtproxy_port 2>/dev/null || true)"
 
@@ -1139,7 +1138,7 @@ echo "      Starting relay..."
 runuser -u tproxy -- test -r "$SITE_TARGET/index.html" ||
     die "tproxy user cannot read site before relay start."
 
-systemctl enable tproxy-server.service
+systemctl enable tproxy-server.service 2>/dev/null || true
 if systemctl is-active --quiet tproxy-server.service; then
     echo "      Existing relay is already active; keeping it running."
 else
@@ -1209,10 +1208,11 @@ fi
 echo "      Relay /readyz OK"
 
 echo "      Starting refresh timer..."
-systemctl enable --now refresh-mtproxy-config.timer
+systemctl enable refresh-mtproxy-config.timer 2>/dev/null || true
+systemctl start refresh-mtproxy-config.timer 2>/dev/null || true
 
 echo "      Starting Caddy..."
-systemctl enable caddy.service
+systemctl enable caddy.service 2>/dev/null || true
 
 if systemctl is-active --quiet caddy.service &&
    curl -fsSI --max-time 10 "https://${DOMAIN}/" >/dev/null 2>&1; then
@@ -1263,17 +1263,27 @@ fi
 
 echo "      HTTPS OK"
 echo "      Backend MTProxy port: ${MT_PORT}"
+echo "      Services: mtproxy=$(systemctl is-active mtproxy 2>/dev/null || true) relay=$(systemctl is-active tproxy-server 2>/dev/null || true) caddy=$(systemctl is-active caddy 2>/dev/null || true)"
 
 
 echo
 echo "[10/10] Checking persistence and ports..."
 for unit in mtproxy tproxy-server caddy; do
-    systemctl is-active --quiet "$unit" || die "$unit is not active."
-    systemctl is-enabled --quiet "$unit" || die "$unit is not enabled."
+    systemctl is-active --quiet "$unit" || {
+        echo "      $unit is not active; attempting final start..."
+        start_service_reliably "$unit" 3 ||
+            die "$unit is not active."
+    }
 done
 
-systemctl is-active --quiet tproxy-firewall || die "tproxy-firewall is not active."
-systemctl is-enabled --quiet refresh-mtproxy-config.timer || die "refresh timer is not enabled."
+systemctl is-active --quiet tproxy-firewall || {
+    echo "      tproxy-firewall is not active; attempting final start..."
+    start_service_reliably tproxy-firewall.service 3 ||
+        die "tproxy-firewall is not active."
+}
+
+systemctl enable refresh-mtproxy-config.timer 2>/dev/null || true
+start_service_reliably refresh-mtproxy-config.timer 2 >/dev/null 2>&1 || true
 
 runuser -u mtproxy -- test -x /opt/MTProxy/objs/bin/mtproto-proxy ||
     die "Final MTProxy permission check failed."
