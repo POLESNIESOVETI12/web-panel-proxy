@@ -181,6 +181,11 @@ nano /srv/tproxy-site/index.html
 
 Можно заменить HTML на свой.
 
+Сохранить файл 
+Ctrl+O
+Enter
+Ctrl+X
+
 После изменения:
 
 ```bash
