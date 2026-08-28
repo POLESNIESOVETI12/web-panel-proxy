@@ -139,7 +139,8 @@ systemctl restart tproxy-panel
 ## Автор
 
 - YouTube: https://www.youtube.com/@POLESNIESOVETI12
-- GitHub: https://github.com/POLESNIESOVETI12/webtelegram
+- GitHub: https://github.com/POLESNIESOVETI12/web-panel-proxy
+
 Поддержка- TEZgpG5rKFZPi8znziAyMD3wiEJQJ3eaQG (USDT TRC 20)
 
-```
+
