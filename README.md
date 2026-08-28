@@ -140,6 +140,6 @@ systemctl restart tproxy-panel
 
 - YouTube: https://www.youtube.com/@POLESNIESOVETI12
 - GitHub: https://github.com/POLESNIESOVETI12/webtelegram
-
+Поддержка- TEZgpG5rKFZPi8znziAyMD3wiEJQJ3eaQG (USDT TRC 20)
 
 ```
