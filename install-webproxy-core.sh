@@ -598,7 +598,7 @@ if [[ "$CADDY_MODE" == "owner" ]]; then
 else
     printf '%s\n' 'WEB_PANEL_PROXY_V2_CADDY_SHARED' > /etc/web-proxy-panel/caddy-owned
 fi
-printf '%s\n' '2.0.1' > /etc/web-proxy-panel/version
+printf '%s\n' '2.0.2' > /etc/web-proxy-panel/version
 chmod 0600 /etc/web-proxy-panel/primary-secret
 chmod 0600 /etc/web-proxy-panel/caddy-owned
 chmod 0600 /etc/web-proxy-panel/version

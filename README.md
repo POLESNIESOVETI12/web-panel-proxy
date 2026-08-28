@@ -2,7 +2,7 @@
   <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
 </p>
 
-<h1 align="center">WEB PANEL PROXY V 2.0.1</h1>
+<h1 align="center">WEB PANEL PROXY V 2.0</h1>
 
 <p align="center">Telegram WEB Proxy и панель управления для собственного VPS</p>
 
@@ -38,7 +38,7 @@ WEB PANEL PROXY V 2.0 — установщик Telegram WEB Proxy и веб-па
 Подключитесь к VPS и выполните:
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.0.1/install.sh)"
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.0.2/install.sh)"
 ```
 
 Во время установки укажите:
@@ -87,7 +87,7 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/POLESNIESOVETI12/we
 Для уже установленного WEB PANEL PROXY используйте отдельную безопасную команду:
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.0.1/update.sh)"
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.0.2/update.sh)"
 ```
 
 Обновление меняет файлы панели, но сохраняет пользователей, секреты, пароль администратора, приватный адрес панели и HTML-заглушку сайта. Перед началом автоматически создаётся резервная копия в `/root/web-panel-proxy-update-backup-ДАТА-ВРЕМЯ`. Relay сначала проходит тесты и проверку конфигурации; при ошибке предыдущий бинарник и состояние панели восстанавливаются автоматически.
@@ -97,7 +97,7 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/POLESNIESOVETI12/we
 ## Удаление одной командой
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.0.1/uninstall-web-proxy.sh)"
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.0.2/uninstall-web-proxy.sh)"
 ```
 
 Также после обычной установки доступна локальная команда:
@@ -114,7 +114,7 @@ sudo /usr/local/sbin/web-panel-proxy-uninstall
 - Служба firewall повторно применяет правила после запуска или перезапуска `nftables` и стартует раньше пользовательских proxy-служб.
 - После 8 неудачных попыток входа с одного адреса авторизация временно блокируется.
 - Сессии подписываются HMAC-SHA256; смена пароля завершает все ранее выданные сессии.
-- Установщик и обновление используют тег `v2.0.1`, а исходники relay зафиксированы на проверенном commit.
+- Установщик и обновление используют тег `v2.0.2`, а исходники relay зафиксированы на проверенном commit.
 - Дополнительно рекомендуется разрешить во внешнем firewall провайдера только `22`, `80` и `443`.
 
 ## Полезные команды диагностики
@@ -141,6 +141,22 @@ systemctl restart tproxy-panel
 - YouTube: https://www.youtube.com/@POLESNIESOVETI12
 - GitHub: https://github.com/POLESNIESOVETI12/webtelegram
 
+## Лицензия
 
+Проект распространяется по лицензии MIT. Полный текст находится в файле `LICENSE`.
+
+Перед созданием публичного тега проверьте на чистых Ubuntu 22.04, Ubuntu 24.04 и Debian 12: установку, вход в панель, создание и удаление пользователя, QR и ссылку, переключение всех HTML-пресетов, сохранение своей заглушки, восстановление firewall после перезапуска `nftables` и VPS, обновление с сохранением данных и полное удаление. Отдельно убедитесь, что удаление сохраняет Caddy, если в нём настроен второй сайт.
+
+## Публикация версии владельцем репозитория
+
+После успешной проверки загрузите файлы в ветку `main`, затем создайте неизменяемый тег, который использует установщик:
+
+```bash
+git add .
+git commit -m "WEB PANEL PROXY V 2.0.2 public release"
+git tag -a v2.0.2 -m "WEB PANEL PROXY V 2.0.2"
+git push origin main
+git push origin v2.0.2
 ```
 
+Не перемещайте уже опубликованный тег `v2.0.2` на другой commit. Для следующего исправления используйте новый тег, например `v2.0.3`, и обновите `RELEASE_REF` в `install.sh` и `update.sh`.

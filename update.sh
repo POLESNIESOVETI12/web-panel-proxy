@@ -4,7 +4,7 @@ set -Eeuo pipefail
 umask 077
 
 REPOSITORY="https://github.com/POLESNIESOVETI12/web-panel-proxy.git"
-RELEASE_REF="${WEB_PANEL_PROXY_REF:-v2.0.1}"
+RELEASE_REF="${WEB_PANEL_PROXY_REF:-v2.0.2}"
 SERVICE="/etc/systemd/system/tproxy-panel.service"
 LEGACY_SERVICE="/etc/systemd/system/web-proxy-panel.service"
 DATA_FILE="/var/lib/tproxy-panel/data.json"
@@ -233,7 +233,7 @@ nft list table inet web_proxy_panel >/dev/null 2>&1 ||
 if [[ ! -s /etc/web-proxy-panel/caddy-owned ]]; then
     printf '%s\n' 'WEB_PANEL_PROXY_V2_CADDY_SHARED' > /etc/web-proxy-panel/caddy-owned
 fi
-printf '%s\n' '2.0.1' > /etc/web-proxy-panel/version
+printf '%s\n' '2.0.2' > /etc/web-proxy-panel/version
 chmod 0600 /etc/web-proxy-panel/caddy-owned /etc/web-proxy-panel/version
 UPDATE_COMMITTED=1
 echo

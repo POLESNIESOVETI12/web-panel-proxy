@@ -4,7 +4,7 @@ set -Eeuo pipefail
 umask 077
 
 REPOSITORY="https://github.com/POLESNIESOVETI12/web-panel-proxy.git"
-RELEASE_REF="${WEB_PANEL_PROXY_REF:-v2.0.1}"
+RELEASE_REF="${WEB_PANEL_PROXY_REF:-v2.0.2}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 [[ ${EUID:-1} -eq 0 ]] || die "Run this command with sudo or as root."
