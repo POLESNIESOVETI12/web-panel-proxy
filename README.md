@@ -2,7 +2,7 @@
   <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
 </p>
 
-<h1 align="center">WEB PANEL PROXY V 2.0</h1>
+<h1 align="center">WEB PANEL PROXY V 2.0.2</h1>
 
 <p align="center">Telegram WEB Proxy и панель управления для собственного VPS</p>
 
@@ -36,6 +36,8 @@ WEB PANEL PROXY V 2.0 — установщик Telegram WEB Proxy и веб-па
 ## Установка одной командой
 
 Подключитесь к VPS и выполните:
+
+АРЕНДОВАТЬ VPS И ДОМЕН МОЖНО ТУТ(https://play2go.cloud/?ref_id=m1o4quWG0sE)
 
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.0.2/install.sh)"
