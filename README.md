@@ -2,7 +2,7 @@
   <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
 </p>
 
-<h1 align="center">WEB PANEL PROXY V 2.0</h1>
+<h1 align="center">WEB PANEL PROXY V 2.0.1</h1>
 
 <p align="center">Telegram WEB Proxy и панель управления для собственного VPS</p>
 
