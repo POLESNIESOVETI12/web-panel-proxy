@@ -1203,5 +1203,5 @@ echo "YouTube:"
 echo "  https://www.youtube.com/@POLESNIESOVETI12"
 echo
 echo "GitHub:"
-echo "  https://github.com/POLESNIESOVETI12/webtelegram"
+echo "  https://github.com/POLESNIESOVETI12/web-panel-proxy"
 echo "============================================================"
