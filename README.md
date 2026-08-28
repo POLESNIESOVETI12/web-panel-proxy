@@ -8,6 +8,8 @@
 
 WEB PANEL PROXY V 2.0 — установщик Telegram WEB Proxy и веб-панели управления для VPS.
 
+[АРЕНДОВАТЬ VPS И ДОМЕН]((https://play2go.cloud/?ref_id=m1o4quWG0sE))
+
 Панель создаёт отдельные подключения для пользователей, показывает QR-код и ссылку для Telegram, а также позволяет менять HTML главной страницы сайта.
 
 ## Возможности
@@ -27,6 +29,7 @@ WEB PANEL PROXY V 2.0 — установщик Telegram WEB Proxy и веб-па
 ## Требования
 
 - VPS с Ubuntu 22.04+ или Debian 12+.
+-[АРЕНДОВАТЬ VPS И ДОМЕН]((https://play2go.cloud/?ref_id=m1o4quWG0sE))
 - Домен или поддомен с A-записью, направленной на IPv4 вашего VPS.
 - Открытые порты `80` и `443`.
 - Доступ к серверу от пользователя `root`.
@@ -37,7 +40,7 @@ WEB PANEL PROXY V 2.0 — установщик Telegram WEB Proxy и веб-па
 
 Подключитесь к VPS и выполните:
 
-АРЕНДОВАТЬ VPS И ДОМЕН МОЖНО ТУТ(https://play2go.cloud/?ref_id=m1o4quWG0sE)
+[АРЕНДОВАТЬ VPS И ДОМЕН]((https://play2go.cloud/?ref_id=m1o4quWG0sE))
 
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.0.2/install.sh)"
