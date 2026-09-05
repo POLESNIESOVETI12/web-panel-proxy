@@ -52,8 +52,6 @@ TCP-порт `80` остаётся свободным. Caddy выпускает 
 
 ## Установка одной командой из GitHub
 
-После публикации неизменяемого тега `v2.1.0` выполните на чистом VPS от `root`:
-
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update && apt-get -o DPkg::Lock::Timeout=600 install -y curl ca-certificates && bash -c "$(curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.1.0/install.sh)"
 ```
