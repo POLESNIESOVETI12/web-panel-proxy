@@ -168,13 +168,20 @@ fi
 # Remove only blocks managed by the former experimental NaiveProxy integration.
 # The distribution Caddy binary is retained and used again after this migration.
 if [[ -s /etc/caddy/Caddyfile ]]; then
-    python3 - /etc/caddy/Caddyfile <<'PY'
+    python3 - /etc/caddy/Caddyfile "$DOMAIN" <<'PY'
 from pathlib import Path
 import re,sys
-p=Path(sys.argv[1]); source=p.read_text(encoding="utf-8")
+p=Path(sys.argv[1]); domain=sys.argv[2]; source=p.read_text(encoding="utf-8")
 source=re.sub(r"\n?[ \t]*# WPP NAIVE GLOBAL BEGIN\n.*?\n[ \t]*# WPP NAIVE GLOBAL END\n?","\n",source,flags=re.S)
 source=re.sub(r"\n?[ \t]*# WPP NAIVE BEGIN\n.*?\n[ \t]*# WPP NAIVE END\n?","\n",source,flags=re.S)
-source=re.sub(r"(?m)^\s*:443,\s*([a-z0-9][a-z0-9.-]*)\s*\{\s*$",r"\1 {",source,count=1)
+legacy_address = re.compile(
+    r"(?m)^(?P<indent>\s*)(?:"
+    r":443\s*,\s*" + re.escape(domain) +
+    r"|" + re.escape(domain) + r"\s*,\s*:443"
+    r"|https://" + re.escape(domain) + r"(?::443)?"
+    r"|" + re.escape(domain) + r":443)\s*\{\s*$"
+)
+source=legacy_address.sub(lambda m:m.group("indent")+domain+" {",source,count=1)
 tmp=p.with_suffix(".wpp-stable.tmp"); tmp.write_text(source,encoding="utf-8")
 tmp.chmod(0o640); tmp.replace(p)
 PY
@@ -2296,6 +2303,14 @@ import re, sys
 from pathlib import Path
 p, path, domain, email, xray_path = sys.argv[1:]
 s = Path(p).read_text(encoding="utf-8")
+legacy_address = re.compile(
+    r"(?m)^(?P<indent>\s*)(?:"
+    r":443\s*,\s*" + re.escape(domain) +
+    r"|" + re.escape(domain) + r"\s*,\s*:443"
+    r"|https://" + re.escape(domain) + r"(?::443)?"
+    r"|" + re.escape(domain) + r":443)\s*\{\s*$"
+)
+s = legacy_address.sub(lambda m:m.group("indent")+domain+" {",s,count=1)
 
 # Materialize the core Caddyfile placeholders before validation.
 s = s.replace("{$TPROXY_HOSTNAME}", domain)
@@ -2360,6 +2375,18 @@ s = re.sub(
 )
 s = re.sub(r'(?m)^\s*auto_https\s+disable_redirects\s*\n?', '', s)
 s = re.sub(r'\A\s*\{\s*\}\s*', '', s, count=1)
+s = re.sub(
+    r'\n?\s*# WPP HTTP REDIRECT BEGIN\n.*?\n\s*# WPP HTTP REDIRECT END\n?',
+    '\n', s, flags=re.S,
+)
+redirect = (
+    "# WPP HTTP REDIRECT BEGIN\n"
+    "http://" + domain + " {\n"
+    "    redir https://" + domain + "{uri} permanent\n"
+    "}\n"
+    "# WPP HTTP REDIRECT END\n"
+)
+s = s.rstrip() + "\n\n" + redirect
 Path(p).write_text(s, encoding="utf-8")
 PY
 

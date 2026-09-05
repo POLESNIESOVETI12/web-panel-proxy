@@ -649,6 +649,21 @@ target,canonical,domain=sys.argv[1:]
 existing=open(target,encoding="utf-8").read()
 source=open(canonical,encoding="utf-8").read()
 
+# Older WPP/Naive builds made the HTTPS-only listener explicit in the site
+# address. Normalize every known legacy spelling before locating the block,
+# otherwise the canonical domain block would be appended alongside the old
+# one and Caddy would continue to omit TCP/80.
+legacy_address = re.compile(
+    r"(?m)^(?P<indent>\s*)(?:"
+    r":443\s*,\s*" + re.escape(domain) +
+    r"|" + re.escape(domain) + r"\s*,\s*:443"
+    r"|https://" + re.escape(domain) + r"(?::443)?"
+    r"|" + re.escape(domain) + r":443)\s*\{\s*$"
+)
+existing = legacy_address.sub(
+    lambda match: match.group("indent") + domain + " {", existing, count=1
+)
+
 def block(text, name):
     lines=text.splitlines(keepends=True)
     pattern=re.compile(r"^\s*"+re.escape(name)+r"\s*\{\s*$")
@@ -691,6 +706,16 @@ from pathlib import Path
 
 path, domain = sys.argv[1:]
 text = Path(path).read_text(encoding="utf-8")
+legacy_address = re.compile(
+    r"(?m)^(?P<indent>\s*)(?:"
+    r":443\s*,\s*" + re.escape(domain) +
+    r"|" + re.escape(domain) + r"\s*,\s*:443"
+    r"|https://" + re.escape(domain) + r"(?::443)?"
+    r"|" + re.escape(domain) + r":443)\s*\{\s*$"
+)
+text = legacy_address.sub(
+    lambda match: match.group("indent") + domain + " {", text, count=1
+)
 text = re.sub(
     r'\n?\s*# WPP TLS WITHOUT PORT 80 BEGIN\n.*?\n\s*# WPP TLS WITHOUT PORT 80 END\n?',
     '\n', text, flags=re.S,
@@ -699,6 +724,21 @@ text = re.sub(r'(?m)^\s*auto_https\s+disable_redirects\s*\n?', '', text)
 text = re.sub(r'\A\s*\{\s*\}\s*', '', text, count=1)
 if not re.search(r'(?m)^\s*' + re.escape(domain) + r'\s*\{\s*$', text):
     raise SystemExit("WEB PANEL PROXY Caddy site block was not found")
+# An explicit managed HTTP site is intentionally used instead of relying only
+# on automatic HTTPS. It guarantees that Caddy owns TCP/80 after migrations
+# from HTTPS-only releases and keeps the change scoped to the WPP domain.
+text = re.sub(
+    r'\n?\s*# WPP HTTP REDIRECT BEGIN\n.*?\n\s*# WPP HTTP REDIRECT END\n?',
+    '\n', text, flags=re.S,
+)
+redirect = (
+    "# WPP HTTP REDIRECT BEGIN\n"
+    "http://" + domain + " {\n"
+    "    redir https://" + domain + "{uri} permanent\n"
+    "}\n"
+    "# WPP HTTP REDIRECT END\n"
+)
+text = text.rstrip() + "\n\n" + redirect
 Path(path).write_text(text, encoding="utf-8")
 PY
 test -s /etc/caddy/Caddyfile || die "Caddyfile was not configured."
