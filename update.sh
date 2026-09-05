@@ -1,10 +1,27 @@
 #!/usr/bin/env bash
-# Safe in-place updater for WEB PANEL PROXY V 2.0.
+# Safe in-place updater for WEB PANEL PROXY V 2.1.0.
 set -Eeuo pipefail
 umask 077
 
+# Use the fixed public repository without interactive credentials or local
+# Git URL substitutions.
+export GIT_TERMINAL_PROMPT=0
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL=/dev/null
+
 REPOSITORY="https://github.com/POLESNIESOVETI12/web-panel-proxy.git"
-RELEASE_REF="${WEB_PANEL_PROXY_REF:-v2.0.2}"
+REQUESTED_REF="${WEB_PANEL_PROXY_REF:-}"
+RELEASE_REF="$REQUESTED_REF"
+LOCAL_SOURCE=""
+if [[ "${1:-}" == "--local" ]]; then
+    LOCAL_SOURCE="$(cd "$(dirname "$0")" && pwd)"
+    RELEASE_REF="v2.1.0"
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py; do
+        [[ -s "$LOCAL_SOURCE/$file" ]] || { echo "Incomplete local archive: $file is missing." >&2; exit 1; }
+    done
+elif [[ $# != 0 ]]; then
+    echo "Usage: bash update.sh [--local]" >&2; exit 1
+fi
 SERVICE="/etc/systemd/system/tproxy-panel.service"
 LEGACY_SERVICE="/etc/systemd/system/web-proxy-panel.service"
 DATA_FILE="/var/lib/tproxy-panel/data.json"
@@ -17,7 +34,7 @@ exec 9>/run/lock/web-panel-proxy.lock
 flock -n 9 || die "Another WEB PANEL PROXY install, update or removal is already running."
 
 echo "============================================================"
-echo "       WEB PANEL PROXY V 2.0 — SAFE UPDATE"
+echo "      WEB PANEL PROXY V 2.1.0 — SAFE UPDATE"
 echo "============================================================"
 echo "Users, administrator password, panel URL and site HTML will be retained."
 
@@ -48,7 +65,7 @@ fi
 if [[ "$MIGRATING_LEGACY" != 1 ]]; then
     [[ -f "$SERVICE" ]] || die "Panel service file was not found."
     PANEL_PATH="$(sed -n 's/^Environment=WEBPROXY_PANEL_PATH=//p' "$SERVICE" | head -n1 || true)"
-    [[ "$PANEL_PATH" =~ ^/panel-[a-f0-9]+$ ]] || die "Could not read the existing panel address."
+    [[ "$PANEL_PATH" =~ ^/panel-[a-z0-9-]{3,64}$ ]] || die "Could not read the existing panel address."
 fi
 
 if [[ "$MIGRATING_LEGACY" == 1 ]]; then
@@ -71,15 +88,24 @@ else
 fi
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
+# Pause the HTTP writer before taking a snapshot of subscription slots/keys.
+# Proxy services keep running. Recover the panel if snapshot/download fails.
+PANEL_WAS_RUNNING=0
+if systemctl is-active --quiet tproxy-panel.service; then
+    PANEL_WAS_RUNNING=1
+    systemctl stop tproxy-panel.service
+fi
+trap 'if [[ "$PANEL_WAS_RUNNING" == 1 ]]; then systemctl start tproxy-panel.service || true; fi' EXIT
 BACKUP="/root/web-panel-proxy-update-backup-${STAMP}"
 install -d -m 0700 "$BACKUP"
 BACKUP_ITEMS=()
-for item in /opt/tproxy-panel /opt/MTProxy /usr/local/bin/tproxy-server /usr/local/sbin/web-proxy-panelctl /usr/local/sbin/web-proxy-panel-user-firewall /usr/local/sbin/web-panel-proxy-uninstall /etc/systemd/system/tproxy-panel.service /etc/systemd/system/web-proxy-panel-firewall.service /etc/systemd/system/tproxy-server.service /etc/systemd/system/mtproxy.service /etc/systemd/system/caddy.service.d/tproxy.conf /etc/caddy/Caddyfile /etc/tproxy-server /etc/mtproxy /var/lib/tproxy-panel /etc/web-proxy-panel /srv/tproxy-site; do
+for item in /opt/tproxy-panel /opt/web-panel-proxy /opt/MTProxy /usr/local/bin/caddy /usr/local/bin/tproxy-server /usr/local/sbin/web-proxy-panelctl /usr/local/sbin/web-proxy-panel-user-firewall /usr/local/sbin/web-panel-proxy-sync-tls /usr/local/sbin/web-panel-proxy-update /usr/local/sbin/web-panel-proxy-uninstall /usr/local/sbin/WPP /usr/local/sbin/wpp /etc/systemd/system/tproxy-panel.service /etc/systemd/system/web-proxy-panel-firewall.service /etc/systemd/system/web-proxy-panel-traffic.service /etc/systemd/system/web-proxy-panel-traffic.timer /etc/systemd/system/web-panel-proxy-xray.service /etc/systemd/system/web-panel-proxy-sync-tls.service /etc/systemd/system/web-panel-proxy-sync-tls.timer /etc/systemd/system/tproxy-server.service /etc/systemd/system/mtproxy.service /etc/systemd/system/caddy.service.d/tproxy.conf /etc/caddy/Caddyfile /etc/tproxy-server /etc/mtproxy /etc/mita /etc/web-panel-proxy-xray /var/lib/web-panel-proxy-xray /var/lib/tproxy-panel /etc/web-proxy-panel /srv/tproxy-site; do
     [[ -e "$item" ]] && BACKUP_ITEMS+=("$item")
     [[ -e "$item" ]] && cp -a --parents "$item" "$BACKUP"
 done
 shopt -s nullglob
-for item in /etc/systemd/system/web-proxy-user-*.service; do
+for item in /etc/systemd/system/web-proxy-user-*.service /etc/systemd/system/web-panel-proxy-web-update.service /etc/systemd/system/web-panel-proxy-metrics.service /etc/systemd/system/web-panel-proxy-metrics.timer; do
+    [[ -e "$item" ]] || continue
     BACKUP_ITEMS+=("$item")
     cp -a --parents "$item" "$BACKUP"
 done
@@ -89,26 +115,53 @@ echo "Backup created: $BACKUP"
 
 HAD_FIREWALL_SERVICE=0
 [[ -e /etc/systemd/system/web-proxy-panel-firewall.service ]] && HAD_FIREWALL_SERVICE=1
+HAD_TRAFFIC_TIMER=0
+[[ -e /etc/systemd/system/web-proxy-panel-traffic.timer ]] && HAD_TRAFFIC_TIMER=1
+HAD_METRICS_TIMER=0
+[[ -e /etc/systemd/system/web-panel-proxy-metrics.timer ]] && HAD_METRICS_TIMER=1
 HAD_PANEL_DATA=0
 HAD_PANEL_SERVICE=0
 HAD_PRIMARY_SECRET=0
 HAD_CADDY_DROPIN=0
 HAD_PANEL_STATE_DIR=0
+HAD_XRAY_STATE=0
+HAD_XRAY_USER=0
+HAD_XRAY_GROUP=0
+HAD_WPP_MENU=0
+HAD_WEB_UPDATE_UNIT=0
+[[ -e /etc/systemd/system/web-panel-proxy-web-update.service ]] && HAD_WEB_UPDATE_UNIT=1
 [[ -e "$DATA_FILE" ]] && HAD_PANEL_DATA=1
 [[ -e "$SERVICE" ]] && HAD_PANEL_SERVICE=1
 [[ -e "$PRIMARY_SECRET" ]] && HAD_PRIMARY_SECRET=1
 [[ -e /etc/systemd/system/caddy.service.d/tproxy.conf ]] && HAD_CADDY_DROPIN=1
 [[ -d /etc/web-proxy-panel ]] && HAD_PANEL_STATE_DIR=1
+{ [[ -e /opt/web-panel-proxy ]] || [[ -e /etc/web-panel-proxy-xray ]] || [[ -e /etc/systemd/system/web-panel-proxy-xray.service ]]; } && HAD_XRAY_STATE=1
+id xray >/dev/null 2>&1 && HAD_XRAY_USER=1
+getent group xray >/dev/null 2>&1 && HAD_XRAY_GROUP=1
+[[ -e /usr/local/sbin/WPP ]] && HAD_WPP_MENU=1
 UPDATE_COMMITTED=0
 rollback_update() {
     local code="$1"
     [[ "$UPDATE_COMMITTED" == 1 || "$code" == 0 ]] && return 0
     echo "Update failed; restoring the previous working state..." >&2
-    systemctl stop tproxy-panel.service web-proxy-panel-firewall.service 2>/dev/null || true
+    systemctl stop tproxy-panel.service web-proxy-panel-firewall.service web-proxy-panel-traffic.timer web-proxy-panel-traffic.service web-panel-proxy-metrics.timer web-panel-proxy-metrics.service web-panel-proxy-xray.service web-panel-proxy-sync-tls.timer 2>/dev/null || true
     tar --numeric-owner -xpf "$BACKUP/state.tar" -C / 2>/dev/null || true
     if [[ "$HAD_FIREWALL_SERVICE" == 0 ]]; then
         rm -f /etc/systemd/system/web-proxy-panel-firewall.service
         rm -f /usr/local/sbin/web-proxy-panel-user-firewall
+    fi
+    if [[ "$HAD_TRAFFIC_TIMER" == 0 ]]; then
+        rm -f /etc/systemd/system/web-proxy-panel-traffic.service /etc/systemd/system/web-proxy-panel-traffic.timer
+    fi
+    if [[ "$HAD_METRICS_TIMER" == 0 ]]; then
+        systemctl disable web-panel-proxy-metrics.timer 2>/dev/null || true
+        rm -f /etc/systemd/system/web-panel-proxy-metrics.service /etc/systemd/system/web-panel-proxy-metrics.timer
+    fi
+    if [[ "$HAD_WPP_MENU" == 0 ]]; then
+        rm -f /usr/local/sbin/WPP /usr/local/sbin/wpp /usr/local/sbin/web-panel-proxy-update
+    fi
+    if [[ "$HAD_WEB_UPDATE_UNIT" == 0 ]]; then
+        rm -f /etc/systemd/system/web-panel-proxy-web-update.service
     fi
     if [[ "$HAD_PANEL_SERVICE" == 0 ]]; then
         rm -f "$SERVICE"
@@ -126,9 +179,27 @@ rollback_update() {
     if [[ "$HAD_CADDY_DROPIN" == 0 ]]; then
         rm -f /etc/systemd/system/caddy.service.d/tproxy.conf
     fi
+    if [[ "$HAD_XRAY_STATE" == 0 ]]; then
+        rm -rf /opt/web-panel-proxy /etc/web-panel-proxy-xray /var/lib/web-panel-proxy-xray
+        rm -f /etc/web-proxy-panel/xray-path /etc/web-proxy-panel/xray-user-owned /etc/web-proxy-panel/xray-group-owned \
+            /etc/web-proxy-panel/hysteria-ufw-owned
+        rm -f /usr/local/sbin/web-panel-proxy-sync-tls \
+            /etc/systemd/system/web-panel-proxy-xray.service \
+            /etc/systemd/system/web-panel-proxy-sync-tls.service \
+            /etc/systemd/system/web-panel-proxy-sync-tls.timer
+    fi
+    if [[ "$HAD_XRAY_USER" == 0 ]]; then
+        userdel xray 2>/dev/null || true
+    fi
+    if [[ "$HAD_XRAY_GROUP" == 0 ]]; then
+        groupdel xray 2>/dev/null || true
+    fi
     systemctl daemon-reload
     systemctl restart mtproxy.service tproxy-server.service caddy.service tproxy-panel.service 2>/dev/null || true
     [[ "$HAD_FIREWALL_SERVICE" == 1 ]] && systemctl restart web-proxy-panel-firewall.service 2>/dev/null || true
+    [[ "$HAD_XRAY_STATE" == 1 ]] && systemctl restart web-panel-proxy-xray.service 2>/dev/null || true
+    [[ "$HAD_TRAFFIC_TIMER" == 1 ]] && systemctl restart web-proxy-panel-traffic.timer 2>/dev/null || true
+    [[ "$HAD_METRICS_TIMER" == 1 ]] && systemctl restart web-panel-proxy-metrics.timer 2>/dev/null || true
     echo "Previous files restored from: $BACKUP" >&2
 }
 
@@ -137,6 +208,23 @@ if ! command -v git >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get -o DPkg::Lock::Timeout=600 update
     apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends git
+fi
+
+if [[ -z "$LOCAL_SOURCE" ]]; then
+if [[ -z "$RELEASE_REF" ]]; then
+    echo "Checking the latest published WEB PANEL PROXY version..."
+    RELEASE_REF="$(git ls-remote --tags --refs "$REPOSITORY" 'v[0-9]*' |
+        awk -F/ '{print $3}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+fi
+[[ "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] ||
+    die "Could not determine a valid published release tag."
+echo "Selected release: $RELEASE_REF"
+CURRENT_VERSION="$(cat /etc/web-proxy-panel/version 2>/dev/null || true)"
+if [[ -z "$REQUESTED_REF" && "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.+~-][A-Za-z0-9.+~-]+)?$ ]] &&
+   dpkg --compare-versions "$CURRENT_VERSION" ge "${RELEASE_REF#v}"; then
+    echo "WEB PANEL PROXY ${CURRENT_VERSION} is already the latest published stable version."
+    exit 0
+fi
 fi
 
 TEMP_DIR="$(mktemp -d /tmp/web-panel-proxy-update.XXXXXX)"
@@ -149,8 +237,15 @@ finish() {
 }
 trap finish EXIT
 
-echo "Downloading the current WEB PANEL PROXY V 2.0 files..."
+echo "Downloading the current WEB PANEL PROXY V 2.1.0 files..."
+if [[ -n "$LOCAL_SOURCE" ]]; then
+    install -d -m 0700 "$TEMP_DIR/source"
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py; do
+        cp -a "$LOCAL_SOURCE/$file" "$TEMP_DIR/source/$file"
+    done
+else
 git clone --depth 1 --branch "$RELEASE_REF" "$REPOSITORY" "$TEMP_DIR/source"
+fi
 [[ -f "$TEMP_DIR/source/install-panel.sh" ]] || die "Update package is incomplete."
 chmod 0700 "$TEMP_DIR/source/install-panel.sh"
 
@@ -225,15 +320,22 @@ fi
 
 DOMAIN="$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' /etc/systemd/system/caddy.service.d/tproxy.conf | head -n1)"
 PANEL_PATH="$(sed -n 's/^Environment=WEBPROXY_PANEL_PATH=//p' "$SERVICE" | head -n1 || true)"
-[[ "$PANEL_PATH" =~ ^/panel-[a-f0-9]+$ ]] || die "The updated panel address could not be read."
+[[ "$PANEL_PATH" =~ ^/panel-[a-z0-9-]{3,64}$ ]] || die "The updated panel address could not be read."
 systemctl is-active --quiet web-proxy-panel-firewall.service ||
     die "Persistent user firewall did not start after the update."
 nft list table inet web_proxy_panel >/dev/null 2>&1 ||
     die "Persistent user firewall table is missing after the update."
+[[ -x /opt/web-panel-proxy/xray/xray ]] || die "Xray binary is missing after the update."
+[[ -s /etc/web-panel-proxy-xray/config.json ]] || die "Xray configuration is missing after the update."
+command -v caddy >/dev/null 2>&1 || die "Caddy is missing after the update."
+[[ -x /opt/MTProxy/objs/bin/mtproto-proxy ]] || die "MTProxy is missing after the update."
+systemctl is-active --quiet caddy.service || die "Caddy did not start after the update."
+systemctl is-active --quiet web-panel-proxy-sync-tls.timer ||
+    die "The Xray TLS synchronization timer did not start after the update."
 if [[ ! -s /etc/web-proxy-panel/caddy-owned ]]; then
     printf '%s\n' 'WEB_PANEL_PROXY_V2_CADDY_SHARED' > /etc/web-proxy-panel/caddy-owned
 fi
-printf '%s\n' '2.0.2' > /etc/web-proxy-panel/version
+printf '%s\n' "${RELEASE_REF#v}" > /etc/web-proxy-panel/version
 chmod 0600 /etc/web-proxy-panel/caddy-owned /etc/web-proxy-panel/version
 UPDATE_COMMITTED=1
 echo

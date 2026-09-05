@@ -2,7 +2,13 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="2.0"
+# The relay source is public and pinned below. Do not allow credential prompts
+# or root-level Git URL rewrites to change where it is fetched from.
+export GIT_TERMINAL_PROMPT=0
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL=/dev/null
+
+VERSION="2.1.0"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
@@ -135,7 +141,7 @@ on_error() {
 }
 trap on_error ERR
 
-echo "Configuring WEB PANEL PROXY V 2.0..."
+echo "Configuring WEB PANEL PROXY V 2.1.0..."
 
 [[ $EUID -eq 0 ]] || die "Run this installer as root."
 [[ "$(uname -m)" == "x86_64" ]] || die "x86_64 is required."
@@ -200,8 +206,8 @@ else
     while true; do
         read -r -s -p "Panel administrator password: " PANEL_PASS
         echo
-        if [[ ${#PANEL_PASS} -lt 3 ]]; then
-            echo "Password must contain at least 3 characters."
+        if [[ ${#PANEL_PASS} -lt 8 ]]; then
+            echo "Password must contain at least 8 characters."
             continue
         fi
         break
@@ -277,7 +283,7 @@ chmod 0600 /etc/web-proxy-panel/mtproto-host
 
 echo
 echo "[3/10] Checking ports..."
-check_install_port 80 caddy
+echo "      :80 is not required by WEB PANEL PROXY and may be used by another application."
 check_install_port 443 caddy
 if EXISTING_MTPROXY_PORT="$(find_mtproxy_port 2>/dev/null)"; then
     MT_PORT="$EXISTING_MTPROXY_PORT"
@@ -598,7 +604,7 @@ if [[ "$CADDY_MODE" == "owner" ]]; then
 else
     printf '%s\n' 'WEB_PANEL_PROXY_V2_CADDY_SHARED' > /etc/web-proxy-panel/caddy-owned
 fi
-printf '%s\n' '2.0.2' > /etc/web-proxy-panel/version
+printf '%s\n' '2.1.0' > /etc/web-proxy-panel/version
 chmod 0600 /etc/web-proxy-panel/primary-secret
 chmod 0600 /etc/web-proxy-panel/caddy-owned
 chmod 0600 /etc/web-proxy-panel/version
@@ -676,6 +682,58 @@ else
     install -m 0644 "$REPO_DIR/deploy/caddy.service" /etc/systemd/system/caddy.service
 fi
 rm -f "$CANONICAL_CADDY"
+
+# Keep TCP/80 free. Automatic certificates stay enabled, but the permanent
+# HTTP redirect listener is disabled and the WPP domain uses ACME TLS-ALPN-01
+# on TCP/443 instead of HTTP-01 on TCP/80.
+python3 - /etc/caddy/Caddyfile "$DOMAIN" <<'PY'
+import re, sys
+from pathlib import Path
+
+path, domain = sys.argv[1:]
+text = Path(path).read_text(encoding="utf-8")
+text = re.sub(
+    r'\n?\s*# WPP TLS WITHOUT PORT 80 BEGIN\n.*?\n\s*# WPP TLS WITHOUT PORT 80 END\n?',
+    '\n', text, flags=re.S,
+)
+
+def block_end(lines, start):
+    depth = 0
+    for index in range(start, len(lines)):
+        depth += lines[index].count("{") - lines[index].count("}")
+        if depth == 0:
+            return index
+    raise SystemExit("Unclosed Caddy block")
+
+lines = text.splitlines(keepends=True)
+global_start = next((i for i, line in enumerate(lines) if line.strip() == "{"), None)
+if global_start is None:
+    lines[0:0] = ["{\n", "\tauto_https disable_redirects\n", "}\n", "\n"]
+else:
+    global_end = block_end(lines, global_start)
+    body = [
+        line for line in lines[global_start + 1:global_end]
+        if not re.match(r'^\s*auto_https\b', line)
+    ]
+    lines[global_start + 1:global_end] = ["\tauto_https disable_redirects\n"] + body
+
+site_pattern = re.compile(r"^\s*" + re.escape(domain) + r"\s*\{\s*$")
+site_start = next((i for i, line in enumerate(lines) if site_pattern.match(line)), None)
+if site_start is None:
+    raise SystemExit("WEB PANEL PROXY Caddy site block was not found")
+tls_block = [
+    "\t# WPP TLS WITHOUT PORT 80 BEGIN\n",
+    "\ttls {\n",
+    "\t\tissuer acme {\n",
+    "\t\t\tdisable_http_challenge\n",
+    "\t\t}\n",
+    "\t}\n",
+    "\t# WPP TLS WITHOUT PORT 80 END\n",
+    "\n",
+]
+lines[site_start + 1:site_start + 1] = tls_block
+Path(path).write_text("".join(lines), encoding="utf-8")
+PY
 test -s /etc/caddy/Caddyfile || die "Caddyfile was not configured."
 
 install -d -m 0755 /etc/systemd/system/caddy.service.d
