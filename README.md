@@ -23,7 +23,7 @@
 Подключитесь к VPS по SSH, перейдите в режим `root` и выполните одну команду:
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=600 update && apt-get -o DPkg::Lock::Timeout=600 install -y curl ca-certificates git && bash -c "$(curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.1.0/install.sh)"
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.1.0/install.sh)"
 ```
 
 Во время установки потребуется указать:
