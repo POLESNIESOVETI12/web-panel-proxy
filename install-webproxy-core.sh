@@ -1116,13 +1116,19 @@ runuser -u mtproxy -- test -x /opt/MTProxy/objs/bin/mtproto-proxy ||
 runuser -u tproxy -- test -r /srv/tproxy-site/index.html ||
     die "Final site permission check failed."
 
-for p in "$MT_PORT" 8080 8081 80 443; do
+for p in "$MT_PORT" 8080 8081 443; do
     if ! ss -lnt | grep -Eq ":(${p})\b"; then
         echo "      Missing expected listening port: ${p}" >&2
         ss -lntp || true
         die "Expected port ${p} is not listening."
     fi
 done
+
+# Port 80 is intentionally outside WPP. Another application may listen there,
+# but Caddy itself must not re-enable its automatic HTTP listener.
+if ss -lntp 2>/dev/null | grep -E ':80[[:space:]]' | grep -q 'caddy'; then
+    die "Caddy unexpectedly listens on port 80; the no-HTTP-listener policy was not applied."
+fi
 
 echo
 echo "Core services configured successfully. Continuing to panel setup..."
