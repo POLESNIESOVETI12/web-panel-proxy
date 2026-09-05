@@ -7,6 +7,7 @@
 <p align="center">WEB Proxy, MTProto, VLESS XHTTP, Hysteria2 и панель управления для собственного VPS</p>
 
 ## Требования
+[АРЕНДА VPS И ДОМЕНА](https://play2go.cloud/?ref_id=m1o4quWG0sE)
 
 - Чистый VPS с Ubuntu 22.04+, Ubuntu 24.04+ или Debian 12+.
 - Архитектура `x86_64`.
@@ -23,7 +24,7 @@
 Подключитесь к VPS по SSH, перейдите в режим `root` и выполните одну команду:
 
 ```bash
-curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.1.0/install.sh)"
+bash -c "$(curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.1.0/install.sh)"
 ```
 
 Во время установки потребуется указать:
