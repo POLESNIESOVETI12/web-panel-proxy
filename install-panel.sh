@@ -2352,50 +2352,14 @@ route = (
 )
 s = s[:m.start()] + route + s[m.start():]
 
-# Port 80 must remain available to other applications. Disable Caddy's
-# permanent HTTP redirect listener and force ACME for this domain to use the
-# TLS-ALPN challenge on 443. This is idempotent for installs and updates.
+# Restore Caddy's standard HTTP-to-HTTPS listener and ACME challenge behavior.
+# This also migrates installations made by the earlier no-port-80 build.
 s = re.sub(
     r'\n?\s*# WPP TLS WITHOUT PORT 80 BEGIN\n.*?\n\s*# WPP TLS WITHOUT PORT 80 END\n?',
     '\n', s, flags=re.S,
 )
-
-def block_end(lines, start):
-    depth = 0
-    for index in range(start, len(lines)):
-        depth += lines[index].count('{') - lines[index].count('}')
-        if depth == 0:
-            return index
-    raise SystemExit('Unclosed Caddy block')
-
-lines = s.splitlines(keepends=True)
-global_start = next((i for i, line in enumerate(lines) if line.strip() == '{'), None)
-if global_start is None:
-    lines[0:0] = ['{\n', '\tauto_https disable_redirects\n', '}\n', '\n']
-else:
-    global_end = block_end(lines, global_start)
-    body = [
-        line for line in lines[global_start + 1:global_end]
-        if not re.match(r'^\s*auto_https\b', line)
-    ]
-    lines[global_start + 1:global_end] = ['\tauto_https disable_redirects\n'] + body
-
-site_pattern = re.compile(r'^\s*' + re.escape(domain) + r'\s*\{\s*$')
-site_start = next((i for i, line in enumerate(lines) if site_pattern.match(line)), None)
-if site_start is None:
-    raise SystemExit('WEB PANEL PROXY Caddy site block was not found')
-tls_block = [
-    '\t# WPP TLS WITHOUT PORT 80 BEGIN\n',
-    '\ttls {\n',
-    '\t\tissuer acme {\n',
-    '\t\t\tdisable_http_challenge\n',
-    '\t\t}\n',
-    '\t}\n',
-    '\t# WPP TLS WITHOUT PORT 80 END\n',
-    '\n',
-]
-lines[site_start + 1:site_start + 1] = tls_block
-s = ''.join(lines)
+s = re.sub(r'(?m)^\s*auto_https\s+disable_redirects\s*\n?', '', s)
+s = re.sub(r'\A\s*\{\s*\}\s*', '', s, count=1)
 Path(p).write_text(s, encoding="utf-8")
 PY
 
