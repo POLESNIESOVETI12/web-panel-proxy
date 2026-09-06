@@ -232,7 +232,7 @@ else
     while true; do
         read -r -s -p "Пароль администратора: " PASS
         echo
-        [[ ${#PASS} -ge 8 ]] || { echo "Пароль должен содержать минимум 8 символов."; continue; }
+        [[ ${#PASS} -ge 3 ]] || { echo "Пароль должен содержать минимум 3 символа."; continue; }
         break
     done
 fi
@@ -1718,7 +1718,7 @@ class Handler(BaseHTTPRequestHandler):
             editor=editor_ui(site_html,PANEL_PATH,self.csrf(),PRESETS,has_draft)
             body=f'''<div class="page-head"><div><span class="eyebrow">WPP / STUDIO</span><h1>Настройки</h1><p>Оформление сайта и доступ к панели</p></div></div>
 {editor}
-<div class=card><h2>Пароль администратора</h2><form method=post action="{PANEL_PATH}/password"><input type=hidden name=csrf value="{token}"><label for="adminNewPassword">Новый пароль</label><input id="adminNewPassword" type=password name=a minlength=8 required autocomplete=new-password><div class="actions" style="margin-top:16px"><button class="btn primary">Сохранить пароль</button><small>Минимум 8 символов · смена пароля завершит все сессии панели</small></div></form></div>'''
+<div class=card><h2>Пароль администратора</h2><form method=post action="{PANEL_PATH}/password"><input type=hidden name=csrf value="{token}"><label for="adminNewPassword">Новый пароль</label><input id="adminNewPassword" type=password name=a minlength=3 required autocomplete=new-password><div class="actions" style="margin-top:16px"><button class="btn primary">Сохранить пароль</button><small>Минимум 3 символа · смена пароля завершит все сессии панели</small></div></form></div>'''
             self.send_html(layout("Настройки",body,"settings")); return
 
         self.redirect("/")
@@ -1912,8 +1912,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path==PANEL_PATH+"/password":
             a=form.get("a","")
-            if len(a)<8:
-                self.send_html("Пароль должен содержать минимум 8 символов.",400)
+            if len(a)<3:
+                self.send_html("Пароль должен содержать минимум 3 символа.",400)
                 return
             d["admin"]["hash"]=hash_password(a)
             save(d)
@@ -2145,16 +2145,16 @@ change_credentials(){
     read -r -p "Новый логин [$current]: " new_user
     new_user="${new_user:-$current}"
     [[ ${#new_user} -ge 1 && ${#new_user} -le 64 ]] || { echo "Логин должен содержать от 1 до 64 символов."; return 1; }
-    read -r -s -p "Новый пароль (минимум 8 символов): " new_pass
+    read -r -s -p "Новый пароль (минимум 3 символа): " new_pass
     echo
-    [[ ${#new_pass} -ge 8 ]] || { echo "Пароль должен содержать минимум 8 символов."; return 1; }
+    [[ ${#new_pass} -ge 3 ]] || { echo "Пароль должен содержать минимум 3 символа."; return 1; }
     lock_changes
     if ! WPP_NEW_USER="$new_user" WPP_NEW_PASS="$new_pass" python3 - "$DATA" <<'PY'
 import base64,hashlib,json,os,secrets,sys,tempfile
 p=sys.argv[1]
 user=os.environ.pop("WPP_NEW_USER","")
 password=os.environ.pop("WPP_NEW_PASS","")
-if not user or len(user)>64 or len(password)<8:
+if not user or len(user)>64 or len(password)<3:
     raise SystemExit("Некорректные учётные данные")
 with open(p,encoding="utf-8") as f: d=json.load(f)
 salt=secrets.token_bytes(16)

@@ -206,8 +206,8 @@ else
     while true; do
         read -r -s -p "Panel administrator password: " PANEL_PASS
         echo
-        if [[ ${#PANEL_PASS} -lt 8 ]]; then
-            echo "Password must contain at least 8 characters."
+        if [[ ${#PANEL_PASS} -lt 3 ]]; then
+            echo "Password must contain at least 3 characters."
             continue
         fi
         break
@@ -742,6 +742,10 @@ text = text.rstrip() + "\n\n" + redirect
 Path(path).write_text(text, encoding="utf-8")
 PY
 test -s /etc/caddy/Caddyfile || die "Caddyfile was not configured."
+grep -Fqx '# WPP HTTP REDIRECT BEGIN' /etc/caddy/Caddyfile ||
+    die "Caddy HTTP redirect block was not generated."
+grep -Fqx "http://${DOMAIN} {" /etc/caddy/Caddyfile ||
+    die "Caddy HTTP listener for ${DOMAIN} was not generated."
 
 install -d -m 0755 /etc/systemd/system/caddy.service.d
 cat > /etc/systemd/system/caddy.service.d/tproxy.conf <<EOF
@@ -1043,7 +1047,10 @@ echo "      Starting Caddy..."
 systemctl enable caddy.service 2>/dev/null || true
 
 if systemctl is-active --quiet caddy.service; then
-    if systemctl reload caddy.service 2>/dev/null; then
+    # Load the exact file validated above. Some distribution Caddy units have
+    # a custom or stale ExecReload command, so relying on `systemctl reload`
+    # can leave the previous HTTPS-only runtime configuration active.
+    if "$CADDY_BIN" reload --config /etc/caddy/Caddyfile --adapter caddyfile --force 2>/dev/null; then
         echo "      Active Caddy reloaded with the WEB Proxy route."
     else
         systemctl restart caddy.service
@@ -1057,6 +1064,24 @@ else
             die "Caddy could not be started."
     fi
 fi
+
+# A successfully running HTTPS listener does not prove that the HTTP redirect
+# listener was applied. Repair a stale runtime config once before health checks.
+if ! port_is_listening 80; then
+    echo "      TCP/80 is not active yet; reloading the verified Caddyfile..."
+    "$CADDY_BIN" reload --config /etc/caddy/Caddyfile --adapter caddyfile --force 2>/dev/null ||
+        systemctl restart caddy.service
+    for _ in $(seq 1 15); do
+        port_is_listening 80 && break
+        sleep 1
+    done
+fi
+port_is_listening 80 || {
+    echo "      Effective Caddy listeners:"
+    "$CADDY_BIN" adapt --config /etc/caddy/Caddyfile --adapter caddyfile --pretty 2>/dev/null |
+        grep -E '"listen"|":80"|":443"' || true
+    die "Caddy did not activate its managed HTTP listener on port 80."
+}
 
 echo
 echo "[9/10] Running health checks..."
