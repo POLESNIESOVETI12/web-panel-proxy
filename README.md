@@ -2,27 +2,28 @@
   <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
 </p>
 
-<h1 align="center">WEB PANEL PROXY 2.1.0</h1>
+<h1 align="center">WEB PANEL PROXY 2.2.0</h1>
 
 <p align="center">WEB Proxy, MTProto, VLESS XHTTP, Hysteria2 и панель управления для собственного VPS</p>
 
 ## Требования
-[АРЕНДА VPS И ДОМЕНА](https://play2go.cloud/?ref_id=m1o4quWG0sE)
 
 - Чистый VPS с Ubuntu 22.04+, Ubuntu 24.04+ или Debian 12+.
 - Архитектура `x86_64`.
 - Домен или поддомен с A-записью на IPv4 вашего VPS.
 - Доступ к серверу от пользователя `root`.
-- Открытый `443/tcp`.
+- Открытые `80/tcp` и `443/tcp`.
 - Для Hysteria2 — `8443/udp`.
 - Для MTProto — TCP-порты из диапазона `2399–2430`.
+
+Caddy занимает `80/tcp` для перенаправления HTTP на HTTPS и `443/tcp` для панели, прокси и обслуживания сертификата.
 
 ## Установка
 
 Подключитесь к VPS по SSH, перейдите в режим `root` и выполните одну команду:
 
 ```bash
-bash -c "$(curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.1.0/install.sh)"
+apt-get -o DPkg::Lock::Timeout=600 update && apt-get -o DPkg::Lock::Timeout=600 install -y curl ca-certificates git && WEB_PANEL_PROXY_REF=v2.2.0 bash -c "$(curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.2.0/install.sh)"
 ```
 
 Во время установки потребуется указать:
@@ -30,11 +31,9 @@ bash -c "$(curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.c
 1. Домен панели.
 2. Email для HTTPS-сертификата.
 3. Логин администратора.
-4. Пароль длиной не менее 8 символов.
+4. Пароль длиной не менее 3 символов.
 
 После завершения установщик покажет URL панели и данные для входа. Сохраните их в безопасном месте.
-
-В терминале появилось меню зайти в него можно написав в терминале WPP
 
 ## Обновление
 
@@ -77,3 +76,6 @@ sudo /usr/local/sbin/web-panel-proxy-uninstall
 - [GitHub проекта](https://github.com/POLESNIESOVETI12/web-panel-proxy)
 - [YouTube автора](https://www.youtube.com/@POLESNIESOVETI12)
 
+## Лицензия
+
+MIT License. Подробности находятся в файле [LICENSE](LICENSE).

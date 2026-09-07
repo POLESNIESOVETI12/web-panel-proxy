@@ -88,7 +88,7 @@ fi
 MTPROTO_HOST="${MTPROTO_HOST:-$DOMAIN}"
 [[ -s "$PRIMARY_SECRET" ]] || die "Primary install-time secret not found."
 [[ -s "$LOGO_SOURCE" ]] || die "Panel logo file is missing: panel-logo.png"
-for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py; do
+for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py; do
     [[ -s "$BASE/$module" ]] || die "Missing panel module: $module; extract the complete archive."
 done
 
@@ -204,9 +204,9 @@ XRAY_PATH="$(cat "$XRAY_PATH_FILE")"
 [[ "$XRAY_PATH" =~ ^/vless-[a-f0-9]{24}$ ]] || die "Stored VLESS path is invalid."
 
 if [[ "$UPDATING" == "1" ]]; then
-    echo "Updating WEB PANEL PROXY V 2.1.0..."
+    echo "Updating WEB PANEL PROXY V 2.2.0..."
 else
-    echo "Configuring WEB PANEL PROXY V 2.1.0..."
+    echo "Configuring WEB PANEL PROXY V 2.2.0..."
 fi
 INSTALL_CREDENTIALS="/etc/web-proxy-panel/install-credentials"
 if [[ "$UPDATING" == "1" ]]; then
@@ -239,10 +239,27 @@ fi
 
 echo "[1/6] Writing manager..."
 
-for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py; do
+for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py; do
     [[ -s "$BASE/$module" ]] || die "Package is incomplete: $module is missing."
     install -o root -g root -m 0644 "$BASE/$module" "$APP_DIR/$module"
 done
+
+# Fill an empty/default local-node form from the VPS public IP. Any custom
+# value is authoritative, so updates never overwrite an administrator's edit.
+python3 - "$APP_DIR" "${DATA_DIR}/location.json" <<'PY'
+import os,sys
+sys.path.insert(0,sys.argv[1])
+import wpp_nodes
+neutral={"country_code":"UN","country_name":"Сервер","name":"Основная локация"}
+if os.path.exists(sys.argv[2]) and wpp_nodes.load_location(sys.argv[2]) != neutral:
+    raise SystemExit(0)
+detected=wpp_nodes.detect_public_location()
+saved=wpp_nodes.save_location(sys.argv[2],detected or neutral)
+if detected:
+    print("      Location detected: %s · %s"%(saved["country_name"],saved["name"]))
+else:
+    print("      Location could not be detected; it can be changed in Nodes.")
+PY
 
 cat > "$MANAGER" <<'PY'
 #!/usr/bin/env python3
@@ -389,6 +406,17 @@ def sync_firewall(d):
         elif u.get("enabled",True) and u.get("protocol")=="mtproto":
             uid=u["id"]
             port=int(u["backend_port"])
+            # Telegram clients on some filtered networks open several SYNs in
+            # a very short burst. The filter can leave the socket established
+            # while the MTProto session itself stalls. Keep the tested iOS
+            # fingerprint on the fast path; pace other IPv4 clients per source
+            # and reject excess SYNs immediately so Telegram retries instead
+            # of waiting for its long connection timeout. These rules apply
+            # only to WPP-owned MTProto ports.
+            meter="wpp_mt_"+re.sub(r"[^a-zA-Z0-9_]","",uid)[:24]
+            lines.append("nft 'add rule inet web_proxy_panel input meta nfproto ipv4 iifname != \"lo\" tcp dport %d tcp flags & (syn|ack) == syn @th,108,20 0x2ffff @th,160,16 0x204 @th,192,16 0x103 @th,224,24 0x10108 @th,320,32 0x4020000 counter accept comment \"wpp:%s:ios-syn\"'"%(port,uid))
+            lines.append("nft 'add rule inet web_proxy_panel input meta nfproto ipv4 iifname != \"lo\" tcp dport %d tcp flags & (syn|ack) == syn meter %s { ip saddr timeout 60s limit rate 54/minute burst 1 packets } counter accept comment \"wpp:%s:syn\"'"%(port,meter,uid))
+            lines.append("nft 'add rule inet web_proxy_panel input meta nfproto ipv4 iifname != \"lo\" tcp dport %d tcp flags & (syn|ack) == syn counter reject with icmp type host-unreachable comment \"wpp:%s:syn-retry\"'"%(port,uid))
             # nft requires the terminal verdict before the optional rule comment.
             lines.append("nft 'add rule inet web_proxy_panel input iifname != \"lo\" tcp dport %d counter accept comment \"wpp:%s:up\"'"%(port,uid))
             lines.append("nft 'add rule inet web_proxy_panel output oifname != \"lo\" tcp sport %d counter accept comment \"wpp:%s:down\"'"%(port,uid))
@@ -770,6 +798,72 @@ def add(protocol,name):
         raise
     print(json.dumps(u,ensure_ascii=True))
 
+def federation_sync(request):
+    external_id=str(request.get("external_id", ""))
+    name=str(request.get("name", "")).strip()
+    protocols=request.get("protocols", [])
+    if not re.fullmatch(r"[a-f0-9]{32,64}",external_id):
+        raise ValueError("Invalid federation id")
+    if not name or len(name)>80 or any(ord(c)<32 for c in name):
+        raise ValueError("Invalid federation profile name")
+    if not isinstance(protocols,list) or not protocols or any(p not in ("vless","hysteria") for p in protocols):
+        raise ValueError("Federation supports VLESS and Hysteria2")
+    protocols=list(dict.fromkeys(protocols))
+    before=load(); d=copy.deepcopy(before)
+    d["users"]=[u for u in d["users"] if u.get("federation_id")!=external_id or u.get("protocol") in protocols]
+    for user in d["users"]:
+        if user.get("federation_id")==external_id:
+            user["name"]=name+" · "+("VLESS" if user["protocol"]=="vless" else "Hysteria2")
+            user["enabled"]=True
+    for protocol in protocols:
+        if any(u.get("federation_id")==external_id and u.get("protocol")==protocol for u in d["users"]):
+            continue
+        if protocol=="hysteria":
+            tls=run(XRAY_TLS_SYNC)
+            if tls.returncode: raise RuntimeError("Hysteria2 TLS certificate is not ready")
+        d["users"].append({"id":secrets.token_hex(8),"name":name+" · "+("VLESS" if protocol=="vless" else "Hysteria2"),
+            "protocol":protocol,"enabled":True,"secret":str(uuid.uuid4()),
+            "backend_port":443 if protocol=="vless" else HYSTERIA_PORT,
+            "federation_id":external_id,"created_at":int(time.time())})
+    save(d)
+    try: apply(d,True)
+    except Exception:
+        save(before)
+        try: apply(before,True)
+        except Exception: pass
+        raise
+    print(json.dumps({"ok":True,"profiles":[u for u in d["users"] if u.get("federation_id")==external_id]},ensure_ascii=True))
+
+def federation_delete(external_id):
+    if not re.fullmatch(r"[a-f0-9]{32,64}",external_id): raise ValueError("Invalid federation id")
+    before=load(); d=copy.deepcopy(before)
+    d["users"]=[u for u in d["users"] if u.get("federation_id")!=external_id]
+    if d==before:
+        print(json.dumps({"ok":True,"deleted":False})); return
+    save(d)
+    try: apply(d,True)
+    except Exception:
+        save(before)
+        try: apply(before,True)
+        except Exception: pass
+        raise
+    print(json.dumps({"ok":True,"deleted":True}))
+
+def federation_purge():
+    before=load(); d=copy.deepcopy(before)
+    removed=sum(1 for u in d["users"] if u.get("federation_id"))
+    d["users"]=[u for u in d["users"] if not u.get("federation_id")]
+    if not removed:
+        print(json.dumps({"ok":True,"deleted":0})); return
+    save(d)
+    try: apply(d,True)
+    except Exception:
+        save(before)
+        try: apply(before,True)
+        except Exception: pass
+        raise
+    print(json.dumps({"ok":True,"deleted":removed}))
+
 def delete(uid):
     before=load()
     if any(u.get("id")==uid and u.get("subscription_id") for u in before["users"]):
@@ -882,6 +976,9 @@ if cmd not in ("users","traffic"):
 if cmd=="init": init()
 elif cmd=="subscription": subscription_command()
 elif cmd=="add": add(sys.argv[2]," ".join(sys.argv[3:]))
+elif cmd=="federation-sync": federation_sync(json.load(sys.stdin))
+elif cmd=="federation-delete": federation_delete(json.load(sys.stdin).get("external_id",""))
+elif cmd=="federation-purge": federation_purge()
 elif cmd=="delete": print(json.dumps({"deleted":delete(sys.argv[2])}))
 elif cmd=="set-user":
     if sys.argv[3] not in ('0','1'): raise SystemExit('Invalid enabled state')
@@ -1174,9 +1271,10 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 from collections import defaultdict, deque
 from wpp_subscriptions import PREFIX as SUB_PREFIX
 from wpp_panel_extras import preview_document
-from wpp_ui import page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, client_records
+from wpp_ui import page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, client_records, nodes_ui
 import wpp_metrics as server_metrics
 import wpp_update as web_updates
+import wpp_nodes as node_api
 
 HOST="127.0.0.1"
 PORT=8090
@@ -1204,6 +1302,10 @@ SITE_JS="/srv/tproxy-site/panel-site.js"
 SITE_JS_BACKUP="/var/lib/tproxy-panel/panel-site.js.bak"
 MAX_HTML_BYTES=1024*1024
 SITE_DRAFT="/var/lib/tproxy-panel/site-draft.html"
+API_KEY_FILE="/var/lib/tproxy-panel/api.key"
+NODES_FILE="/var/lib/tproxy-panel/nodes.json"
+LOCATION_FILE="/var/lib/tproxy-panel/location.json"
+API_KEY=node_api.ensure_api_key(API_KEY_FILE)
 SUB_FETCH_SLOTS=threading.BoundedSemaphore(4)
 SUB_RATE_LOCK=threading.Lock()
 SUB_REQUESTS={}
@@ -1525,6 +1627,24 @@ def ctl_subscription(request):
     except (OSError,subprocess.TimeoutExpired,ValueError):
         pass
     return {"ok":False,"status":503,"message":"Менеджер занят или недоступен. Повторите позже."}
+def ctl_manager_json(command,request):
+    r=subprocess.run([MANAGER,command],input=json.dumps(request),stdout=subprocess.PIPE,
+                     stderr=subprocess.PIPE,text=True,timeout=180)
+    if r.returncode: raise RuntimeError(r.stderr.strip() or "manager failed")
+    value=json.loads(r.stdout)
+    if not isinstance(value,dict): raise RuntimeError("manager returned invalid JSON")
+    return value
+def federation_id(subscription_id,device_id):
+    return hashlib.sha256((DOMAIN+":"+subscription_id+":"+device_id).encode()).hexdigest()
+def purge_remote_profiles(subscription,device_id=None):
+    if not subscription: return
+    devices=[d for d in subscription.get("devices",[]) if device_id is None or d.get("id")==device_id]
+    for node in node_api.load_nodes(NODES_FILE):
+        if not node.get("enabled",True): continue
+        for device in devices:
+            try: node_api.delete_profile(node,federation_id(subscription.get("id",""),device.get("id","")))
+            except node_api.NodeError as exc:
+                print("node profile cleanup failed:",node.get("url"),str(exc),file=sys.stderr,flush=True)
 def allow_subscription_request(client):
     now=time.monotonic()
     with SUB_RATE_LOCK:
@@ -1542,7 +1662,11 @@ def validate_html(source):
 def web_link(secret):
     return "https://t.me/webproxy?server="+DOMAIN+"&secret="+secret
 def mtproto_link(secret,port):
-    return "https://t.me/proxy?server="+MTPROTO_HOST+"&port="+str(int(port))+"&secret="+secret
+    # Keep the 32-hex server secret unchanged, but request Telegram's random
+    # packet-padding mode on the client. This makes MTProxy substantially less
+    # likely to be rejected by networks that identify its packet sizes.
+    client_secret=secret if secret.startswith("dd") else "dd"+secret
+    return "https://t.me/proxy?server="+MTPROTO_HOST+"&port="+str(int(port))+"&secret="+client_secret
 def xray_path():
     with open(XRAY_PATH_FILE,encoding="utf-8") as f: value=f.read().strip()
     if not re.fullmatch(r"/vless-[a-f0-9]{24}",value): raise RuntimeError("Некорректный путь VLESS")
@@ -1550,6 +1674,9 @@ def xray_path():
 def proxy_link(protocol,secret,port=443,name="Proxy",username=""):
     if protocol=="mtproto": return mtproto_link(secret,port)
     if protocol=="web": return web_link(secret)
+    protocol_label={"vless":"VLESS","hysteria":"Hysteria2"}.get(protocol,protocol)
+    if not (name.startswith("🌐") or (name and 0x1F1E6 <= ord(name[0]) <= 0x1F1FF)):
+        name=node_api.location_prefix(node_api.load_location(LOCATION_FILE))+" · "+protocol_label
     label=quote(name or "Proxy",safe="")
     if protocol=="vless":
         query=urlencode({"encryption":"none","security":"tls","sni":DOMAIN,"fp":"chrome","type":"xhttp","host":DOMAIN,"path":xray_path(),"mode":"auto","alpn":"h2"})
@@ -1618,8 +1745,35 @@ class Handler(BaseHTTPRequestHandler):
         return hmac.new(SESSION_KEY,b"csrf:"+v.value.encode(),hashlib.sha256).hexdigest()
     def valid_csrf(self,form):
         return secrets.compare_digest(form.get("csrf",""),self.csrf())
+    def api_auth(self):
+        if node_api.bearer_valid(self.headers.get("Authorization",""),API_KEY): return True
+        self.send_response(401); self.send_header("WWW-Authenticate",'Bearer realm="WPP API"')
+        self.send_header("Content-Type","application/json"); body=b'{"ok":false,"message":"Unauthorized"}'
+        self.send_header("Content-Length",str(len(body))); self.send_header("Cache-Control","no-store"); self.end_headers(); self.wfile.write(body)
+        return False
+    def json_request(self,maximum=65536):
+        try: length=int(self.headers.get("Content-Length","0"))
+        except ValueError: raise ValueError("Invalid content length")
+        if length<2 or length>maximum: raise ValueError("Invalid JSON size")
+        value=json.loads(self.rfile.read(length).decode("utf-8"))
+        if not isinstance(value,dict): raise ValueError("JSON object required")
+        return value
     def do_GET(self):
         path=urlparse(self.path).path
+        if path.startswith(node_api.API_PREFIX+"/"):
+            if not self.api_auth(): return
+            if path==node_api.API_PREFIX+"/status":
+                loc=node_api.load_location(LOCATION_FILE)
+                self.send_json({"ok":True,"api_version":1,"version":"2.2.0","domain":DOMAIN,
+                    "location":loc,"capabilities":["vless","hysteria","federation"]}); return
+            if path==node_api.API_PREFIX+"/profiles":
+                result=[]
+                for user in users():
+                    if user.get("subscription_id"): continue
+                    result.append({"id":user["id"],"name":user["name"],"protocol":user["protocol"],
+                        "enabled":user.get("enabled",True),"link":proxy_link(user["protocol"],user["secret"],user.get("backend_port",443),user["name"],user.get("username",""))})
+                self.send_json({"ok":True,"profiles":result}); return
+            self.send_json({"ok":False,"message":"Not found"},404); return
         if path.startswith(SUB_PREFIX):
             self.serve_subscription(path[len(SUB_PREFIX):]); return
         d=load()
@@ -1675,6 +1829,10 @@ class Handler(BaseHTTPRequestHandler):
             profiles=[{"id":"primary","name":"Основной WEB Proxy","secret":primary(),"protocol":"web","enabled":True,"backend_port":443}]+users()
             body=users_ui(subscription_registry(),profiles,traffic(),PANEL_PATH,DOMAIN,self.csrf(),proxy_link)
             self.send_html(layout("Клиенты",body,"users")); return
+        if path==PANEL_PATH+"/nodes":
+            body=nodes_ui([node_api.public_node(n) for n in node_api.load_nodes(NODES_FILE)],
+                          node_api.load_location(LOCATION_FILE),node_api.make_connection_token(DOMAIN,API_KEY),PANEL_PATH,self.csrf())
+            self.send_html(layout("Ноды",body,"nodes")); return
         if path==PANEL_PATH+"/subscriptions":
             self.redirect("/users"); return
         if path==PANEL_PATH+"/update-status":
@@ -1725,6 +1883,40 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path=urlparse(self.path).path
+
+        if path.startswith(node_api.API_PREFIX+"/"):
+            if not self.api_auth(): return
+            try:
+                request=self.json_request()
+                if path==node_api.API_PREFIX+"/federation/sync":
+                    result=ctl_manager_json("federation-sync",request)
+                    profiles=[{"id":u["id"],"protocol":u["protocol"],
+                        "link":proxy_link(u["protocol"],u["secret"],u.get("backend_port",443),u.get("name",request.get("name","")),u.get("username",""))}
+                        for u in result.get("profiles",[])]
+                    self.send_json({"ok":True,"profiles":profiles}); return
+                if path==node_api.API_PREFIX+"/federation/delete":
+                    result=ctl_manager_json("federation-delete",request)
+                    self.send_json({"ok":True,"deleted":bool(result.get("deleted"))}); return
+                if path==node_api.API_PREFIX+"/federation/purge":
+                    result=ctl_manager_json("federation-purge",{})
+                    self.send_json({"ok":True,"deleted":int(result.get("deleted",0))}); return
+                if path==node_api.API_PREFIX+"/profiles/create":
+                    protocol=str(request.get("protocol","")); name=str(request.get("name","")).strip()
+                    if protocol not in ("web","mtproto","vless","hysteria") or not name or len(name)>80:
+                        self.send_json({"ok":False,"message":"Invalid profile"},400); return
+                    user=ctl("add",protocol,name)
+                    self.send_json({"ok":True,"profile":{"id":user["id"],"name":user["name"],"protocol":protocol,
+                        "link":proxy_link(protocol,user["secret"],user.get("backend_port",443),name,user.get("username",""))}},201); return
+                if path==node_api.API_PREFIX+"/profiles/delete":
+                    uid=str(request.get("id",""))
+                    if not re.fullmatch(r"[a-f0-9]{16}",uid): self.send_json({"ok":False,"message":"Invalid profile id"},400); return
+                    ctl("delete",uid); self.send_json({"ok":True}); return
+                self.send_json({"ok":False,"message":"Not found"},404)
+            except (ValueError,json.JSONDecodeError) as exc: self.send_json({"ok":False,"message":str(exc)},400)
+            except Exception as exc:
+                print("API request failed:",type(exc).__name__,file=sys.stderr,flush=True)
+                self.send_json({"ok":False,"message":"Node operation failed"},503)
+            return
 
         # Login does not require an authenticated session.
         if path==PANEL_PATH+"/login":
@@ -1782,6 +1974,31 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError,subprocess.TimeoutExpired): self.send_json({"message":"Служба обновления недоступна. Проверьте VPS через SSH."},503)
             return
 
+        if path==PANEL_PATH+"/node-action":
+            try:
+                operation=form.get("operation","")
+                if operation=="add":
+                    bundled=node_api.parse_connection_token(form.get("connection_token",""))
+                    candidate=bundled["url"]
+                    if urlparse(candidate).hostname==DOMAIN:
+                        raise node_api.NodeError("Нельзя добавить эту же панель как удалённую ноду.")
+                    node_api.add_node(NODES_FILE,form)
+                elif operation=="delete":
+                    nodes=node_api.load_nodes(NODES_FILE); uid=form.get("id","")
+                    selected=next((n for n in nodes if n.get("id")==uid),None)
+                    if selected is None: raise node_api.NodeError("Нода не найдена.")
+                    # Revoke remotely before forgetting the only credential that
+                    # can remove controller-created profiles from this node.
+                    node_api.purge_profiles(selected)
+                    node_api.save_nodes(NODES_FILE,[n for n in nodes if n.get("id")!=uid])
+                elif operation=="location":
+                    node_api.save_location(LOCATION_FILE,form)
+                else: raise node_api.NodeError("Неизвестная операция с нодой.")
+                self.redirect("/nodes")
+            except node_api.NodeError as exc:
+                self.send_html(esc(str(exc)),400)
+            return
+
         if path==PANEL_PATH+"/create-account":
             name=form.get("name","").strip()
             kind=form.get("kind","")
@@ -1813,12 +2030,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({'message':'Имя должно содержать от 1 до 80 символов без управляющих знаков.'},400); return
             try:
                 if kind=='subscription':
+                    previous=next((s for s in subscription_registry() if s.get('id')==uid),None)
                     request={'id':uid,'operation':'set-enabled' if operation=='state' else 'update'}
                     if operation=='state': request['enabled']=form['enabled']=='1'
                     else: request['name']=form.get('name','')
                     result=ctl_subscription(request)
                     if not result.get('ok'):
                         self.send_json({'message':result.get('message','Изменение не применено.')},int(result.get('status',400))); return
+                    if operation=='rename' or (operation=='state' and form['enabled']=='0'):
+                        purge_remote_profiles(previous)
                 else:
                     if operation=='state': ctl('set-user',uid,form['enabled'])
                     else: ctl('rename-user',uid,form.get('name',''))
@@ -1833,8 +2053,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html("Недопустимая операция",400); return
             if request["operation"] in ("create","update"):
                 request["protocols"]=[p for p in ("vless","hysteria") if form.get(p)=="1"]
+            previous=next((s for s in subscription_registry() if s.get("id")==request.get("id")),None)
             result=ctl_subscription(request)
-            if result.get("ok"): self.redirect("/users")
+            if result.get("ok"):
+                if request["operation"] in ("update","delete","rotate","toggle"):
+                    purge_remote_profiles(previous)
+                elif request["operation"]=="revoke":
+                    purge_remote_profiles(previous,request.get("device_id"))
+                self.redirect("/users")
             else: self.send_html(esc(result.get("message","Ошибка подписки")),int(result.get("status",400)))
             return
 
@@ -1946,7 +2172,19 @@ class Handler(BaseHTTPRequestHandler):
                 if result.get("code")=="device_limit": headers.update({"X-Hwid-Limit":"true","X-Hwid-Max-Devices-Reached":"true"})
                 self.send_data(result.get("message","Подписка недоступна"),int(result.get("status",503)),headers=headers); return
             labels={"vless":"VLESS","hysteria":"Hysteria2"}
-            lines=[proxy_link(u["protocol"],u["secret"],u["backend_port"],result["name"]+" · "+labels[u["protocol"]],u.get("username","")) for u in result["users"]]
+            local_name=node_api.location_prefix(node_api.load_location(LOCATION_FILE))
+            lines=[proxy_link(u["protocol"],u["secret"],u["backend_port"],local_name+" · "+labels[u["protocol"]],u.get("username","")) for u in result["users"]]
+            if result["users"]:
+                first=result["users"][0]
+                remote_id=federation_id(first.get("subscription_id",""),first.get("device_id",""))
+                wanted=[u["protocol"] for u in result["users"] if u["protocol"] in ("vless","hysteria")]
+                for node in node_api.load_nodes(NODES_FILE):
+                    if not node.get("enabled",True): continue
+                    try:
+                        remote=node_api.sync_profile(node,remote_id,node_api.location_prefix(node),wanted)
+                        lines.extend(p["link"] for p in remote.get("profiles",[]) if isinstance(p,dict) and isinstance(p.get("link"),str))
+                    except node_api.NodeError as exc:
+                        print("node subscription sync failed:",node.get("url"),str(exc),file=sys.stderr,flush=True)
             state=traffic()
             up=sum(int(state.get(u["id"],{}).get("up",0)) for u in result["users"])
             down=sum(int(state.get(u["id"],{}).get("down",0)) for u in result["users"])
@@ -1988,7 +2226,7 @@ PY
 fi
 
 python3 -m py_compile "$APP_FILE"
-python3 -m py_compile "$APP_DIR/wpp_subscriptions.py" "$APP_DIR/wpp_panel_extras.py" "$APP_DIR/wpp_ui.py" "$APP_DIR/wpp_metrics.py" "$APP_DIR/wpp_update.py"
+python3 -m py_compile "$APP_DIR/wpp_subscriptions.py" "$APP_DIR/wpp_panel_extras.py" "$APP_DIR/wpp_ui.py" "$APP_DIR/wpp_metrics.py" "$APP_DIR/wpp_update.py" "$APP_DIR/wpp_nodes.py"
 
 
 # ---- Finish installation: service, Caddy route, permissions, start ----
@@ -2028,7 +2266,7 @@ fi
 echo "[4/6] Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=WEB PANEL PROXY V 2.1.0
+Description=WEB PANEL PROXY V 2.2.0
 After=network-online.target caddy.service tproxy-server.service mtproxy.service web-proxy-panel-firewall.service
 Wants=network-online.target
 Requires=web-proxy-panel-firewall.service
@@ -2117,7 +2355,7 @@ unlock_changes(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 show_info(){
     local d p version
-    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.1.0')"
+    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.2.0')"
     echo
     echo "============================================================"
     echo "                 WEB PANEL PROXY"
@@ -2320,6 +2558,10 @@ s = re.sub(
     '\n', s, flags=re.S,
 )
 s = re.sub(
+    r'\n\s*handle /wpp-api/\*\s*\{\s*reverse_proxy 127\.0\.0\.1:8090\s*\}\s*',
+    '\n', s, flags=re.S,
+)
+s = re.sub(
     r'\n\s*handle(?:_path)? /panel-[a-z0-9-]{3,64}/\*\s*\{\s*reverse_proxy 127\.0\.0\.1:8090\s*\}\s*',
     '\n',
     s,
@@ -2349,6 +2591,9 @@ m = re.search(r'(?m)^\s*reverse_proxy 127\.0\.0\.1:8080\s*\{', s)
 if not m:
     raise SystemExit("Could not locate tproxy relay reverse_proxy in Caddyfile")
 route = (
+    "    handle /wpp-api/* {\n"
+    "        reverse_proxy 127.0.0.1:8090\n"
+    "    }\n\n"
     "    handle /wpp-sub/* {\n"
     "        reverse_proxy 127.0.0.1:8090\n"
     "    }\n\n"
@@ -2529,15 +2774,31 @@ fi
 echo
 echo "============================================================"
 if [[ "$UPDATING" == "1" ]]; then
-echo "           WEB PANEL PROXY V 2.1.0 UPDATED"
+echo "          WEB PANEL PROXY V 2.2.0 UPDATED"
 else
-echo "          WEB PANEL PROXY V 2.1.0 IS READY"
+echo "         WEB PANEL PROXY V 2.2.0 IS READY"
 fi
 echo "============================================================"
 echo
 echo "Panel URL:"
 echo "  https://${DOMAIN}${PANEL_PATH}/login"
 echo
+NODE_API_TOKEN="$(python3 - "$DOMAIN" <<'PY'
+import sys
+sys.path.insert(0,"/opt/tproxy-panel")
+import wpp_nodes
+try:
+    key=open("/var/lib/tproxy-panel/api.key",encoding="ascii").read().strip()
+    print(wpp_nodes.make_connection_token(sys.argv[1],key))
+except (OSError,ValueError):
+    pass
+PY
+)"
+if [[ "$UPDATING" != "1" && "$NODE_API_TOKEN" == wppnode1_* ]]; then
+echo "Node API token:"
+echo "  ${NODE_API_TOKEN}"
+echo
+fi
 echo "Administrator login:"
 echo "  ${ADMIN}"
 echo
@@ -2553,5 +2814,5 @@ echo "YouTube:"
 echo "  https://www.youtube.com/@POLESNIESOVETI12"
 echo
 echo "GitHub:"
-echo "  https://github.com/POLESNIESOVETI12/webtelegram"
+echo "  https://github.com/POLESNIESOVETI12/web-panel-proxy"
 echo "============================================================"

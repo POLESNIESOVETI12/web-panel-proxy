@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Public one-command bootstrapper for WEB PANEL PROXY V 2.1.0.
+# Public one-command bootstrapper for WEB PANEL PROXY V 2.2.0.
 set -Eeuo pipefail
 umask 077
 
@@ -10,7 +10,7 @@ export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
 
 REPOSITORY="https://github.com/POLESNIESOVETI12/web-panel-proxy.git"
-RELEASE_REF="${WEB_PANEL_PROXY_REF:-v2.1.0}"
+RELEASE_REF="${WEB_PANEL_PROXY_REF:-v2.2.0}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 [[ ${EUID:-1} -eq 0 ]] || die "Run this command with sudo or as root."
@@ -27,7 +27,7 @@ if [[ -n "$LOCAL_BASE" && -s "$LOCAL_BASE/install-final.sh" && -s "$LOCAL_BASE/w
     exec bash "$LOCAL_BASE/install-final.sh"
 fi
 
-echo "WEB PANEL PROXY V 2.1.0 — downloading installation files..."
+echo "WEB PANEL PROXY V 2.2.0 — downloading installation files..."
 
 if ! command -v git >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive

@@ -8,7 +8,7 @@ export GIT_TERMINAL_PROMPT=0
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
 
-VERSION="2.1.0"
+VERSION="2.2.0"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
@@ -141,7 +141,7 @@ on_error() {
 }
 trap on_error ERR
 
-echo "Configuring WEB PANEL PROXY V 2.1.0..."
+echo "Configuring WEB PANEL PROXY V 2.2.0..."
 
 [[ $EUID -eq 0 ]] || die "Run this installer as root."
 [[ "$(uname -m)" == "x86_64" ]] || die "x86_64 is required."
@@ -604,7 +604,7 @@ if [[ "$CADDY_MODE" == "owner" ]]; then
 else
     printf '%s\n' 'WEB_PANEL_PROXY_V2_CADDY_SHARED' > /etc/web-proxy-panel/caddy-owned
 fi
-printf '%s\n' '2.1.0' > /etc/web-proxy-panel/version
+printf '%s\n' '2.2.0' > /etc/web-proxy-panel/version
 chmod 0600 /etc/web-proxy-panel/primary-secret
 chmod 0600 /etc/web-proxy-panel/caddy-owned
 chmod 0600 /etc/web-proxy-panel/version

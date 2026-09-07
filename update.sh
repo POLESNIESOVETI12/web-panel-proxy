@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Safe in-place updater for WEB PANEL PROXY V 2.1.0.
+# Safe in-place updater for WEB PANEL PROXY V 2.2.0.
 set -Eeuo pipefail
 umask 077
 
@@ -15,8 +15,8 @@ RELEASE_REF="$REQUESTED_REF"
 LOCAL_SOURCE=""
 if [[ "${1:-}" == "--local" ]]; then
     LOCAL_SOURCE="$(cd "$(dirname "$0")" && pwd)"
-    RELEASE_REF="v2.1.0"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py; do
+    RELEASE_REF="v2.2.0"
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py; do
         [[ -s "$LOCAL_SOURCE/$file" ]] || { echo "Incomplete local archive: $file is missing." >&2; exit 1; }
     done
 elif [[ $# != 0 ]]; then
@@ -34,7 +34,7 @@ exec 9>/run/lock/web-panel-proxy.lock
 flock -n 9 || die "Another WEB PANEL PROXY install, update or removal is already running."
 
 echo "============================================================"
-echo "      WEB PANEL PROXY V 2.1.0 — SAFE UPDATE"
+echo "     WEB PANEL PROXY V 2.2.0 — SAFE UPDATE"
 echo "============================================================"
 echo "Users, administrator password, panel URL and site HTML will be retained."
 
@@ -237,10 +237,10 @@ finish() {
 }
 trap finish EXIT
 
-echo "Downloading the current WEB PANEL PROXY V 2.1.0 files..."
+echo "Downloading the current WEB PANEL PROXY V 2.2.0 files..."
 if [[ -n "$LOCAL_SOURCE" ]]; then
     install -d -m 0700 "$TEMP_DIR/source"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py; do
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py; do
         cp -a "$LOCAL_SOURCE/$file" "$TEMP_DIR/source/$file"
     done
 else
@@ -340,3 +340,17 @@ chmod 0600 /etc/web-proxy-panel/caddy-owned /etc/web-proxy-panel/version
 UPDATE_COMMITTED=1
 echo
 echo "Update completed. Open the panel at: https://${DOMAIN}${PANEL_PATH}/login"
+NODE_API_TOKEN="$(python3 - "$DOMAIN" <<'PY'
+import sys
+sys.path.insert(0,"/opt/tproxy-panel")
+import wpp_nodes
+try:
+    key=open("/var/lib/tproxy-panel/api.key",encoding="ascii").read().strip()
+    print(wpp_nodes.make_connection_token(sys.argv[1],key))
+except (OSError,ValueError):
+    pass
+PY
+)"
+if [[ "$NODE_API_TOKEN" == wppnode1_* ]]; then
+    echo "Node API token: ${NODE_API_TOKEN}"
+fi

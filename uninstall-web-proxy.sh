@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# WEB PANEL PROXY V 2.1.0 complete removal utility.
+# WEB PANEL PROXY V 2.2.0 complete removal utility.
 set -Eeuo pipefail
 
 [[ ${EUID:-1} -eq 0 ]] || { echo "Run this script as root." >&2; exit 1; }
@@ -7,8 +7,8 @@ command -v flock >/dev/null 2>&1 || { echo "flock is required (package: util-lin
 exec 9>/run/lock/web-panel-proxy.lock
 flock -n 9 || { echo "Another WEB PANEL PROXY install, update or removal is already running." >&2; exit 1; }
 
-echo "WEB PANEL PROXY V 2.1.0 — complete removal"
-echo "Removing all WEB PANEL PROXY V 2.1.0 components..."
+echo "WEB PANEL PROXY V 2.2.0 — complete removal"
+echo "Removing all WEB PANEL PROXY V 2.2.0 components..."
 
 DOMAIN="$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' /etc/systemd/system/caddy.service.d/tproxy.conf 2>/dev/null | head -n1 || true)"
 CADDY_MARKER="$(cat /etc/web-proxy-panel/caddy-owned 2>/dev/null || true)"
@@ -172,7 +172,7 @@ PY
   [[ "$PRESERVE_CADDY" == 1 ]] && rm -f -- /etc/caddy/Caddyfile.before-web-panel-proxy
 fi
 
-echo "Removing WEB PANEL PROXY V 2.1.0 files..."
+echo "Removing WEB PANEL PROXY V 2.2.0 files..."
 rm -f -- \
   /etc/systemd/system/web-panel-proxy-web-update.service \
   /etc/systemd/system/web-panel-proxy-metrics.service \
@@ -252,7 +252,7 @@ elif [[ "$PRESERVE_CADDY" == 1 ]]; then
 else
   rm -f -- /etc/systemd/system/caddy.service.d/tproxy.conf
   rmdir /etc/systemd/system/caddy.service.d 2>/dev/null || true
-  echo "Caddy was preserved because it was not marked as installed by WEB PANEL PROXY V 2.1.0."
+  echo "Caddy was preserved because it was not marked as installed by WEB PANEL PROXY V 2.2.0."
 fi
 
 id mtproxy >/dev/null 2>&1 && userdel mtproxy 2>/dev/null || true
@@ -262,4 +262,4 @@ id tproxy >/dev/null 2>&1 && userdel tproxy 2>/dev/null || true
 
 systemctl daemon-reload
 systemctl reset-failed 2>/dev/null || true
-echo "WEB PANEL PROXY V 2.1.0 has been removed."
+echo "WEB PANEL PROXY V 2.2.0 has been removed."
