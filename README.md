@@ -23,8 +23,9 @@ Caddy занимает `80/tcp` для перенаправления HTTP на 
 Подключитесь к VPS по SSH, перейдите в режим `root` и выполните одну команду:
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=600 update && apt-get -o DPkg::Lock::Timeout=600 install -y curl ca-certificates git && WEB_PANEL_PROXY_REF=v2.2.0 bash -c "$(curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.2.0/install.sh)"
+apt-get -o DPkg::Lock::Timeout=600 update && apt-get -o DPkg::Lock::Timeout=600 install -y curl ca-certificates git && WEB_PANEL_PROXY_REF=v2.2.0 bash -c "$(curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/koreshkof/web-panel-proxy/v2.2.0/install.sh)"
 ```
+
 
 Во время установки потребуется указать:
 
@@ -73,8 +74,7 @@ sudo /usr/local/sbin/web-panel-proxy-uninstall
 
 ## Ссылки
 
-- [GitHub проекта](https://github.com/POLESNIESOVETI12/web-panel-proxy)
-- [YouTube автора](https://www.youtube.com/@POLESNIESOVETI12)
+- [GitHub проекта](https://github.com/koreshkof/web-panel-proxy)
 
 ## Лицензия
 
