@@ -36,6 +36,7 @@ OPENFLUX_ROOT="/opt/web-panel-proxy/openflux"
 OPENFLUX_BIN="${OPENFLUX_ROOT}/openflux"
 OPENFLUX_VERSION="0.6.0"
 OPENFLUX_SHA256="08fcf4020cd3c7274c7abd78fe386b40d2fcf8515082d3475ced324ad109217c"
+OPENFLUX_BUNDLED="${BASE}/assets/OpenFlux-linux-amd64"
 
 die(){ echo "ERROR: $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "Run as root."
@@ -159,7 +160,7 @@ if [[ ! -x "$XRAY_BIN" ]] || ! "$XRAY_BIN" version 2>/dev/null | grep -q "${XRAY
     XRAY_UNPACK="$(mktemp -d /tmp/web-panel-proxy-xray.XXXXXX)"
     curl --fail --silent --show-error --location \
         --proto '=https' --proto-redir '=https' --tlsv1.2 \
-        --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 30 --max-time 600 \
+        --retry 3 --retry-all-errors --connect-timeout 20 \
         --output "$XRAY_ARCHIVE" \
         "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-64.zip"
     echo "${XRAY_SHA256}  ${XRAY_ARCHIVE}" | sha256sum -c - >/dev/null || die "Xray checksum verification failed."
@@ -171,19 +172,28 @@ fi
 
 echo "      Preparing OpenFlux ${OPENFLUX_VERSION}..."
 if ! id wpp-openflux >/dev/null 2>&1; then
-    useradd --system --home-dir /var/lib/wpp-openflux --create-home --shell /usr/sbin/nologin wpp-openflux
+    if [[ -d /var/lib/wpp-openflux ]]; then
+        useradd --system --home-dir /var/lib/wpp-openflux --no-create-home --shell /usr/sbin/nologin wpp-openflux
+    else
+        useradd --system --home-dir /var/lib/wpp-openflux --create-home --shell /usr/sbin/nologin wpp-openflux
+    fi
 fi
 install -d -o root -g root -m 0755 "$OPENFLUX_ROOT"
 if [[ ! -x "$OPENFLUX_BIN" ]] || ! sha256sum "$OPENFLUX_BIN" | grep -q "^${OPENFLUX_SHA256}  "; then
-    OPENFLUX_DOWNLOAD="$(mktemp /tmp/web-panel-proxy-openflux.XXXXXX)"
-    curl --fail --silent --show-error --location \
-        --proto '=https' --proto-redir '=https' --tlsv1.2 \
-        --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 30 --max-time 600 \
-        --output "$OPENFLUX_DOWNLOAD" \
-        "https://github.com/damnurmum/OpenFlux-Android/releases/download/v${OPENFLUX_VERSION}/OpenFlux-linux-amd64"
+    if [[ -s "$OPENFLUX_BUNDLED" ]]; then
+        OPENFLUX_DOWNLOAD="$OPENFLUX_BUNDLED"
+        echo "      Using OpenFlux included with this release."
+    else
+        OPENFLUX_DOWNLOAD="$(mktemp /tmp/web-panel-proxy-openflux.XXXXXX)"
+        curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --retry 3 --retry-all-errors --connect-timeout 20 \
+            --output "$OPENFLUX_DOWNLOAD" \
+            "https://github.com/damnurmum/OpenFlux-Android/releases/download/v${OPENFLUX_VERSION}/OpenFlux-linux-amd64"
+    fi
     echo "${OPENFLUX_SHA256}  ${OPENFLUX_DOWNLOAD}" | sha256sum -c - >/dev/null || die "OpenFlux checksum verification failed."
     install -o root -g root -m 0755 "$OPENFLUX_DOWNLOAD" "$OPENFLUX_BIN"
-    rm -f "$OPENFLUX_DOWNLOAD"
+    [[ "$OPENFLUX_DOWNLOAD" == "$OPENFLUX_BUNDLED" ]] || rm -f "$OPENFLUX_DOWNLOAD"
 fi
 
 # Remove only blocks managed by the former experimental NaiveProxy integration.
