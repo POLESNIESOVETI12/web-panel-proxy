@@ -159,7 +159,7 @@ if [[ ! -x "$XRAY_BIN" ]] || ! "$XRAY_BIN" version 2>/dev/null | grep -q "${XRAY
     XRAY_UNPACK="$(mktemp -d /tmp/web-panel-proxy-xray.XXXXXX)"
     curl --fail --silent --show-error --location \
         --proto '=https' --proto-redir '=https' --tlsv1.2 \
-        --retry 3 --retry-all-errors --connect-timeout 20 \
+        --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 30 --max-time 600 \
         --output "$XRAY_ARCHIVE" \
         "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-64.zip"
     echo "${XRAY_SHA256}  ${XRAY_ARCHIVE}" | sha256sum -c - >/dev/null || die "Xray checksum verification failed."
@@ -178,7 +178,7 @@ if [[ ! -x "$OPENFLUX_BIN" ]] || ! sha256sum "$OPENFLUX_BIN" | grep -q "^${OPENF
     OPENFLUX_DOWNLOAD="$(mktemp /tmp/web-panel-proxy-openflux.XXXXXX)"
     curl --fail --silent --show-error --location \
         --proto '=https' --proto-redir '=https' --tlsv1.2 \
-        --retry 3 --retry-all-errors --connect-timeout 20 \
+        --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 30 --max-time 600 \
         --output "$OPENFLUX_DOWNLOAD" \
         "https://github.com/damnurmum/OpenFlux-Android/releases/download/v${OPENFLUX_VERSION}/OpenFlux-linux-amd64"
     echo "${OPENFLUX_SHA256}  ${OPENFLUX_DOWNLOAD}" | sha256sum -c - >/dev/null || die "OpenFlux checksum verification failed."

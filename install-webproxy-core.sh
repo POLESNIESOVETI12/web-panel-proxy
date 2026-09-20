@@ -448,6 +448,8 @@ else
 
     curl --fail --silent --show-error --location \
         --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --retry 5 --retry-all-errors --retry-delay 3 \
+        --connect-timeout 30 --max-time 600 \
         --output "$caddy_archive" \
         "https://github.com/caddyserver/caddy/releases/download/v${caddy_version}/caddy_${caddy_version}_linux_amd64.tar.gz"
 
@@ -542,6 +544,8 @@ else
 
     curl --fail --silent --show-error --location \
         --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --retry 5 --retry-all-errors --retry-delay 3 \
+        --connect-timeout 30 --max-time 600 \
         --output "$go_archive" \
         "https://go.dev/dl/go${go_version}.linux-amd64.tar.gz"
 
