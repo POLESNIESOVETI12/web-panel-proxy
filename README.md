@@ -21,11 +21,22 @@ Caddy постоянно использует `80/tcp` для перенапра
 
 ## Установка
 
-Подключитесь к VPS по SSH, перейдите в режим `root` и выполните одну команду:
+Подключитесь к VPS по SSH, перейдите в режим `root` и выполните команды:
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=600 update && apt-get -o DPkg::Lock::Timeout=600 install -y curl ca-certificates git && WEB_PANEL_PROXY_REF=v2.3.0 bash -c "$(curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.3.0/install.sh)"
+apt-get -o DPkg::Lock::Timeout=600 update
+apt-get -o DPkg::Lock::Timeout=600 install -y ca-certificates git
+
+WPP_DIR="$(mktemp -d /root/wpp-install.XXXXXX)"
+git -c http.version=HTTP/1.1 clone --depth 1 --branch v2.3.0 \
+  https://github.com/POLESNIESOVETI12/web-panel-proxy.git "$WPP_DIR"
+
+cd "$WPP_DIR"
+chmod +x ./*.sh
+bash ./install-final.sh
 ```
+
+Установка не использует `raw.githubusercontent.com`, который на некоторых VPS периодически недоступен.
 
 Во время установки потребуется указать:
 
