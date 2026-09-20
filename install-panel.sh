@@ -2399,9 +2399,9 @@ ssl_expiry(){
 port_80_state(){
     if ss -lntp 2>/dev/null | grep -Eq '(^|[[:space:]])[^[:space:]]*:80[[:space:]]'; then
         if ss -lntp 2>/dev/null | grep -E ':80[[:space:]]' | grep -q 'caddy'; then
-            echo "занят Caddy (проверьте конфигурацию)"
+            echo "занят Caddy (нормально)"
         else
-            echo "занят другой программой — это допустимо"
+            echo "занят другой программой — конфликт"
         fi
     else
         echo "свободен"
@@ -2543,15 +2543,15 @@ run_update(){
 
 maintain_ssl(){
     echo
-    echo "Проверяю HTTPS-сертификат через TCP/443 и запускаю обслуживание Caddy..."
+    echo "Проверяю HTTPS-сертификат и запускаю обслуживание Caddy..."
     lock_changes
     if /usr/local/sbin/web-panel-proxy-sync-tls --force; then
         unlock_changes
         echo "SSL-сертификат действителен; копия для Hysteria2 синхронизирована."
-        echo "TCP/80 остаётся свободным для других программ: $(port_80_state)"
+        echo "TCP/80 используется для HTTP→HTTPS и обновления сертификата: $(port_80_state)"
     else
         unlock_changes
-        echo "Не удалось подтвердить обновление SSL. Проверьте DNS, TCP/443 и журнал Caddy."
+        echo "Не удалось подтвердить обновление SSL. Проверьте DNS, TCP/80, TCP/443 и журнал Caddy."
         return 1
     fi
 }
@@ -2671,8 +2671,8 @@ route = (
 )
 s = s[:m.start()] + route + s[m.start():]
 
-# Keep TCP/80 free. Certificates are issued and renewed with TLS-ALPN-01 on
-# TCP/443, so Caddy does not need a permanent HTTP redirect listener.
+# Restore standard Caddy automatic HTTPS. TCP/80 remains open for redirects
+# and HTTP-01 validation; TCP/443 serves the panel and proxy traffic.
 s = re.sub(
     r'\n?\s*# WPP TLS WITHOUT PORT 80 BEGIN\n.*?\n\s*# WPP TLS WITHOUT PORT 80 END\n?',
     '\n', s, flags=re.S,
@@ -2683,56 +2683,35 @@ s = re.sub(
     r'\n?\s*# WPP HTTP REDIRECT BEGIN\n.*?\n\s*# WPP HTTP REDIRECT END\n?',
     '\n', s, flags=re.S,
 )
-if re.match(r'\A\s*\{',s):
-    s=re.sub(r'\A\s*\{',"{\n\tauto_https disable_redirects",s,count=1)
-else:
-    s="{\n\tauto_https disable_redirects\n}\n\n"+s.lstrip()
-def configure_site_tls_alpn(text, hostname):
-    match=re.search(r'(?m)^\s*'+re.escape(hostname)+r'\s*\{\s*$',text)
+def enable_http_challenge(text, hostname):
+    match = re.search(r'(?m)^\s*' + re.escape(hostname) + r'\s*\{\s*$', text)
     if not match:
         raise SystemExit("WEB PANEL PROXY Caddy site block was not found")
-    opening=text.find('{',match.start(),match.end())
-    depth=0
-    closing=None
-    for index in range(opening,len(text)):
-        if text[index]=='{': depth+=1
-        elif text[index]=='}':
-            depth-=1
-            if depth==0:
-                closing=index+1
+    opening = text.find('{', match.start(), match.end())
+    depth = 0
+    closing = None
+    for index in range(opening, len(text)):
+        if text[index] == '{':
+            depth += 1
+        elif text[index] == '}':
+            depth -= 1
+            if depth == 0:
+                closing = index + 1
                 break
     if closing is None:
         raise SystemExit("WEB PANEL PROXY Caddy site block is incomplete")
-    block=text[match.start():closing]
-    if 'disable_http_challenge' in block:
-        return text
-    if re.search(r'issuer\s+acme\s*\{',block):
-        block=re.sub(r'(issuer\s+acme\s*\{)',r'\1\n            disable_http_challenge',block,count=1)
-    else:
-        # Older WPP releases used Caddy's short `tls email@example.com`
-        # syntax. Expand only this site's directive and keep its ACME email.
-        short=re.search(r'(?m)^(?P<i>\s*)tls\s+(?P<email>[^\s{}]+)\s*$',block)
-        if short and '@' in short.group('email'):
-            indent=short.group('i')
-            replacement=(indent+'tls {\n'+indent+'    issuer acme {\n'+
-                         indent+'        email '+short.group('email')+'\n'+
-                         indent+'        disable_http_challenge\n'+
-                         indent+'    }\n'+indent+'}')
-            block=block[:short.start()]+replacement+block[short.end():]
-        elif re.search(r'(?m)^\s*tls\s*\{',block):
-            block=re.sub(r'(?m)^(?P<i>\s*)tls\s*\{',
-                         lambda m:m.group(0)+'\n'+m.group('i')+'    issuer acme {\n'+m.group('i')+'        disable_http_challenge\n'+m.group('i')+'    }',
-                         block,count=1)
-        elif not short:
-            insertion='\n    tls {\n        issuer acme {\n            disable_http_challenge\n        }\n    }'
-            block=block[:block.find('{')+1]+insertion+block[block.find('{')+1:]
-        else:
-            # `tls internal` does not use ACME and therefore needs no port 80.
-            return text
-    if 'disable_http_challenge' not in block:
-        raise SystemExit("Could not configure TLS-ALPN-only certificate renewal")
-    return text[:match.start()]+block+text[closing:]
-s=configure_site_tls_alpn(s,domain)
+    block = text[match.start():closing]
+    block = re.sub(r'(?m)^\s*disable_http_challenge\s*\n?', '', block)
+    return text[:match.start()] + block + text[closing:]
+s = enable_http_challenge(s, domain)
+redirect = (
+    "# WPP HTTP REDIRECT BEGIN\n"
+    "http://" + domain + " {\n"
+    "    redir https://" + domain + "{uri} permanent\n"
+    "}\n"
+    "# WPP HTTP REDIRECT END\n"
+)
+s = s.rstrip() + "\n\n" + redirect
 Path(p).write_text(s, encoding="utf-8")
 PY
 
