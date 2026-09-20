@@ -75,6 +75,7 @@ def provision(data, sub, device):
             'protocol': protocol, 'enabled': sub['enabled'], 'secret': str(uuid.uuid4()),
             'backend_port': ports[protocol],
             'subscription_id': sub['id'], 'device_id': device['id'],
+            'created_at': int(time.time()),
         }
         data['users'].append(profile)
 

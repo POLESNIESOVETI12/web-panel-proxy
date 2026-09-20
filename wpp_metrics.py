@@ -13,7 +13,8 @@ TRAFFIC = Path('/var/lib/tproxy-panel/traffic.json')
 ERROR = Path('/var/lib/tproxy-panel/metrics-error.json')
 PROC = Path('/proc')
 SERVICES = {'xray': 'web-panel-proxy-xray.service', 'panel': 'tproxy-panel.service',
-            'caddy': 'caddy.service', 'relay': 'tproxy-server.service'}
+            'caddy': 'caddy.service', 'relay': 'tproxy-server.service',
+            'openflux': 'web-panel-proxy-openflux.service'}
 
 
 def read_state(path=None):

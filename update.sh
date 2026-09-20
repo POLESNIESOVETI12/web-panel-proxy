@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Safe in-place updater for WEB PANEL PROXY V 2.2.0.
+# Safe in-place updater for WEB PANEL PROXY V 2.3.0.
 set -Eeuo pipefail
 umask 077
 
@@ -15,8 +15,8 @@ RELEASE_REF="$REQUESTED_REF"
 LOCAL_SOURCE=""
 if [[ "${1:-}" == "--local" ]]; then
     LOCAL_SOURCE="$(cd "$(dirname "$0")" && pwd)"
-    RELEASE_REF="v2.2.0"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py; do
+    RELEASE_REF="v2.3.0"
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py; do
         [[ -s "$LOCAL_SOURCE/$file" ]] || { echo "Incomplete local archive: $file is missing." >&2; exit 1; }
     done
 elif [[ $# != 0 ]]; then
@@ -34,7 +34,7 @@ exec 9>/run/lock/web-panel-proxy.lock
 flock -n 9 || die "Another WEB PANEL PROXY install, update or removal is already running."
 
 echo "============================================================"
-echo "     WEB PANEL PROXY V 2.2.0 — SAFE UPDATE"
+echo "     WEB PANEL PROXY V 2.3.0 — SAFE UPDATE"
 echo "============================================================"
 echo "Users, administrator password, panel URL and site HTML will be retained."
 
@@ -99,7 +99,7 @@ trap 'if [[ "$PANEL_WAS_RUNNING" == 1 ]]; then systemctl start tproxy-panel.serv
 BACKUP="/root/web-panel-proxy-update-backup-${STAMP}"
 install -d -m 0700 "$BACKUP"
 BACKUP_ITEMS=()
-for item in /opt/tproxy-panel /opt/web-panel-proxy /opt/MTProxy /usr/local/bin/caddy /usr/local/bin/tproxy-server /usr/local/sbin/web-proxy-panelctl /usr/local/sbin/web-proxy-panel-user-firewall /usr/local/sbin/web-panel-proxy-sync-tls /usr/local/sbin/web-panel-proxy-update /usr/local/sbin/web-panel-proxy-uninstall /usr/local/sbin/WPP /usr/local/sbin/wpp /etc/systemd/system/tproxy-panel.service /etc/systemd/system/web-proxy-panel-firewall.service /etc/systemd/system/web-proxy-panel-traffic.service /etc/systemd/system/web-proxy-panel-traffic.timer /etc/systemd/system/web-panel-proxy-xray.service /etc/systemd/system/web-panel-proxy-sync-tls.service /etc/systemd/system/web-panel-proxy-sync-tls.timer /etc/systemd/system/tproxy-server.service /etc/systemd/system/mtproxy.service /etc/systemd/system/caddy.service.d/tproxy.conf /etc/caddy/Caddyfile /etc/tproxy-server /etc/mtproxy /etc/mita /etc/web-panel-proxy-xray /var/lib/web-panel-proxy-xray /var/lib/tproxy-panel /etc/web-proxy-panel /srv/tproxy-site; do
+for item in /opt/tproxy-panel /opt/web-panel-proxy /opt/MTProxy /usr/local/bin/caddy /usr/local/bin/tproxy-server /usr/local/sbin/web-proxy-panelctl /usr/local/sbin/web-proxy-panel-user-firewall /usr/local/sbin/web-panel-proxy-sync-tls /usr/local/sbin/web-panel-proxy-update /usr/local/sbin/web-panel-proxy-uninstall /usr/local/sbin/WPP /usr/local/sbin/wpp /etc/systemd/system/tproxy-panel.service /etc/systemd/system/web-proxy-panel-firewall.service /etc/systemd/system/web-proxy-panel-traffic.service /etc/systemd/system/web-proxy-panel-traffic.timer /etc/systemd/system/web-panel-proxy-xray.service /etc/systemd/system/web-panel-proxy-openflux.service /etc/systemd/system/web-panel-proxy-sync-tls.service /etc/systemd/system/web-panel-proxy-sync-tls.timer /etc/systemd/system/tproxy-server.service /etc/systemd/system/mtproxy.service /etc/systemd/system/caddy.service.d/tproxy.conf /etc/caddy/Caddyfile /etc/tproxy-server /etc/mtproxy /etc/mita /etc/web-panel-proxy-xray /var/lib/web-panel-proxy-xray /var/lib/tproxy-panel /etc/web-proxy-panel /srv/tproxy-site; do
     [[ -e "$item" ]] && BACKUP_ITEMS+=("$item")
     [[ -e "$item" ]] && cp -a --parents "$item" "$BACKUP"
 done
@@ -127,6 +127,8 @@ HAD_PANEL_STATE_DIR=0
 HAD_XRAY_STATE=0
 HAD_XRAY_USER=0
 HAD_XRAY_GROUP=0
+HAD_OPENFLUX_UNIT=0
+HAD_OPENFLUX_USER=0
 HAD_WPP_MENU=0
 HAD_WEB_UPDATE_UNIT=0
 [[ -e /etc/systemd/system/web-panel-proxy-web-update.service ]] && HAD_WEB_UPDATE_UNIT=1
@@ -138,13 +140,15 @@ HAD_WEB_UPDATE_UNIT=0
 { [[ -e /opt/web-panel-proxy ]] || [[ -e /etc/web-panel-proxy-xray ]] || [[ -e /etc/systemd/system/web-panel-proxy-xray.service ]]; } && HAD_XRAY_STATE=1
 id xray >/dev/null 2>&1 && HAD_XRAY_USER=1
 getent group xray >/dev/null 2>&1 && HAD_XRAY_GROUP=1
+[[ -e /etc/systemd/system/web-panel-proxy-openflux.service ]] && HAD_OPENFLUX_UNIT=1
+id wpp-openflux >/dev/null 2>&1 && HAD_OPENFLUX_USER=1
 [[ -e /usr/local/sbin/WPP ]] && HAD_WPP_MENU=1
 UPDATE_COMMITTED=0
 rollback_update() {
     local code="$1"
     [[ "$UPDATE_COMMITTED" == 1 || "$code" == 0 ]] && return 0
     echo "Update failed; restoring the previous working state..." >&2
-    systemctl stop tproxy-panel.service web-proxy-panel-firewall.service web-proxy-panel-traffic.timer web-proxy-panel-traffic.service web-panel-proxy-metrics.timer web-panel-proxy-metrics.service web-panel-proxy-xray.service web-panel-proxy-sync-tls.timer 2>/dev/null || true
+    systemctl stop tproxy-panel.service web-proxy-panel-firewall.service web-proxy-panel-traffic.timer web-proxy-panel-traffic.service web-panel-proxy-metrics.timer web-panel-proxy-metrics.service web-panel-proxy-xray.service web-panel-proxy-openflux.service web-panel-proxy-sync-tls.timer 2>/dev/null || true
     tar --numeric-owner -xpf "$BACKUP/state.tar" -C / 2>/dev/null || true
     if [[ "$HAD_FIREWALL_SERVICE" == 0 ]]; then
         rm -f /etc/systemd/system/web-proxy-panel-firewall.service
@@ -194,8 +198,17 @@ rollback_update() {
     if [[ "$HAD_XRAY_GROUP" == 0 ]]; then
         groupdel xray 2>/dev/null || true
     fi
+    if [[ "$HAD_OPENFLUX_UNIT" == 0 ]]; then
+        systemctl disable --now web-panel-proxy-openflux.service 2>/dev/null || true
+        rm -f /etc/systemd/system/web-panel-proxy-openflux.service
+        rm -rf /opt/web-panel-proxy/openflux
+    fi
+    if [[ "$HAD_OPENFLUX_USER" == 0 ]]; then
+        userdel wpp-openflux 2>/dev/null || true
+    fi
     systemctl daemon-reload
     systemctl restart mtproxy.service tproxy-server.service caddy.service tproxy-panel.service 2>/dev/null || true
+    [[ -e /etc/web-proxy-panel/openflux/enabled ]] && systemctl restart web-panel-proxy-openflux.service 2>/dev/null || true
     [[ "$HAD_FIREWALL_SERVICE" == 1 ]] && systemctl restart web-proxy-panel-firewall.service 2>/dev/null || true
     [[ "$HAD_XRAY_STATE" == 1 ]] && systemctl restart web-panel-proxy-xray.service 2>/dev/null || true
     [[ "$HAD_TRAFFIC_TIMER" == 1 ]] && systemctl restart web-proxy-panel-traffic.timer 2>/dev/null || true
@@ -237,10 +250,10 @@ finish() {
 }
 trap finish EXIT
 
-echo "Downloading the current WEB PANEL PROXY V 2.2.0 files..."
+echo "Downloading the current WEB PANEL PROXY V 2.3.0 files..."
 if [[ -n "$LOCAL_SOURCE" ]]; then
     install -d -m 0700 "$TEMP_DIR/source"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py; do
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py; do
         cp -a "$LOCAL_SOURCE/$file" "$TEMP_DIR/source/$file"
     done
 else

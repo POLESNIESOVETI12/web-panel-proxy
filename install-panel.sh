@@ -32,6 +32,10 @@ XRAY_PATH_FILE="/etc/web-proxy-panel/xray-path"
 XRAY_VERSION="26.7.28"
 XRAY_SHA256="8195d909f1109b8f3d99eefe401a3c451d7bf4af71f24d3815420f77e5dd2a40"
 HYSTERIA_PORT=8443
+OPENFLUX_ROOT="/opt/web-panel-proxy/openflux"
+OPENFLUX_BIN="${OPENFLUX_ROOT}/openflux"
+OPENFLUX_VERSION="0.6.0"
+OPENFLUX_SHA256="08fcf4020cd3c7274c7abd78fe386b40d2fcf8515082d3475ced324ad109217c"
 
 die(){ echo "ERROR: $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "Run as root."
@@ -88,7 +92,7 @@ fi
 MTPROTO_HOST="${MTPROTO_HOST:-$DOMAIN}"
 [[ -s "$PRIMARY_SECRET" ]] || die "Primary install-time secret not found."
 [[ -s "$LOGO_SOURCE" ]] || die "Panel logo file is missing: panel-logo.png"
-for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py; do
+for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py; do
     [[ -s "$BASE/$module" ]] || die "Missing panel module: $module; extract the complete archive."
 done
 
@@ -165,6 +169,23 @@ if [[ ! -x "$XRAY_BIN" ]] || ! "$XRAY_BIN" version 2>/dev/null | grep -q "${XRAY
     rm -rf "$XRAY_UNPACK"
 fi
 
+echo "      Preparing OpenFlux ${OPENFLUX_VERSION}..."
+if ! id wpp-openflux >/dev/null 2>&1; then
+    useradd --system --home-dir /var/lib/wpp-openflux --create-home --shell /usr/sbin/nologin wpp-openflux
+fi
+install -d -o root -g root -m 0755 "$OPENFLUX_ROOT"
+if [[ ! -x "$OPENFLUX_BIN" ]] || ! sha256sum "$OPENFLUX_BIN" | grep -q "^${OPENFLUX_SHA256}  "; then
+    OPENFLUX_DOWNLOAD="$(mktemp /tmp/web-panel-proxy-openflux.XXXXXX)"
+    curl --fail --silent --show-error --location \
+        --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --retry 3 --retry-all-errors --connect-timeout 20 \
+        --output "$OPENFLUX_DOWNLOAD" \
+        "https://github.com/damnurmum/OpenFlux-Android/releases/download/v${OPENFLUX_VERSION}/OpenFlux-linux-amd64"
+    echo "${OPENFLUX_SHA256}  ${OPENFLUX_DOWNLOAD}" | sha256sum -c - >/dev/null || die "OpenFlux checksum verification failed."
+    install -o root -g root -m 0755 "$OPENFLUX_DOWNLOAD" "$OPENFLUX_BIN"
+    rm -f "$OPENFLUX_DOWNLOAD"
+fi
+
 # Remove only blocks managed by the former experimental NaiveProxy integration.
 # The distribution Caddy binary is retained and used again after this migration.
 if [[ -s /etc/caddy/Caddyfile ]]; then
@@ -204,9 +225,9 @@ XRAY_PATH="$(cat "$XRAY_PATH_FILE")"
 [[ "$XRAY_PATH" =~ ^/vless-[a-f0-9]{24}$ ]] || die "Stored VLESS path is invalid."
 
 if [[ "$UPDATING" == "1" ]]; then
-    echo "Updating WEB PANEL PROXY V 2.2.0..."
+    echo "Updating WEB PANEL PROXY V 2.3.0..."
 else
-    echo "Configuring WEB PANEL PROXY V 2.2.0..."
+    echo "Configuring WEB PANEL PROXY V 2.3.0..."
 fi
 INSTALL_CREDENTIALS="/etc/web-proxy-panel/install-credentials"
 if [[ "$UPDATING" == "1" ]]; then
@@ -239,26 +260,30 @@ fi
 
 echo "[1/6] Writing manager..."
 
-for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py; do
+for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py; do
     [[ -s "$BASE/$module" ]] || die "Package is incomplete: $module is missing."
     install -o root -g root -m 0644 "$BASE/$module" "$APP_DIR/$module"
 done
 
-# Fill an empty/default local-node form from the VPS public IP. Any custom
-# value is authoritative, so updates never overwrite an administrator's edit.
+# The service is enabled once and guarded by ConditionPathExists. Until the
+# administrator saves a document URL it stays inactive and opens no ports.
+python3 - "$APP_DIR" <<'PY'
+import sys
+sys.path.insert(0,sys.argv[1])
+import wpp_openflux
+wpp_openflux.install_service()
+wpp_openflux.restore_if_configured()
+PY
+systemctl enable web-panel-proxy-openflux.service >/dev/null
+
+# Location is configured only by the administrator. Installation and updates
+# never send the VPS address to an external geolocation service.
 python3 - "$APP_DIR" "${DATA_DIR}/location.json" <<'PY'
 import os,sys
 sys.path.insert(0,sys.argv[1])
 import wpp_nodes
-neutral={"country_code":"UN","country_name":"Сервер","name":"Основная локация"}
-if os.path.exists(sys.argv[2]) and wpp_nodes.load_location(sys.argv[2]) != neutral:
-    raise SystemExit(0)
-detected=wpp_nodes.detect_public_location()
-saved=wpp_nodes.save_location(sys.argv[2],detected or neutral)
-if detected:
-    print("      Location detected: %s · %s"%(saved["country_name"],saved["name"]))
-else:
-    print("      Location could not be detected; it can be changed in Nodes.")
+if not os.path.exists(sys.argv[2]):
+    wpp_nodes.save_location(sys.argv[2],{"country_code":"UN","country_name":"Сервер","name":"Основная локация"})
 PY
 
 cat > "$MANAGER" <<'PY'
@@ -312,6 +337,7 @@ def load():
             for sub in d["subscriptions"]:
                 supported=[p for p in sub.get("protocols",[]) if p in ("vless","hysteria")]
                 sub["protocols"]=supported or ["vless","hysteria"]
+            d["users"]=[u for u in d["users"] if not (u.get("subscription_id") and u.get("protocol")=="web")]
             for u in d["users"]:
                 protocol=u.setdefault("protocol","web")
                 # V2.2 briefly exposed experimental per-profile transports and
@@ -406,18 +432,9 @@ def sync_firewall(d):
         elif u.get("enabled",True) and u.get("protocol")=="mtproto":
             uid=u["id"]
             port=int(u["backend_port"])
-            # Telegram clients on some filtered networks open several SYNs in
-            # a very short burst. The filter can leave the socket established
-            # while the MTProto session itself stalls. Keep the tested iOS
-            # fingerprint on the fast path; pace other IPv4 clients per source
-            # and reject excess SYNs immediately so Telegram retries instead
-            # of waiting for its long connection timeout. These rules apply
-            # only to WPP-owned MTProto ports.
-            meter="wpp_mt_"+re.sub(r"[^a-zA-Z0-9_]","",uid)[:24]
-            lines.append("nft 'add rule inet web_proxy_panel input meta nfproto ipv4 iifname != \"lo\" tcp dport %d tcp flags & (syn|ack) == syn @th,108,20 0x2ffff @th,160,16 0x204 @th,192,16 0x103 @th,224,24 0x10108 @th,320,32 0x4020000 counter accept comment \"wpp:%s:ios-syn\"'"%(port,uid))
-            lines.append("nft 'add rule inet web_proxy_panel input meta nfproto ipv4 iifname != \"lo\" tcp dport %d tcp flags & (syn|ack) == syn meter %s { ip saddr timeout 60s limit rate 54/minute burst 1 packets } counter accept comment \"wpp:%s:syn\"'"%(port,meter,uid))
-            lines.append("nft 'add rule inet web_proxy_panel input meta nfproto ipv4 iifname != \"lo\" tcp dport %d tcp flags & (syn|ack) == syn counter reject with icmp type host-unreachable comment \"wpp:%s:syn-retry\"'"%(port,uid))
-            # nft requires the terminal verdict before the optional rule comment.
+            # Keep MTProto rules compatible with both Ubuntu 22.04 and 24.04
+            # nftables. Earlier packet-fingerprint expressions were rejected
+            # by some nft versions and made client creation roll back.
             lines.append("nft 'add rule inet web_proxy_panel input iifname != \"lo\" tcp dport %d counter accept comment \"wpp:%s:up\"'"%(port,uid))
             lines.append("nft 'add rule inet web_proxy_panel output oifname != \"lo\" tcp sport %d counter accept comment \"wpp:%s:down\"'"%(port,uid))
     if web_ports:
@@ -1271,10 +1288,11 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 from collections import defaultdict, deque
 from wpp_subscriptions import PREFIX as SUB_PREFIX
 from wpp_panel_extras import preview_document
-from wpp_ui import page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, client_records, nodes_ui
+from wpp_ui import page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, openflux_ui, client_records, nodes_ui
 import wpp_metrics as server_metrics
 import wpp_update as web_updates
 import wpp_nodes as node_api
+import wpp_openflux as openflux
 
 HOST="127.0.0.1"
 PORT=8090
@@ -1538,7 +1556,11 @@ def hydrate_legacy_assets(source):
             '<script>\n'+javascript+'\n</script>', source, flags=re.I|re.S)
     return source
 def write_site_html(source):
-    rendered,css,javascript,css_name,js_name=externalize_inline_assets(source)
+    # Publish exactly what the administrator entered. tproxy-server's static
+    # public_dir does not impose a CSP on public pages, so inline styles,
+    # JavaScript, JSON-LD, SEO tags and verification metadata remain intact.
+    rendered=source
+    css=javascript=css_name=js_name=""
     raw=rendered.encode("utf-8")
     if not source.strip(): raise ValueError("HTML не может быть пустым")
     if len(source.encode("utf-8"))>MAX_HTML_BYTES: raise ValueError("HTML превышает лимит 1 МБ")
@@ -1764,7 +1786,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.api_auth(): return
             if path==node_api.API_PREFIX+"/status":
                 loc=node_api.load_location(LOCATION_FILE)
-                self.send_json({"ok":True,"api_version":1,"version":"2.2.0","domain":DOMAIN,
+                self.send_json({"ok":True,"api_version":1,"version":"2.3.0","domain":DOMAIN,
                     "location":loc,"capabilities":["vless","hysteria","federation"]}); return
             if path==node_api.API_PREFIX+"/profiles":
                 result=[]
@@ -1827,7 +1849,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path==PANEL_PATH+"/users":
             profiles=[{"id":"primary","name":"Основной WEB Proxy","secret":primary(),"protocol":"web","enabled":True,"backend_port":443}]+users()
-            body=users_ui(subscription_registry(),profiles,traffic(),PANEL_PATH,DOMAIN,self.csrf(),proxy_link)
+            body=users_ui(subscription_registry(),profiles,traffic(),PANEL_PATH,DOMAIN,self.csrf(),proxy_link,openflux.profile_states())
             self.send_html(layout("Клиенты",body,"users")); return
         if path==PANEL_PATH+"/nodes":
             body=nodes_ui([node_api.public_node(n) for n in node_api.load_nodes(NODES_FILE)],
@@ -1874,7 +1896,9 @@ class Handler(BaseHTTPRequestHandler):
                 else: site_html=read_site_html()
             except Exception: site_html="<!-- Не удалось прочитать исходник -->"
             editor=editor_ui(site_html,PANEL_PATH,self.csrf(),PRESETS,has_draft)
+            flux=openflux_ui(openflux.state(),PANEL_PATH,self.csrf())
             body=f'''<div class="page-head"><div><span class="eyebrow">WPP / STUDIO</span><h1>Настройки</h1><p>Оформление сайта и доступ к панели</p></div></div>
+{flux}
 {editor}
 <div class=card><h2>Пароль администратора</h2><form method=post action="{PANEL_PATH}/password"><input type=hidden name=csrf value="{token}"><label for="adminNewPassword">Новый пароль</label><input id="adminNewPassword" type=password name=a minlength=3 required autocomplete=new-password><div class="actions" style="margin-top:16px"><button class="btn primary">Сохранить пароль</button><small>Минимум 3 символа · смена пароля завершит все сессии панели</small></div></form></div>'''
             self.send_html(layout("Настройки",body,"settings")); return
@@ -2018,6 +2042,35 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html("Неизвестный тип доступа",400); return
             self.redirect("/users"); return
 
+        if path==PANEL_PATH+"/openflux":
+            operation=form.get("operation","")
+            try:
+                if operation=="save":
+                    openflux.configure(form.get("url",""),form.get("ios_compatible","")=="1")
+                elif operation=="enable": openflux.set_enabled(True)
+                elif operation=="disable": openflux.set_enabled(False)
+                elif operation=="rotate": openflux.rotate_key()
+                else: raise openflux.OpenFluxError("Неизвестная операция OpenFlux.")
+                self.redirect("/settings")
+            except openflux.OpenFluxError as exc:
+                self.send_html("Ошибка OpenFlux: "+esc(str(exc)),400)
+            return
+
+        if path==PANEL_PATH+"/openflux-profile":
+            operation=form.get("operation","")
+            try:
+                if operation=="create":
+                    openflux.create_profile(form.get("name",""),form.get("url",""),form.get("platform",""))
+                elif operation=="enable": openflux.profile_set_enabled(form.get("id",""),True)
+                elif operation=="disable": openflux.profile_set_enabled(form.get("id",""),False)
+                elif operation=="rotate": openflux.profile_rotate(form.get("id",""))
+                elif operation=="delete": openflux.delete_profile(form.get("id",""))
+                else: raise openflux.OpenFluxError("Неизвестная операция OpenFlux.")
+                self.redirect("/users")
+            except openflux.OpenFluxError as exc:
+                self.send_html("Ошибка OpenFlux: "+esc(str(exc)),400)
+            return
+
         if path==PANEL_PATH+"/client-action":
             uid=form.get('id',''); kind=form.get('kind',''); operation=form.get('operation','')
             if uid=='primary' or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',uid):
@@ -2127,7 +2180,12 @@ class Handler(BaseHTTPRequestHandler):
         if path==PANEL_PATH+"/apply-preset":
             try:
                 preset=get_preset(form.get("preset",""))
-                write_site_html(preset["html"])
+                # Applying a bundled preset is an explicit publish operation.
+                # Remove a stale custom draft so it cannot overwrite the
+                # selected preset on the next save.
+                with STATE_LOCK:
+                    write_site_html(preset["html"])
+                    if os.path.exists(SITE_DRAFT): os.unlink(SITE_DRAFT)
                 self.redirect("/settings")
             except ValueError as exc:
                 self.send_html("Ошибка применения пресета: "+esc(exc),400)
@@ -2226,7 +2284,7 @@ PY
 fi
 
 python3 -m py_compile "$APP_FILE"
-python3 -m py_compile "$APP_DIR/wpp_subscriptions.py" "$APP_DIR/wpp_panel_extras.py" "$APP_DIR/wpp_ui.py" "$APP_DIR/wpp_metrics.py" "$APP_DIR/wpp_update.py" "$APP_DIR/wpp_nodes.py"
+python3 -m py_compile "$APP_DIR/wpp_subscriptions.py" "$APP_DIR/wpp_panel_extras.py" "$APP_DIR/wpp_ui.py" "$APP_DIR/wpp_metrics.py" "$APP_DIR/wpp_update.py" "$APP_DIR/wpp_nodes.py" "$APP_DIR/wpp_openflux.py"
 
 
 # ---- Finish installation: service, Caddy route, permissions, start ----
@@ -2266,7 +2324,7 @@ fi
 echo "[4/6] Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=WEB PANEL PROXY V 2.2.0
+Description=WEB PANEL PROXY V 2.3.0
 After=network-online.target caddy.service tproxy-server.service mtproxy.service web-proxy-panel-firewall.service
 Wants=network-online.target
 Requires=web-proxy-panel-firewall.service
@@ -2355,7 +2413,7 @@ unlock_changes(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 show_info(){
     local d p version
-    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.2.0')"
+    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.3.0')"
     echo
     echo "============================================================"
     echo "                 WEB PANEL PROXY"
@@ -2371,6 +2429,7 @@ show_info(){
     printf 'WEB Proxy:       %s\n' "$(service_state tproxy-server.service)"
     printf 'MTProxy:         %s\n' "$(service_state mtproxy.service)"
     printf 'Xray:            %s\n' "$(service_state web-panel-proxy-xray.service)"
+    printf 'OpenFlux:        %s\n' "$(service_state web-panel-proxy-openflux.service)"
     printf 'SSL действует до:%s\n' " $(ssl_expiry)"
     printf 'TCP/80:          %s\n' "$(port_80_state)"
     echo "============================================================"
@@ -2484,12 +2543,12 @@ run_update(){
 
 maintain_ssl(){
     echo
-    echo "Проверяю HTTPS-сертификат и запускаю обслуживание Caddy..."
+    echo "Проверяю HTTPS-сертификат через TCP/443 и запускаю обслуживание Caddy..."
     lock_changes
     if /usr/local/sbin/web-panel-proxy-sync-tls --force; then
         unlock_changes
         echo "SSL-сертификат действителен; копия для Hysteria2 синхронизирована."
-        echo "TCP/80: $(port_80_state)"
+        echo "TCP/80 остаётся свободным для других программ: $(port_80_state)"
     else
         unlock_changes
         echo "Не удалось подтвердить обновление SSL. Проверьте DNS, TCP/443 и журнал Caddy."
@@ -2612,8 +2671,8 @@ route = (
 )
 s = s[:m.start()] + route + s[m.start():]
 
-# Restore Caddy's standard HTTP-to-HTTPS listener and ACME challenge behavior.
-# This also migrates installations made by the earlier no-port-80 build.
+# Keep TCP/80 free. Certificates are issued and renewed with TLS-ALPN-01 on
+# TCP/443, so Caddy does not need a permanent HTTP redirect listener.
 s = re.sub(
     r'\n?\s*# WPP TLS WITHOUT PORT 80 BEGIN\n.*?\n\s*# WPP TLS WITHOUT PORT 80 END\n?',
     '\n', s, flags=re.S,
@@ -2624,14 +2683,56 @@ s = re.sub(
     r'\n?\s*# WPP HTTP REDIRECT BEGIN\n.*?\n\s*# WPP HTTP REDIRECT END\n?',
     '\n', s, flags=re.S,
 )
-redirect = (
-    "# WPP HTTP REDIRECT BEGIN\n"
-    "http://" + domain + " {\n"
-    "    redir https://" + domain + "{uri} permanent\n"
-    "}\n"
-    "# WPP HTTP REDIRECT END\n"
-)
-s = s.rstrip() + "\n\n" + redirect
+if re.match(r'\A\s*\{',s):
+    s=re.sub(r'\A\s*\{',"{\n\tauto_https disable_redirects",s,count=1)
+else:
+    s="{\n\tauto_https disable_redirects\n}\n\n"+s.lstrip()
+def configure_site_tls_alpn(text, hostname):
+    match=re.search(r'(?m)^\s*'+re.escape(hostname)+r'\s*\{\s*$',text)
+    if not match:
+        raise SystemExit("WEB PANEL PROXY Caddy site block was not found")
+    opening=text.find('{',match.start(),match.end())
+    depth=0
+    closing=None
+    for index in range(opening,len(text)):
+        if text[index]=='{': depth+=1
+        elif text[index]=='}':
+            depth-=1
+            if depth==0:
+                closing=index+1
+                break
+    if closing is None:
+        raise SystemExit("WEB PANEL PROXY Caddy site block is incomplete")
+    block=text[match.start():closing]
+    if 'disable_http_challenge' in block:
+        return text
+    if re.search(r'issuer\s+acme\s*\{',block):
+        block=re.sub(r'(issuer\s+acme\s*\{)',r'\1\n            disable_http_challenge',block,count=1)
+    else:
+        # Older WPP releases used Caddy's short `tls email@example.com`
+        # syntax. Expand only this site's directive and keep its ACME email.
+        short=re.search(r'(?m)^(?P<i>\s*)tls\s+(?P<email>[^\s{}]+)\s*$',block)
+        if short and '@' in short.group('email'):
+            indent=short.group('i')
+            replacement=(indent+'tls {\n'+indent+'    issuer acme {\n'+
+                         indent+'        email '+short.group('email')+'\n'+
+                         indent+'        disable_http_challenge\n'+
+                         indent+'    }\n'+indent+'}')
+            block=block[:short.start()]+replacement+block[short.end():]
+        elif re.search(r'(?m)^\s*tls\s*\{',block):
+            block=re.sub(r'(?m)^(?P<i>\s*)tls\s*\{',
+                         lambda m:m.group(0)+'\n'+m.group('i')+'    issuer acme {\n'+m.group('i')+'        disable_http_challenge\n'+m.group('i')+'    }',
+                         block,count=1)
+        elif not short:
+            insertion='\n    tls {\n        issuer acme {\n            disable_http_challenge\n        }\n    }'
+            block=block[:block.find('{')+1]+insertion+block[block.find('{')+1:]
+        else:
+            # `tls internal` does not use ACME and therefore needs no port 80.
+            return text
+    if 'disable_http_challenge' not in block:
+        raise SystemExit("Could not configure TLS-ALPN-only certificate renewal")
+    return text[:match.start()]+block+text[closing:]
+s=configure_site_tls_alpn(s,domain)
 Path(p).write_text(s, encoding="utf-8")
 PY
 
@@ -2774,9 +2875,9 @@ fi
 echo
 echo "============================================================"
 if [[ "$UPDATING" == "1" ]]; then
-echo "          WEB PANEL PROXY V 2.2.0 UPDATED"
+echo "          WEB PANEL PROXY V 2.3.0 UPDATED"
 else
-echo "         WEB PANEL PROXY V 2.2.0 IS READY"
+echo "         WEB PANEL PROXY V 2.3.0 IS READY"
 fi
 echo "============================================================"
 echo

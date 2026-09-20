@@ -2,9 +2,9 @@
   <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
 </p>
 
-<h1 align="center">WEB PANEL PROXY 2.2.0</h1>
+<h1 align="center">WEB PANEL PROXY 2.3.0</h1>
 
-<p align="center">WEB Proxy, MTProto, VLESS XHTTP, Hysteria2 и панель управления для собственного VPS</p>
+<p align="center">WEB Proxy, MTProto, VLESS XHTTP, Hysteria2, OpenFlux и панель управления для собственного VPS</p>
 
 ## Требования
 
@@ -12,18 +12,18 @@
 - Архитектура `x86_64`.
 - Домен или поддомен с A-записью на IPv4 вашего VPS.
 - Доступ к серверу от пользователя `root`.
-- Открытые `80/tcp` и `443/tcp`.
+- Открытый `443/tcp`; порт `80/tcp` панели не требуется.
 - Для Hysteria2 — `8443/udp`.
 - Для MTProto — TCP-порты из диапазона `2399–2430`.
+- Для OpenFlux — публичная ссылка на документ в классическом редакторе Яндекс Документов. Дополнительный входящий порт не требуется.
 
-Caddy занимает `80/tcp` для перенаправления HTTP на HTTPS и `443/tcp` для панели, прокси и обслуживания сертификата.
 
 ## Установка
 
 Подключитесь к VPS по SSH, перейдите в режим `root` и выполните одну команду:
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=600 update && apt-get -o DPkg::Lock::Timeout=600 install -y curl ca-certificates git && WEB_PANEL_PROXY_REF=v2.2.0 bash -c "$(curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.2.0/install.sh)"
+apt-get -o DPkg::Lock::Timeout=600 update && apt-get -o DPkg::Lock::Timeout=600 install -y curl ca-certificates git && WEB_PANEL_PROXY_REF=v2.3.0 bash -c "$(curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.3.0/install.sh)"
 ```
 
 Во время установки потребуется указать:
@@ -63,13 +63,6 @@ sudo /usr/local/sbin/web-panel-proxy-uninstall
 
 Команда удаляет пользователей, ключи, конфигурации, службы, правила firewall и сайт проекта без дополнительного подтверждения. Если Caddy используется другими сайтами, скрипт постарается сохранить их конфигурацию.
 
-## Важные примечания
-
-- Адрес панели и ссылки подключения являются секретными — не публикуйте их.
-- Для работы Hysteria2 и MTProto откройте нужные порты также в firewall личного кабинета VPS-провайдера.
-- Команда `sudo WPP` показывает состояние служб, URL панели, срок SSL и позволяет сменить логин, пароль или адрес панели.
-- Xray `26.7.28` загружается из официального репозитория и проверяется по SHA-256. Upstream помечает эту версию как pre-release; она закреплена для совместимости с текущей реализацией Hysteria2.
-- Резервные копии могут содержать ключи и пароли. Не загружайте их в GitHub и не отправляйте посторонним.
 
 ## Ссылки
 

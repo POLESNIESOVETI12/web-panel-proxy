@@ -17,7 +17,6 @@ API_PREFIX = '/wpp-api/v1'
 CONNECTION_TOKEN_PREFIX = 'wppnode1_'
 MAX_NODES = 16
 MAX_RESPONSE = 1024 * 1024
-GEO_RESPONSE_LIMIT = 64 * 1024
 
 
 class NodeError(ValueError):
@@ -144,38 +143,6 @@ def save_location(path, value):
     value = location(value)
     atomic_json(path, value)
     return value
-
-
-def detect_public_location(timeout=8):
-    """Return a best-effort location for the VPS public egress IP."""
-    providers = (
-        ('https://ipwho.is/?lang=ru', 'country_code', 'country', 'city', 'success'),
-        ('https://ipapi.co/json/', 'country_code', 'country_name', 'city', None),
-    )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-    for url, code_key, country_key, city_key, success_key in providers:
-        request_object = urllib.request.Request(url, method='GET', headers={
-            'Accept': 'application/json', 'User-Agent': 'WEB-PANEL-PROXY/2.2',
-        })
-        try:
-            with opener.open(request_object, timeout=timeout) as response:
-                raw = response.read(GEO_RESPONSE_LIMIT + 1)
-            if len(raw) > GEO_RESPONSE_LIMIT:
-                continue
-            value = json.loads(raw.decode('utf-8'))
-            if not isinstance(value, dict) or (success_key and value.get(success_key) is not True):
-                continue
-            code = str(value.get(code_key, '')).strip().upper()
-            country = str(value.get(country_key, '')).strip()
-            city = str(value.get(city_key, '')).strip()
-            if not re.fullmatch(r'[A-Z]{2}', code) or code == 'UN':
-                continue
-            return location({'country_code': code, 'country_name': country,
-                             'name': city or 'Основная локация'})
-        except (OSError, TimeoutError, ValueError, TypeError, json.JSONDecodeError,
-                urllib.error.URLError, urllib.error.HTTPError):
-            continue
-    return None
 
 
 def load_nodes(path):

@@ -98,12 +98,8 @@ ef.addEventListener('submit',e=>{{if(e.submitter&&e.submitter.id==='publishHtml'
 
 
 def preview_document(source, externalize):
-    rendered, css, js, css_name, js_name = externalize(source)
-    for name, value, mime in [(css_name, css, 'text/css'), (js_name, js, 'text/javascript')]:
-        if name:
-            data = 'data:' + mime + ';base64,' + base64.b64encode(value.encode()).decode()
-            rendered = rendered.replace('/' + name, data)
-    # First CSP is enforced even if untrusted HTML includes another, weaker CSP.
-    # Only generated data assets run. No unsafe-inline, same-origin or network.
-    csp = "default-src 'none'; script-src data:; style-src data:; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
-    return '<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="' + csp + '">' + rendered
+    # Preview the exact document without rewriting tags or JSON-LD. Network
+    # access stays disabled inside the sandbox, while inline CSS and JavaScript
+    # behave as they will on the published static site.
+    csp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    return '<meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="' + csp + '">' + source
