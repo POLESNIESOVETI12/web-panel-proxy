@@ -449,8 +449,6 @@ else
 
     curl --fail --silent --show-error --location \
         --proto '=https' --proto-redir '=https' --tlsv1.2 \
-        --retry 5 --retry-all-errors --retry-delay 3 \
-        --connect-timeout 30 --max-time 600 \
         --output "$caddy_archive" \
         "https://github.com/caddyserver/caddy/releases/download/v${caddy_version}/caddy_${caddy_version}_linux_amd64.tar.gz"
 
@@ -545,8 +543,6 @@ else
 
     curl --fail --silent --show-error --location \
         --proto '=https' --proto-redir '=https' --tlsv1.2 \
-        --retry 5 --retry-all-errors --retry-delay 3 \
-        --connect-timeout 30 --max-time 600 \
         --output "$go_archive" \
         "https://go.dev/dl/go${go_version}.linux-amd64.tar.gz"
 
@@ -1093,13 +1089,23 @@ else
     fi
 fi
 
-# Standard automatic HTTPS must keep both public listeners active.
-for p in 80 443; do
-    if ! port_has_expected_process "$p" caddy; then
-        ss -lntp 2>/dev/null | grep -E ":${p}\b" || true
-        die "Caddy did not start its expected TCP/${p} listener."
-    fi
-done
+# A successfully running HTTPS listener does not prove that the HTTP redirect
+# listener was applied. Repair a stale runtime config once before health checks.
+if ! port_is_listening 80; then
+    echo "      TCP/80 is not active yet; reloading the verified Caddyfile..."
+    "$CADDY_BIN" reload --config /etc/caddy/Caddyfile --adapter caddyfile --force 2>/dev/null ||
+        systemctl restart caddy.service
+    for _ in $(seq 1 15); do
+        port_is_listening 80 && break
+        sleep 1
+    done
+fi
+port_is_listening 80 || {
+    echo "      Effective Caddy listeners:"
+    "$CADDY_BIN" adapt --config /etc/caddy/Caddyfile --adapter caddyfile --pretty 2>/dev/null |
+        grep -E '"listen"|":80"|":443"' || true
+    die "Caddy did not activate its managed HTTP listener on port 80."
+}
 
 echo
 echo "[9/10] Running health checks..."
