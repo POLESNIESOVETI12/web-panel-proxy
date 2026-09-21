@@ -1338,9 +1338,9 @@ SUB_FETCH_SLOTS=threading.BoundedSemaphore(4)
 SUB_RATE_LOCK=threading.Lock()
 SUB_REQUESTS={}
 
-# Presets are deliberately standalone: no CDN, no separate CSS/JS files and
-# no icon font. This is essential because WEB Proxy exposes the cover page as
-# one document, not as a conventional static-file web server.
+# Presets are deliberately standalone at authoring time: no CDN and no icon
+# font. On publication the panel moves executable CSS/JS into immutable local
+# files because the public relay uses a strict Content-Security-Policy.
 PRESETS=[
  {"id":"countdown","name":"Обратный отсчёт","description":"Светлая страница с живым таймером и адаптацией для телефона.","html":'''<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#101b46"><title>Скоро открытие</title>
@@ -1498,7 +1498,9 @@ def verify_public_asset(path, marker):
         raise RuntimeError("Relay did not publish "+path+" after restart")
 def externalize_inline_assets(source):
     # Static public pages intentionally block inline CSS/JS. Keep generated
-    # assets at local paths that tproxy-server can serve from public_dir.
+    # assets at local paths that tproxy-server can serve from public_dir. Data
+    # scripts (JSON-LD, import maps and other non-executable payloads) must stay
+    # in the HTML exactly where the author put them.
     styles=[]
     def replace_style(match):
         css=match.group(1).strip()
@@ -1508,11 +1510,17 @@ def externalize_inline_assets(source):
     rendered=re.sub(r"<style\b[^>]*>(.*?)</style\s*>",replace_style,source,flags=re.I|re.S)
     scripts=[]
     def replace_script(match):
-        code=match.group(1).strip()
+        attributes=match.group(1) or ""
+        type_match=re.search(r'\btype\s*=\s*(["\'])(.*?)\1',attributes,flags=re.I|re.S)
+        script_type=(type_match.group(2).strip().lower() if type_match else "")
+        executable_types={"","module","text/javascript","application/javascript","text/ecmascript","application/ecmascript"}
+        if script_type not in executable_types:
+            return match.group(0)
+        code=match.group(2).strip()
         if not code: return ""
         scripts.append(code)
         return '<script src="/panel-site.js" defer></script>' if len(scripts)==1 else ""
-    rendered=re.sub(r"<script\b(?![^>]*\bsrc\s*=)[^>]*>(.*?)</script\s*>",replace_script,rendered,flags=re.I|re.S)
+    rendered=re.sub(r"<script\b(?![^>]*\bsrc\s*=)([^>]*)>(.*?)</script\s*>",replace_script,rendered,flags=re.I|re.S)
     # The relay CSP intentionally rejects style="..." attributes. Convert
     # them to same-origin stylesheet rules so standalone HTML pasted into the
     # editor keeps its layout without enabling unsafe-inline globally.
@@ -1566,11 +1574,10 @@ def hydrate_legacy_assets(source):
             '<script>\n'+javascript+'\n</script>', source, flags=re.I|re.S)
     return source
 def write_site_html(source):
-    # Publish exactly what the administrator entered. tproxy-server's static
-    # public_dir does not impose a CSP on public pages, so inline styles,
-    # JavaScript, JSON-LD, SEO tags and verification metadata remain intact.
-    rendered=source
-    css=javascript=css_name=js_name=""
+    # Preserve the author's original document in SITE_SOURCE. The public copy
+    # references same-origin immutable assets so the relay's strict CSP does
+    # not strip the design. JSON-LD, SEO and verification markup stay inline.
+    rendered,css,javascript,css_name,js_name=externalize_inline_assets(source)
     raw=rendered.encode("utf-8")
     if not source.strip(): raise ValueError("HTML не может быть пустым")
     if len(source.encode("utf-8"))>MAX_HTML_BYTES: raise ValueError("HTML превышает лимит 1 МБ")
@@ -2269,7 +2276,11 @@ def main():
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
 
 if __name__=="__main__":
-    main()
+    if len(sys.argv)==2 and sys.argv[1]=="--repair-site":
+        write_site_html(read_site_html())
+        print("Public landing page assets repaired.")
+    else:
+        main()
 
 
 
@@ -2786,6 +2797,14 @@ echo "[5/6] Starting service..."
 systemctl restart caddy.service
 systemctl restart tproxy-server.service
 systemctl restart mtproxy.service
+
+# Re-publish the retained author source through the current CSP-safe renderer.
+# This automatically repairs pages saved by the affected release where the
+# HTML loaded but its inline styles and scripts were blocked by the browser.
+WEBPROXY_DOMAIN="$DOMAIN" \
+WEBPROXY_MTPROTO_HOST="$MTPROTO_HOST" \
+WEBPROXY_PANEL_PATH="$PANEL_PATH" \
+    python3 "$APP_FILE" --repair-site
 
 # Ensure no stale copy of this exact panel occupies 127.0.0.1:8090.
 systemctl stop tproxy-panel.service 2>/dev/null || true
