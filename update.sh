@@ -16,7 +16,7 @@ LOCAL_SOURCE=""
 if [[ "${1:-}" == "--local" ]]; then
     LOCAL_SOURCE="$(cd "$(dirname "$0")" && pwd)"
     RELEASE_REF="v2.3.5"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py assets/OpenFlux-linux-amd64; do
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py; do
         [[ -s "$LOCAL_SOURCE/$file" ]] || { echo "Incomplete local archive: $file is missing." >&2; exit 1; }
     done
 elif [[ $# != 0 ]]; then
@@ -254,9 +254,12 @@ echo "Downloading the current WEB PANEL PROXY V 2.3.5 files..."
 if [[ -n "$LOCAL_SOURCE" ]]; then
     install -d -m 0700 "$TEMP_DIR/source"
     install -d -m 0700 "$TEMP_DIR/source/assets"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py assets/OpenFlux-linux-amd64; do
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py; do
         cp -a "$LOCAL_SOURCE/$file" "$TEMP_DIR/source/$file"
     done
+    if [[ -s "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" ]]; then
+        cp -a "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" "$TEMP_DIR/source/assets/OpenFlux-linux-amd64"
+    fi
 else
 git clone --depth 1 --branch "$RELEASE_REF" "$REPOSITORY" "$TEMP_DIR/source"
 fi

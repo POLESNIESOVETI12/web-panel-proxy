@@ -4,7 +4,7 @@ BASE="$(cd "$(dirname "$0")" && pwd)"
 umask 077
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-for file in install-panel.sh install-webproxy-core.sh uninstall-web-proxy.sh update.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py assets/OpenFlux-linux-amd64; do
+for file in install-panel.sh install-webproxy-core.sh uninstall-web-proxy.sh update.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py; do
     [[ -s "$BASE/$file" ]] || die "Package is incomplete: missing $file. Extract the complete archive."
 done
 command -v flock >/dev/null 2>&1 || die "flock is required (package: util-linux)."
