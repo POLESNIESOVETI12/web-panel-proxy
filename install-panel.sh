@@ -235,9 +235,9 @@ XRAY_PATH="$(cat "$XRAY_PATH_FILE")"
 [[ "$XRAY_PATH" =~ ^/vless-[a-f0-9]{24}$ ]] || die "Stored VLESS path is invalid."
 
 if [[ "$UPDATING" == "1" ]]; then
-    echo "Updating WEB PANEL PROXY V 2.3.0..."
+    echo "Updating WEB PANEL PROXY V 2.3.5..."
 else
-    echo "Configuring WEB PANEL PROXY V 2.3.0..."
+    echo "Configuring WEB PANEL PROXY V 2.3.5..."
 fi
 INSTALL_CREDENTIALS="/etc/web-proxy-panel/install-credentials"
 if [[ "$UPDATING" == "1" ]]; then
@@ -1496,6 +1496,28 @@ def verify_public_asset(path, marker):
     r=subprocess.run(["curl","-kfsS","--max-time","12","https://"+DOMAIN+path],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=15)
     if r.returncode or marker not in r.stdout:
         raise RuntimeError("Relay did not publish "+path+" after restart")
+def verify_public_page(css_name,js_name):
+    # A query forces the relay's no-store path, avoiding a false success from
+    # the five-minute public index cache while a new design is being published.
+    stamp=hashlib.sha256(((css_name or "")+(js_name or "")).encode()).hexdigest()[:12]
+    r=subprocess.run(["curl","-kfsS","--max-time","12","https://"+DOMAIN+"/?wpp-site-check="+stamp],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=15)
+    if r.returncode:
+        raise RuntimeError("Relay did not publish the landing page after restart")
+    if css_name and ('/'+css_name) not in r.stdout:
+        raise RuntimeError("Published landing page does not reference its stylesheet")
+    if js_name and ('/'+js_name) not in r.stdout:
+        raise RuntimeError("Published landing page does not reference its script")
+def insert_into_head(document,tag):
+    """Insert an asset without placing anything before <!doctype html>."""
+    closing=re.search(r"</head\s*>",document,flags=re.I)
+    if closing:
+        return document[:closing.start()]+tag+document[closing.start():]
+    opening=re.search(r"<html\b[^>]*>",document,flags=re.I)
+    if opening:
+        return document[:opening.end()]+"<head>"+tag+"</head>"+document[opening.end():]
+    doctype=re.match(r"\s*<!doctype\b[^>]*>",document,flags=re.I)
+    position=doctype.end() if doctype else 0
+    return document[:position]+"<head>"+tag+"</head>"+document[position:]
 def externalize_inline_assets(source):
     # Static public pages intentionally block inline CSS/JS. Keep generated
     # assets at local paths that tproxy-server can serve from public_dir. Data
@@ -1542,7 +1564,7 @@ def externalize_inline_assets(source):
     if css_name:
         rendered=rendered.replace('/panel-site.css','/'+css_name)
         if '/'+css_name not in rendered:
-            rendered='<link rel="stylesheet" href="/'+css_name+'">'+rendered
+            rendered=insert_into_head(rendered,'<link rel="stylesheet" href="/'+css_name+'">')
     if js_name:
         rendered=rendered.replace('/panel-site.js','/'+js_name)
     # Never keep a reference to a generated asset unless we generated it in
@@ -1611,6 +1633,7 @@ def write_site_html(source):
             restart_public_site()
             if css: verify_public_asset("/"+css_name,"WEB PANEL PROXY public CSS")
             if javascript: verify_public_asset("/"+js_name,"WEB PANEL PROXY public JS")
+            verify_public_page(css_name,js_name)
             install_private_file(SITE_SOURCE,source.encode("utf-8"))
             # Keep a few prior immutable assets for rollback/open browser tabs.
             generated=[]
@@ -1803,7 +1826,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.api_auth(): return
             if path==node_api.API_PREFIX+"/status":
                 loc=node_api.load_location(LOCATION_FILE)
-                self.send_json({"ok":True,"api_version":1,"version":"2.3.0","domain":DOMAIN,
+                self.send_json({"ok":True,"api_version":1,"version":"2.3.5","domain":DOMAIN,
                     "location":loc,"capabilities":["vless","hysteria","federation"]}); return
             if path==node_api.API_PREFIX+"/profiles":
                 result=[]
@@ -2345,7 +2368,7 @@ fi
 echo "[4/6] Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=WEB PANEL PROXY V 2.3.0
+Description=WEB PANEL PROXY V 2.3.5
 After=network-online.target caddy.service tproxy-server.service mtproxy.service web-proxy-panel-firewall.service
 Wants=network-online.target
 Requires=web-proxy-panel-firewall.service
@@ -2434,7 +2457,7 @@ unlock_changes(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 show_info(){
     local d p version
-    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.3.0')"
+    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.3.5')"
     echo
     echo "============================================================"
     echo "                 WEB PANEL PROXY"
@@ -2883,9 +2906,9 @@ fi
 echo
 echo "============================================================"
 if [[ "$UPDATING" == "1" ]]; then
-echo "          WEB PANEL PROXY V 2.3.0 UPDATED"
+echo "          WEB PANEL PROXY V 2.3.5 UPDATED"
 else
-echo "         WEB PANEL PROXY V 2.3.0 IS READY"
+echo "         WEB PANEL PROXY V 2.3.5 IS READY"
 fi
 echo "============================================================"
 echo

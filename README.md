@@ -2,7 +2,7 @@
   <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
 </p>
 
-<h1 align="center">WEB PANEL PROXY 2.3.0</h1>
+<h1 align="center">WEB PANEL PROXY 2.3.5</h1>
 
 <p align="center">WEB Proxy, MTProto, VLESS XHTTP, Hysteria2, OpenFlux и панель управления для собственного VPS</p>
 
@@ -28,7 +28,7 @@ apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y ca-certificates git
 
 WPP_DIR="$(mktemp -d /root/wpp-install.XXXXXX)"
-git -c http.version=HTTP/1.1 clone --depth 1 --branch v2.3.0 \
+git -c http.version=HTTP/1.1 clone --depth 1 --branch v2.3.5 \
   https://github.com/POLESNIESOVETI12/web-panel-proxy.git "$WPP_DIR"
 
 cd "$WPP_DIR"
