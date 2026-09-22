@@ -24,11 +24,11 @@ SERVICE = "web-panel-proxy-openflux.service"
 SERVICE_USER = "wpp-openflux"
 LEGACY_IOS_DROPIN = Path("/etc/systemd/system/web-panel-proxy-openflux.service.d/ios.conf")
 PROFILES_DIR = CONFIG_DIR / "profiles"
-VERSION = "0.6.0"
+VERSION = "1.0.0"
 MAX_OPENFLUX_PROFILES = 32
 TRANSPORT = "yandex"
-CODEC = "default"
-MODE = "proxy"
+CODEC = "batched"
+MODE = "l4"
 
 
 class OpenFluxError(RuntimeError):
@@ -140,7 +140,7 @@ Type=simple
 User={SERVICE_USER}
 Group={SERVICE_USER}
 UMask=0077
-ExecStart={BIN} --exit-node --mode={MODE} --transport={TRANSPORT} --url-file={URL_FILE}{encryption_argument}
+ExecStart=/bin/sh -c 'exec {BIN} --role=exit --mode={MODE} --codec={CODEC} --transport={TRANSPORT} --url "$$(cat {URL_FILE})"{encryption_argument}'
 Restart=on-failure
 RestartSec=4
 TimeoutStopSec=15
@@ -408,7 +408,7 @@ Type=simple
 User={SERVICE_USER}
 Group={SERVICE_USER}
 UMask=0077
-ExecStart={BIN} --exit-node --mode={MODE} --transport={TRANSPORT} --url-file={paths['url']}{encryption}
+ExecStart=/bin/sh -c 'exec {BIN} --role=exit --mode={MODE} --codec={CODEC} --transport={TRANSPORT} --url "$$(cat {paths['url']})"{encryption}'
 Restart=on-failure
 RestartSec=4
 TimeoutStopSec=15

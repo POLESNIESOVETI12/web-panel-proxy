@@ -5,7 +5,7 @@ import math
 import time
 from urllib.parse import urlencode, urlsplit, parse_qs
 
-VERSION = '2.3.5'
+VERSION = '2.3.6'
 
 
 def esc(value): return html.escape(str(value), quote=True)
@@ -452,7 +452,7 @@ def openflux_ui(state, path, csrf):
     if configured:
         key_field='' if ios else f'''<div class="openflux-field wide"><span>Ключ шифрования</span><div class="openflux-value"><input id="openfluxKey" type="password" readonly value="{esc(state.get("key",""))}" spellcheck="false"><button type="button" data-openflux-reveal="openfluxKey">Показать</button><button type="button" data-openflux-copy="openfluxKey">Копировать</button></div></div>'''
         rotate_action='' if ios else f'''<form method="post" action="{esc(path)}/openflux" data-confirm="Создать новый ключ? Старый ключ сразу перестанет подключаться.">{hidden(csrf,operation='rotate')}<button class="quiet">Новый ключ</button></form>'''
-        client_hint=('На iPhone выберите Yandex Docs, вставьте ссылку и нажмите Start VPN. Поле ключа в iOS-клиенте не требуется.' if ios else 'В Android-клиенте выберите Yandex Docs и вставьте ссылку и ключ.')
+        client_hint=('На iPhone выберите Yandex Docs, вставьте ссылку и нажмите Start VPN. Поле ключа в iOS-клиенте не требуется.' if ios else 'В OpenFlux 1.0.0 для Android выберите Yandex Docs, режим VPN и кодек Batched, затем вставьте ссылку и ключ.')
         details=f'''<div class="openflux-client"><div class="openflux-field"><span>Транспорт</span><b>Yandex Docs</b></div><div class="openflux-field"><span>Клиент</span><b>{'iOS · System VPN' if ios else 'Android · AES-256-GCM'}</b></div><div class="openflux-field"><span>Защита канала</span><b>{'Без AES-шифрования' if ios else 'AES-256-GCM'}</b></div><div class="openflux-field wide"><span>Ссылка для клиента</span><div class="openflux-value"><input id="openfluxUrl" readonly value="{esc(state.get("url",""))}" spellcheck="false"><button type="button" data-openflux-copy="openfluxUrl">Копировать</button></div></div>{key_field}</div><p class="openflux-copy-status" id="openfluxCopyStatus" role="status"></p><div class="openflux-controls"><small>{client_hint} Документ должен открываться в классическом редакторе.</small><div class="actions"><form method="post" action="{esc(path)}/openflux">{hidden(csrf,operation='disable' if enabled else 'enable')}<button>{'Остановить' if enabled else 'Запустить'}</button></form>{rotate_action}</div></div>'''
     checked=' checked' if ios else ''
     mode_note=('Режим iOS отключает AES-шифрование OpenFlux, потому что текущий клиент TestFlight не принимает общий ключ.' if ios else 'Android-режим использует отдельный ключ AES-256-GCM. Для iPhone включите совместимость ниже.')

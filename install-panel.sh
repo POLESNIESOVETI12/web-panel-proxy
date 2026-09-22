@@ -34,8 +34,8 @@ XRAY_SHA256="8195d909f1109b8f3d99eefe401a3c451d7bf4af71f24d3815420f77e5dd2a40"
 HYSTERIA_PORT=8443
 OPENFLUX_ROOT="/opt/web-panel-proxy/openflux"
 OPENFLUX_BIN="${OPENFLUX_ROOT}/openflux"
-OPENFLUX_VERSION="0.6.0"
-OPENFLUX_SHA256="08fcf4020cd3c7274c7abd78fe386b40d2fcf8515082d3475ced324ad109217c"
+OPENFLUX_VERSION="1.0.0"
+OPENFLUX_SHA256="c90cb197e4ba7c288a55e864f707f53dc82695c6f66ebc42418aba5e05ad7d58"
 OPENFLUX_BUNDLED="${BASE}/assets/OpenFlux-linux-amd64"
 
 die(){ echo "ERROR: $*" >&2; exit 1; }
@@ -189,7 +189,7 @@ if [[ ! -x "$OPENFLUX_BIN" ]] || ! sha256sum "$OPENFLUX_BIN" | grep -q "^${OPENF
             --proto '=https' --proto-redir '=https' --tlsv1.2 \
             --retry 3 --retry-all-errors --connect-timeout 20 \
             --output "$OPENFLUX_DOWNLOAD" \
-            "https://github.com/damnurmum/OpenFlux-Android/releases/download/v${OPENFLUX_VERSION}/OpenFlux-linux-amd64"
+            "https://github.com/damnurmum/OpenFlux-Android/releases/download/v${OPENFLUX_VERSION}/openflux-linux-amd64"
     fi
     echo "${OPENFLUX_SHA256}  ${OPENFLUX_DOWNLOAD}" | sha256sum -c - >/dev/null || die "OpenFlux checksum verification failed."
     install -o root -g root -m 0755 "$OPENFLUX_DOWNLOAD" "$OPENFLUX_BIN"
@@ -235,9 +235,9 @@ XRAY_PATH="$(cat "$XRAY_PATH_FILE")"
 [[ "$XRAY_PATH" =~ ^/vless-[a-f0-9]{24}$ ]] || die "Stored VLESS path is invalid."
 
 if [[ "$UPDATING" == "1" ]]; then
-    echo "Updating WEB PANEL PROXY V 2.3.5..."
+    echo "Updating WEB PANEL PROXY V 2.3.6..."
 else
-    echo "Configuring WEB PANEL PROXY V 2.3.5..."
+    echo "Configuring WEB PANEL PROXY V 2.3.6..."
 fi
 INSTALL_CREDENTIALS="/etc/web-proxy-panel/install-credentials"
 if [[ "$UPDATING" == "1" ]]; then
@@ -1826,7 +1826,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.api_auth(): return
             if path==node_api.API_PREFIX+"/status":
                 loc=node_api.load_location(LOCATION_FILE)
-                self.send_json({"ok":True,"api_version":1,"version":"2.3.5","domain":DOMAIN,
+                self.send_json({"ok":True,"api_version":1,"version":"2.3.6","domain":DOMAIN,
                     "location":loc,"capabilities":["vless","hysteria","federation"]}); return
             if path==node_api.API_PREFIX+"/profiles":
                 result=[]
@@ -2368,7 +2368,7 @@ fi
 echo "[4/6] Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=WEB PANEL PROXY V 2.3.5
+Description=WEB PANEL PROXY V 2.3.6
 After=network-online.target caddy.service tproxy-server.service mtproxy.service web-proxy-panel-firewall.service
 Wants=network-online.target
 Requires=web-proxy-panel-firewall.service
@@ -2457,7 +2457,7 @@ unlock_changes(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 show_info(){
     local d p version
-    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.3.5')"
+    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.3.6')"
     echo
     echo "============================================================"
     echo "                 WEB PANEL PROXY"
@@ -2906,9 +2906,9 @@ fi
 echo
 echo "============================================================"
 if [[ "$UPDATING" == "1" ]]; then
-echo "          WEB PANEL PROXY V 2.3.5 UPDATED"
+echo "          WEB PANEL PROXY V 2.3.6 UPDATED"
 else
-echo "         WEB PANEL PROXY V 2.3.5 IS READY"
+echo "         WEB PANEL PROXY V 2.3.6 IS READY"
 fi
 echo "============================================================"
 echo

@@ -2,7 +2,7 @@
   <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
 </p>
 
-<h1 align="center">WEB PANEL PROXY 2.3.5</h1>
+<h1 align="center">WEB PANEL PROXY 2.3.6</h1>
 
 <p align="center">WEB Proxy, MTProto, VLESS XHTTP, Hysteria2, OpenFlux и панель управления для собственного VPS</p>
 
@@ -28,7 +28,7 @@ apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y ca-certificates git
 
 WPP_DIR="$(mktemp -d /root/wpp-install.XXXXXX)"
-git -c http.version=HTTP/1.1 clone --depth 1 --branch v2.3.5 \
+git -c http.version=HTTP/1.1 clone --depth 1 --branch v2.3.6 \
   https://github.com/POLESNIESOVETI12/web-panel-proxy.git "$WPP_DIR"
 
 cd "$WPP_DIR"
@@ -81,7 +81,7 @@ sudo /usr/local/sbin/web-panel-proxy-uninstall
 - Для работы Hysteria2 и MTProto откройте нужные порты также в firewall личного кабинета VPS-провайдера.
 - Команда `sudo WPP` показывает состояние служб, URL панели, срок SSL и позволяет сменить логин, пароль или адрес панели.
 - Xray `26.7.28` загружается из официального репозитория и проверяется по SHA-256. Upstream помечает эту версию как pre-release; она закреплена для совместимости с текущей реализацией Hysteria2.
-- OpenFlux `0.6.0` устанавливается как отдельная непривилегированная служба, загружается из релиза OpenFlux-Android и проверяется по закреплённой SHA-256. Это экспериментальный IPv4/TCP-туннель; UDP и IPv6 через него не передаются.
+- OpenFlux `1.0.0` устанавливается как отдельная непривилегированная служба, загружается из релиза OpenFlux-Android и проверяется по закреплённой SHA-256. Android-клиент и сервер используют кодек Batched и режим L4. Это экспериментальный IPv4/TCP-туннель; UDP и IPv6 через него не передаются.
 - Резервные копии могут содержать ключи и пароли. Не загружайте их в GitHub и не отправляйте посторонним.
 
 ## Ссылки
