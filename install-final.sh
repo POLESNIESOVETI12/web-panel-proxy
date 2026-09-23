@@ -4,16 +4,9 @@ BASE="$(cd "$(dirname "$0")" && pwd)"
 umask 077
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-for file in install-panel.sh install-webproxy-core.sh uninstall-web-proxy.sh update.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py; do
+for file in install-panel.sh install-webproxy-core.sh uninstall-web-proxy.sh update.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py; do
     [[ -s "$BASE/$file" ]] || die "Package is incomplete: missing $file. Extract the complete archive."
 done
-[[ -s "$BASE/assets/OpenFlux-linux-amd64" || -s "$BASE/OpenFlux-linux-amd64" ]] ||
-    die "Package is incomplete: missing OpenFlux-linux-amd64. Extract the complete archive."
-for asset in amneziawg-go-linux-amd64 awg-linux-amd64 awg-quick-linux-amd64; do
-    [[ -s "$BASE/assets/$asset" ]] || die "Package is incomplete: missing assets/$asset. Extract the complete archive."
-done
-[[ -s "$BASE/wpp-panel/flags.tar.gz" ]] ||
-    die "Package is incomplete: wpp-panel/flags.tar.gz is missing. Extract the complete archive."
 command -v flock >/dev/null 2>&1 || die "flock is required (package: util-linux)."
 exec 9>/run/lock/web-panel-proxy.lock
 flock -n 9 || die "Another WEB PANEL PROXY install, update or removal is already running."
@@ -25,7 +18,7 @@ cleanup_credentials() {
 }
 trap cleanup_credentials EXIT
 
-echo "WEB PANEL PROXY V 2.4.0: preparing server..."
+echo "WEB PANEL PROXY V 2.3.6: preparing server..."
 
 PANEL_UPDATE=0
 if [[ -s /var/lib/tproxy-panel/data.json ]] &&
@@ -62,15 +55,11 @@ systemctl is-enabled --quiet web-proxy-panel-firewall.service ||
     die "Persistent user firewall is not enabled."
 nft list table inet web_proxy_panel >/dev/null 2>&1 ||
     die "Persistent user firewall table is missing."
-nft list table ip web_proxy_awg >/dev/null 2>&1 ||
-    die "AWG routing firewall table is missing."
 [[ -x /opt/web-panel-proxy/xray/xray ]] || die "Xray binary was not installed."
-[[ -x /usr/local/bin/amneziawg-go && -x /usr/local/bin/awg ]] || die "AmneziaWG was not installed."
-/usr/local/bin/awg --version >/dev/null || die "AmneziaWG tools check failed."
 [[ -s /etc/web-panel-proxy-xray/config.json ]] || die "Xray configuration was not created."
 [[ -x /usr/local/sbin/WPP ]] || die "WPP console menu was not installed."
 systemctl is-active --quiet web-panel-proxy-sync-tls.timer ||
     die "The Xray TLS synchronization timer did not start."
 echo "Installation complete."
-printf '%s\n' '2.4.0' > /etc/web-proxy-panel/version
+printf '%s\n' '2.3.6' > /etc/web-proxy-panel/version
 chmod 0600 /etc/web-proxy-panel/version

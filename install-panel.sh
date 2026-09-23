@@ -37,22 +37,6 @@ OPENFLUX_BIN="${OPENFLUX_ROOT}/openflux"
 OPENFLUX_VERSION="1.0.0"
 OPENFLUX_SHA256="c90cb197e4ba7c288a55e864f707f53dc82695c6f66ebc42418aba5e05ad7d58"
 OPENFLUX_BUNDLED="${BASE}/assets/OpenFlux-linux-amd64"
-# v2.3.6 was published with the bundled binary at the repository root while
-# the installer expected assets/. Accept both layouts so an in-place update
-# never falls back to a large external download solely because of packaging.
-if [[ ! -s "$OPENFLUX_BUNDLED" && -s "${BASE}/OpenFlux-linux-amd64" ]]; then
-    OPENFLUX_BUNDLED="${BASE}/OpenFlux-linux-amd64"
-fi
-AWG_GO_VERSION="v3.1.20260828"
-AWG_GO_COMMIT="b5928efb6ca19f0153958460c3d141f04abc5c2e"
-AWG_GO_BUNDLED="${BASE}/assets/amneziawg-go-linux-amd64"
-AWG_GO_SHA256="9b8912d203ba7142c1957913047bb9efd6e02c173c1f3bf852c652b16aada60f"
-AWG_TOOLS_VERSION="v3.1.20260812"
-AWG_TOOLS_SHA256="919e9d0a367c7c72f9c16b7d0a9e4840b943628353b2210a33cb4b582785ba56"
-AWG_BIN_BUNDLED="${BASE}/assets/awg-linux-amd64"
-AWG_BIN_SHA256="23d29323258166183eeeb288c1f9f08b879f3707e54591b1bfb2402413f6d8d8"
-AWG_QUICK_BUNDLED="${BASE}/assets/awg-quick-linux-amd64"
-AWG_QUICK_SHA256="f4bb0f5d63665ade87f0cb9f2185c43515cff09868637eb311f98f65a318722c"
 
 die(){ echo "ERROR: $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "Run as root."
@@ -109,12 +93,9 @@ fi
 MTPROTO_HOST="${MTPROTO_HOST:-$DOMAIN}"
 [[ -s "$PRIMARY_SECRET" ]] || die "Primary install-time secret not found."
 [[ -s "$LOGO_SOURCE" ]] || die "Panel logo file is missing: panel-logo.png"
-for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py; do
+for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py; do
     [[ -s "$BASE/$module" ]] || die "Missing panel module: $module; extract the complete archive."
 done
-FLAG_ARCHIVE="$BASE/wpp-panel/flags.tar.gz"
-[[ -s "$FLAG_ARCHIVE" ]] ||
-    die "Panel flag bundle is missing; extract the complete archive."
 
 # An update keeps the existing private panel address.  A new address would
 # make an otherwise successful update look like a broken panel to its owner.
@@ -124,144 +105,6 @@ if [[ "$UPDATING" == "1" ]]; then
     [[ "$EXISTING_PATH" =~ ^/panel-[a-z0-9-]{3,64}$ ]] || die "Existing panel address was not found. Run the full installer instead."
     PANEL_PATH="$EXISTING_PATH"
 fi
-
-echo "      Preparing AmneziaWG 2.0 / 3.1..."
-AWG_INSTALLED_NOW=0
-if ! command -v ip >/dev/null 2>&1; then
-    apt-get -o DPkg::Lock::Timeout=600 update
-    apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends iproute2
-fi
-if [[ ! -x /usr/local/bin/amneziawg-go ]] || ! /usr/local/bin/amneziawg-go --version 2>&1 | grep -Fq "$AWG_GO_VERSION"; then
-    if [[ -s "$AWG_GO_BUNDLED" ]] && echo "${AWG_GO_SHA256}  ${AWG_GO_BUNDLED}" | sha256sum -c - >/dev/null; then
-        install -o root -g root -m 0755 "$AWG_GO_BUNDLED" /usr/local/bin/amneziawg-go
-    else
-        if ! command -v git >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
-            apt-get -o DPkg::Lock::Timeout=600 update
-            apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends git build-essential
-        fi
-        GO_BIN="$(find /opt -maxdepth 3 -type f -path '/opt/go*/bin/go' -print -quit 2>/dev/null || true)"
-        [[ -x "$GO_BIN" ]] || GO_BIN="$(command -v go || true)"
-        [[ -x "$GO_BIN" ]] || die "Bundled AmneziaWG binary is missing or damaged and the Go compiler is unavailable."
-        AWG_GO_SOURCE="$(mktemp -d /tmp/wpp-awg-go.XXXXXX)"
-        git -C "$AWG_GO_SOURCE" init -q
-        git -C "$AWG_GO_SOURCE" remote add origin https://github.com/amnezia-vpn/amneziawg-go.git
-        git -C "$AWG_GO_SOURCE" fetch -q --depth 1 origin tag "$AWG_GO_VERSION"
-        git -C "$AWG_GO_SOURCE" checkout -q --detach FETCH_HEAD
-        [[ "$(git -C "$AWG_GO_SOURCE" rev-parse HEAD)" == "$AWG_GO_COMMIT" ]] || die "AmneziaWG Go source verification failed."
-        (cd "$AWG_GO_SOURCE" && PATH="$(dirname "$GO_BIN"):$PATH" make amneziawg-go)
-        install -o root -g root -m 0755 "$AWG_GO_SOURCE/amneziawg-go" /usr/local/bin/amneziawg-go
-        rm -rf "$AWG_GO_SOURCE"
-    fi
-    AWG_INSTALLED_NOW=1
-fi
-if [[ ! -x /usr/local/bin/awg ]] || ! /usr/local/bin/awg --version 2>&1 | grep -Fq "${AWG_TOOLS_VERSION#v}"; then
-    if [[ -s "$AWG_BIN_BUNDLED" && -s "$AWG_QUICK_BUNDLED" ]] && \
-       echo "${AWG_BIN_SHA256}  ${AWG_BIN_BUNDLED}" | sha256sum -c - >/dev/null && \
-       echo "${AWG_QUICK_SHA256}  ${AWG_QUICK_BUNDLED}" | sha256sum -c - >/dev/null; then
-        install -o root -g root -m 0755 "$AWG_BIN_BUNDLED" /usr/local/bin/awg
-        install -o root -g root -m 0755 "$AWG_QUICK_BUNDLED" /usr/local/bin/awg-quick
-    else
-        if ! command -v unzip >/dev/null 2>&1; then
-            apt-get -o DPkg::Lock::Timeout=600 update
-            apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends unzip
-        fi
-        AWG_TOOLS_ARCHIVE="$(mktemp /tmp/wpp-awg-tools.XXXXXX.zip)"
-        AWG_TOOLS_DIR="$(mktemp -d /tmp/wpp-awg-tools.XXXXXX)"
-        curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-            --retry 3 --retry-all-errors --connect-timeout 20 --output "$AWG_TOOLS_ARCHIVE" \
-            "https://github.com/amnezia-vpn/amneziawg-tools/releases/download/${AWG_TOOLS_VERSION}/ubuntu-22.04-amneziawg-tools.zip"
-        echo "${AWG_TOOLS_SHA256}  ${AWG_TOOLS_ARCHIVE}" | sha256sum -c - >/dev/null || die "AmneziaWG tools checksum verification failed."
-        unzip -q "$AWG_TOOLS_ARCHIVE" -d "$AWG_TOOLS_DIR"
-        AWG_TOOLS_UNPACKED="$AWG_TOOLS_DIR/ubuntu-22.04-amneziawg-tools"
-        (cd "$AWG_TOOLS_UNPACKED" && sha256sum -c awg.sha256 >/dev/null && sha256sum -c awg-quick.sha256 >/dev/null) || die "AmneziaWG tools files verification failed."
-        install -o root -g root -m 0755 "$AWG_TOOLS_UNPACKED/awg" /usr/local/bin/awg
-        install -o root -g root -m 0755 "$AWG_TOOLS_UNPACKED/awg-quick" /usr/local/bin/awg-quick
-        rm -f "$AWG_TOOLS_ARCHIVE"
-        rm -rf "$AWG_TOOLS_DIR"
-    fi
-    AWG_INSTALLED_NOW=1
-fi
-/usr/local/bin/awg --version >/dev/null || die "AmneziaWG tools verification failed."
-if [[ "$AWG_INSTALLED_NOW" == 1 ]]; then
-    : > /etc/web-proxy-panel/awg-owned
-    chmod 0600 /etc/web-proxy-panel/awg-owned
-fi
-install -d -o root -g root -m 0700 /etc/web-proxy-panel/awg
-cat > /usr/local/sbin/web-panel-proxy-awg-run <<'AWGRUN'
-#!/usr/bin/env python3
-import json,os,re,sys
-uid=sys.argv[1] if len(sys.argv)>1 else ""
-if not re.fullmatch(r"[a-f0-9]{16}",uid): raise SystemExit("invalid AWG profile id")
-with open("/etc/web-proxy-panel/awg/"+uid+".json",encoding="ascii") as handle: meta=json.load(handle)
-iface=str(meta.get("interface",""))
-if not re.fullmatch(r"wa[a-f0-9]{11}",iface): raise SystemExit("invalid AWG interface")
-os.execv("/usr/local/bin/amneziawg-go",["amneziawg-go","-f",iface])
-AWGRUN
-cat > /usr/local/sbin/web-panel-proxy-awg-up <<'AWGUP'
-#!/usr/bin/env python3
-import json,os,re,subprocess,sys,time
-uid=sys.argv[1] if len(sys.argv)>1 else ""
-if not re.fullmatch(r"[a-f0-9]{16}",uid): raise SystemExit("invalid AWG profile id")
-base="/etc/web-proxy-panel/awg/"+uid
-with open(base+".json",encoding="ascii") as handle: meta=json.load(handle)
-iface=str(meta.get("interface","")); address=str(meta.get("address","")); mtu=int(meta.get("mtu",1280))
-if not re.fullmatch(r"wa[a-f0-9]{11}",iface): raise SystemExit("invalid AWG interface")
-if not 1024 <= mtu <= 1420: raise SystemExit("invalid AWG MTU")
-for _ in range(80):
-    if os.path.exists("/var/run/amneziawg/"+iface+".sock") or os.path.exists("/sys/class/net/"+iface): break
-    time.sleep(.1)
-else: raise SystemExit("AWG interface did not appear")
-subprocess.run(["/usr/local/bin/awg","setconf",iface,base+".conf"],check=True)
-subprocess.run(["/usr/sbin/ip","address","replace",address,"dev",iface],check=True)
-subprocess.run(["/usr/sbin/ip","link","set","mtu",str(mtu),"up","dev",iface],check=True)
-AWGUP
-chmod 0755 /usr/local/sbin/web-panel-proxy-awg-run /usr/local/sbin/web-panel-proxy-awg-up
-cat > /etc/systemd/system/web-panel-proxy-awg@.service <<'EOF'
-[Unit]
-Description=WEB PANEL PROXY independent AmneziaWG profile %i
-After=network-online.target web-proxy-panel-firewall.service
-Wants=network-online.target
-Requires=web-proxy-panel-firewall.service
-
-[Service]
-Type=simple
-User=root
-Group=root
-UMask=0077
-Environment=WG_PROCESS_FOREGROUND=1
-Environment=LOG_LEVEL=error
-ExecStartPre=-/usr/local/sbin/web-panel-proxy-awg-down %i
-ExecStart=/usr/local/sbin/web-panel-proxy-awg-run %i
-ExecStartPost=/usr/local/sbin/web-panel-proxy-awg-up %i
-ExecStopPost=-/usr/local/sbin/web-panel-proxy-awg-down %i
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-cat > /usr/local/sbin/web-panel-proxy-awg-down <<'AWGDOWN'
-#!/usr/bin/env python3
-import json,os,re,subprocess,sys
-uid=sys.argv[1] if len(sys.argv)>1 else ""
-if not re.fullmatch(r"[a-f0-9]{16}",uid): raise SystemExit(0)
-try:
-    with open("/etc/web-proxy-panel/awg/"+uid+".json",encoding="ascii") as handle: iface=str(json.load(handle).get("interface",""))
-except Exception: iface="wa"+uid[:11]
-if re.fullmatch(r"wa[a-f0-9]{11}",iface): subprocess.run(["/usr/sbin/ip","link","delete",iface],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-AWGDOWN
-chmod 0755 /usr/local/sbin/web-panel-proxy-awg-down
-# Retire the shared-interface AWG preview. Existing records are migrated by
-# panelctl init to independent profiles with new ports and fingerprints.
-for legacy in web-panel-proxy-awg20.service web-panel-proxy-awg31.service; do
-    systemctl disable --now "$legacy" 2>/dev/null || true
-    rm -f -- "/etc/systemd/system/$legacy"
-done
-cat > /etc/sysctl.d/90-web-panel-proxy-awg.conf <<'EOF'
-net.ipv4.ip_forward=1
-EOF
-chmod 0644 /etc/sysctl.d/90-web-panel-proxy-awg.conf
-/usr/sbin/sysctl -p /etc/sysctl.d/90-web-panel-proxy-awg.conf >/dev/null
 
 if ! [[ "$ACME_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] && [[ -s /etc/caddy/Caddyfile ]]; then
     ACME_EMAIL="$(sed -n 's/^[[:space:]]*email[[:space:]][[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' /etc/caddy/Caddyfile | head -n1 || true)"
@@ -392,9 +235,9 @@ XRAY_PATH="$(cat "$XRAY_PATH_FILE")"
 [[ "$XRAY_PATH" =~ ^/vless-[a-f0-9]{24}$ ]] || die "Stored VLESS path is invalid."
 
 if [[ "$UPDATING" == "1" ]]; then
-    echo "Updating WEB PANEL PROXY V 2.4.0..."
+    echo "Updating WEB PANEL PROXY V 2.3.6..."
 else
-    echo "Configuring WEB PANEL PROXY V 2.4.0..."
+    echo "Configuring WEB PANEL PROXY V 2.3.6..."
 fi
 INSTALL_CREDENTIALS="/etc/web-proxy-panel/install-credentials"
 if [[ "$UPDATING" == "1" ]]; then
@@ -427,22 +270,10 @@ fi
 
 echo "[1/6] Writing manager..."
 
-for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py; do
+for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py; do
     [[ -s "$BASE/$module" ]] || die "Package is incomplete: $module is missing."
     install -o root -g root -m 0644 "$BASE/$module" "$APP_DIR/$module"
 done
-command -v tar >/dev/null 2>&1 || die "tar is required to install panel assets."
-FLAG_ENTRIES="$(tar -tzf "$FLAG_ARCHIVE")" || die "Panel flag bundle cannot be read."
-if grep -Eq '(^|/)\.\.(/|$)|^/' <<<"$FLAG_ENTRIES"; then
-    die "Panel flag bundle contains an unsafe path."
-fi
-rm -rf -- "$APP_DIR/flags"
-tar -xzf "$FLAG_ARCHIVE" -C "$APP_DIR" --no-same-owner
-[[ -s "$APP_DIR/flags/fi.svg" && -s "$APP_DIR/flags/un.svg" ]] ||
-    die "Panel flag bundle is incomplete."
-chown -R root:root "$APP_DIR/flags"
-find "$APP_DIR/flags" -type d -exec chmod 0755 {} +
-find "$APP_DIR/flags" -type f -exec chmod 0644 {} +
 
 # The service is enabled once and guarded by ConditionPathExists. Until the
 # administrator saves a document URL it stays inactive and opens no ports.
@@ -455,17 +286,14 @@ wpp_openflux.restore_if_configured()
 PY
 systemctl enable web-panel-proxy-openflux.service >/dev/null
 
-# Detect the VPS country and city once for a new/default location. A failed
-# HTTPS lookup is non-fatal and preserves the existing administrator value.
+# Location is configured only by the administrator. Installation and updates
+# never send the VPS address to an external geolocation service.
 python3 - "$APP_DIR" "${DATA_DIR}/location.json" <<'PY'
 import os,sys
 sys.path.insert(0,sys.argv[1])
 import wpp_nodes
-path=sys.argv[2]
-current=wpp_nodes.load_location(path)
-placeholder=current.get("country_code")=="UN" or current.get("name") in ("Основная локация","Локация","Сервер")
-if not os.path.exists(path) or placeholder:
-    wpp_nodes.save_location(path,wpp_nodes.detect_location(current))
+if not os.path.exists(sys.argv[2]):
+    wpp_nodes.save_location(sys.argv[2],{"country_code":"UN","country_name":"Сервер","name":"Основная локация"})
 PY
 
 cat > "$MANAGER" <<'PY'
@@ -473,12 +301,9 @@ cat > "$MANAGER" <<'PY'
 import copy, fcntl, grp, json, os, re, secrets, shutil, subprocess, sys, time, uuid
 sys.path.insert(0,"/opt/tproxy-panel")
 from wpp_subscriptions import mutate as mutate_subscription, issue as issue_subscription, SubscriptionError
-import wpp_awg
 
 USERS="/etc/web-proxy-panel/users.json"
 PROFILES="/etc/tproxy-server/profiles.json"
-PRIMARY_SECRET="/etc/web-proxy-panel/primary-secret"
-MT_ENV="/etc/mtproxy/mtproxy.env"
 UNIT_DIR="/etc/systemd/system"
 FIREWALL_SCRIPT="/usr/local/sbin/web-proxy-panel-user-firewall"
 MT_BIN="/opt/MTProxy/objs/bin/mtproto-proxy"
@@ -499,8 +324,6 @@ TRAFFIC_FILE="/var/lib/tproxy-panel/traffic.json"
 TRAFFIC_LOCK="/var/lib/tproxy-panel/traffic.lock"
 UFW_HYSTERIA_MARKER="/etc/web-proxy-panel/hysteria-ufw-owned"
 UFW_MTPROTO_MARKER="/etc/web-proxy-panel/mtproto-ufw-owned"
-UFW_AWG_MARKER="/etc/web-proxy-panel/awg-ufw-owned"
-UFW_AWG_ROUTE_MARKER="/etc/web-proxy-panel/awg-route-ufw-owned"
 BASE_PORT=2399
 BASE_STATS=8889
 MAX_USERS=32
@@ -550,67 +373,26 @@ def save(d):
     os.chmod(tmp,0o600)
     os.replace(tmp,USERS)
 
-def atomic_text(path,value,mode,group="root"):
-    tmp=path+".tmp"
-    try:
-        with open(tmp,"w",encoding="utf-8") as f:
-            f.write(value); f.flush(); os.fsync(f.fileno())
-        os.chown(tmp,0,grp.getgrnam(group).gr_gid if group!="root" else 0)
-        os.chmod(tmp,mode)
-        os.replace(tmp,path)
-    except Exception:
-        try: os.unlink(tmp)
-        except FileNotFoundError: pass
-        raise
-
-def normalize_proxy_secret(value):
-    value=str(value or "").strip().lower()
-    if not re.fullmatch(r"(?:dd)?[0-9a-f]{32}",value):
-        raise ValueError("Секрет должен содержать 32 шестнадцатеричных символа; префикс dd допускается.")
-    return value[2:] if value.startswith("dd") else value
-
 def port_in_use(port):
     # Do not rely solely on users.json: a stopped/old installation can still
     # have an MTProxy process listening on a port that is absent from the file.
     sockets=run("ss","-lnt").stdout or ""
     return re.search(r"[:.]%d\b" % int(port),sockets) is not None
 
-def alloc_ports(d,requested_port=None):
-    used={int(u.get("backend_port",0)) for u in d["users"] if u.get("backend_port")}
-    used_stats={int(u.get("stats_port",0)) for u in d["users"] if u.get("stats_port")}
-    if requested_port not in (None,""):
-        try: p=int(requested_port)
-        except (TypeError,ValueError): raise ValueError("Порт MTProto должен быть числом от 1024 до 65535.")
-        if p<1024 or p>65535:
-            raise ValueError("Порт MTProto должен быть в диапазоне 1024–65535.")
-        if p in {2398,443,8080,8081,8090} or p in used or p in used_stats or port_in_use(p):
-            raise ValueError("Этот порт уже занят. Выберите другой порт MTProto.")
-    else:
-        p=BASE_PORT
-        while p in used or p in used_stats or port_in_use(p): p+=1
-        if p>=BASE_PORT+MAX_USERS:
-            raise RuntimeError("Maximum panel users reached")
-    s=BASE_STATS
-    while s==p or s in used or s in used_stats or port_in_use(s): s+=1
-    if s>65535: raise RuntimeError("Не удалось подобрать служебный порт MTProto.")
+def alloc_ports(d):
+    used={int(u.get("backend_port",0)) for u in d["users"]}
+    used_stats={int(u.get("stats_port",0)) for u in d["users"]}
+    p,s=BASE_PORT,BASE_STATS
+    while p in used or s in used_stats or port_in_use(p) or port_in_use(s):
+        p+=1; s+=1
+    if p>=BASE_PORT+MAX_USERS:
+        raise RuntimeError("Maximum panel users reached")
     return p,s
-
-def mtproto_secrets(u):
-    values=u.get("device_secrets")
-    if not isinstance(values,list) or not values: values=[u.get("secret","")]
-    result=[]
-    for value in values:
-        try: value=normalize_proxy_secret(value)
-        except ValueError: continue
-        if value not in result: result.append(value)
-    if not result: result=[normalize_proxy_secret(u.get("secret",""))]
-    return result
 
 def write_unit(u):
     if u.get("protocol","web") not in ("web","mtproto"):
         return
     path=os.path.join(UNIT_DIR,f"web-proxy-user-{u['id']}.service")
-    secret_args=" ".join("-S "+value for value in (mtproto_secrets(u) if u.get("protocol")=="mtproto" else [u["secret"]]))
     content=f"""[Unit]
 Description=WEB Proxy User {u['id']}
 After=network-online.target web-proxy-panel-firewall.service
@@ -621,7 +403,7 @@ Requires=web-proxy-panel-firewall.service
 Type=simple
 User=root
 Group=root
-ExecStart={MT_BIN} -u nobody -p {int(u['stats_port'])} -H {int(u['backend_port'])} {secret_args} --aes-pwd {MT_AES} {MT_CONF} -M 1
+ExecStart={MT_BIN} -u nobody -p {int(u['stats_port'])} -H {int(u['backend_port'])} -S {u['secret']} --aes-pwd {MT_AES} {MT_CONF} -M 1
 Restart=always
 RestartSec=2
 
@@ -641,7 +423,6 @@ def sync_firewall(d):
     mtproto_ports=[int(u["backend_port"]) for u in d["users"] if u.get("enabled",True) and u.get("protocol","web")=="mtproto"]
     stats=[int(u["stats_port"]) for u in d["users"] if u.get("enabled",True) and u.get("protocol","web") in ("web","mtproto") and u.get("stats_port")]
     hysteria_enabled=any(u.get("enabled",True) and u.get("protocol")=="hysteria" for u in d["users"])
-    awg_users=[u for u in d["users"] if u.get("enabled",True) and u.get("protocol") in wpp_awg.PROTOCOLS]
     lines=[
         "#!/usr/bin/env bash",
         "set -e",
@@ -672,21 +453,6 @@ def sync_firewall(d):
         lines.append("nft 'add rule inet web_proxy_panel input iifname != \"lo\" tcp dport { %s } counter drop'" % ",".join(map(str,sorted(stats))))
     if hysteria_enabled:
         lines.append("nft 'add rule inet web_proxy_panel input udp dport %d counter accept'" % HYSTERIA_PORT)
-    for u in awg_users:
-        uid=u["id"]; port=int(u["backend_port"])
-        lines.append("nft 'add rule inet web_proxy_panel input iifname != \"lo\" udp dport %d counter accept comment \"wpp:%s:up\"'"%(port,uid))
-        lines.append("nft 'add rule inet web_proxy_panel output oifname != \"lo\" udp sport %d counter accept comment \"wpp:%s:down\"'"%(port,uid))
-    lines.extend([
-        "nft list table ip web_proxy_awg >/dev/null 2>&1 && nft delete table ip web_proxy_awg || true",
-        "nft add table ip web_proxy_awg",
-        "nft 'add chain ip web_proxy_awg forward { type filter hook forward priority -20; policy accept; }'",
-        "nft 'add chain ip web_proxy_awg postrouting { type nat hook postrouting priority srcnat; policy accept; }'"
-    ])
-    for u in awg_users:
-        iface=u["awg_interface"]; network=u["awg_network"]
-        lines.append("nft 'add rule ip web_proxy_awg forward iifname \"%s\" counter accept'" % iface)
-        lines.append("nft 'add rule ip web_proxy_awg forward oifname \"%s\" ct state related,established counter accept'" % iface)
-        lines.append("nft 'add rule ip web_proxy_awg postrouting ip saddr %s oifname != \"%s\" counter masquerade'" % (network,iface))
     tmp=FIREWALL_SCRIPT+".tmp"
     with open(tmp,"w",encoding="utf-8") as f: f.write("\n".join(lines)+"\n")
     os.chmod(tmp,0o750)
@@ -743,48 +509,6 @@ def sync_firewall(d):
                 os.chmod(UFW_HYSTERIA_MARKER,0o600)
             elif os.path.exists(UFW_HYSTERIA_MARKER):
                 os.unlink(UFW_HYSTERIA_MARKER)
-            previous_awg=set()
-            if os.path.exists(UFW_AWG_MARKER):
-                try:
-                    previous_awg={int(x) for x in re.findall(r"\b\d{1,5}\b",open(UFW_AWG_MARKER,encoding="ascii").read()) if 1 <= int(x) <= 65535}
-                except Exception: previous_awg=set()
-            desired_awg={int(u["backend_port"]) for u in awg_users}
-            for port in sorted(previous_awg-desired_awg):
-                run("ufw","--force","delete","allow",str(port)+"/udp")
-            owned_awg=previous_awg & desired_awg
-            status=run("ufw","status").stdout or ""
-            for port in sorted(desired_awg):
-                if re.search(r"(?m)^%d/udp\s+ALLOW\b" % port,status) is None:
-                    added=run("ufw","--force","allow",str(port)+"/udp","comment","WEB PANEL PROXY AWG")
-                    if added.returncode: raise RuntimeError("Could not open AWG in UFW: "+(added.stderr or added.stdout)[-1000:])
-                    owned_awg.add(port)
-            if owned_awg:
-                with open(UFW_AWG_MARKER,"w",encoding="ascii") as f: f.write("".join(str(p)+"\n" for p in sorted(owned_awg)))
-                os.chmod(UFW_AWG_MARKER,0o600)
-            elif os.path.exists(UFW_AWG_MARKER): os.unlink(UFW_AWG_MARKER)
-            route=run("ip","-4","route","show","default").stdout or ""
-            match=re.search(r"\bdev\s+([A-Za-z0-9_.:-]+)",route)
-            external_if=match.group(1) if match else ""
-            previous_routes=set()
-            if os.path.exists(UFW_AWG_ROUTE_MARKER):
-                try:
-                    for row in open(UFW_AWG_ROUTE_MARKER,encoding="ascii"):
-                        parts=row.split()
-                        if len(parts)==2: previous_routes.add(tuple(parts))
-                except Exception: previous_routes=set()
-            desired_routes={(u["awg_interface"],external_if) for u in awg_users if external_if}
-            for iface,out_if in sorted(previous_routes-desired_routes):
-                run("ufw","--force","route","delete","allow","in","on",iface,"out","on",out_if)
-            owned_routes=previous_routes & desired_routes
-            for iface,out_if in sorted(desired_routes-owned_routes):
-                added=run("ufw","--force","route","allow","in","on",iface,"out","on",out_if,"comment","WEB PANEL PROXY AWG")
-                if added.returncode: raise RuntimeError("Could not allow AWG forwarding in UFW: "+(added.stderr or added.stdout)[-1000:])
-                owned_routes.add((iface,out_if))
-            if owned_routes:
-                with open(UFW_AWG_ROUTE_MARKER,"w",encoding="ascii") as f:
-                    f.write("".join("%s %s\n"%item for item in sorted(owned_routes)))
-                os.chmod(UFW_AWG_ROUTE_MARKER,0o600)
-            elif os.path.exists(UFW_AWG_ROUTE_MARKER): os.unlink(UFW_AWG_ROUTE_MARKER)
 
 def sync_profiles(d):
     with open(PROFILES,encoding="utf-8") as f:
@@ -953,7 +677,6 @@ def _collect_traffic_unlocked(d=None):
     now=int(time.time())
     current=_nft_traffic()
     current.update(_xray_traffic())
-    current.update(wpp_awg.traffic(d.get("users",[])))
     state=_load_traffic()
     targets={"primary":{"protocol":"web","enabled":True}}
     targets.update({u["id"]:u for u in d.get("users",[])})
@@ -983,8 +706,6 @@ def _collect_traffic_unlocked(d=None):
             unit=XRAY_SERVICE
         elif protocol=="mtproto":
             unit="web-proxy-user-"+uid+".service"
-        elif protocol in wpp_awg.PROTOCOLS:
-            unit=wpp_awg.service_for(u)
         else:
             unit=""
         if unit not in service_states:
@@ -1029,7 +750,6 @@ def apply(d,restart=True):
         sync_firewall(d)
         run("systemctl","daemon-reload",check=True)
         sync_xray(d)
-        wpp_awg.sync(d["users"])
         if restart:
             for u in d["users"]:
                 if u.get("enabled",True) and u.get("protocol","web") in ("web","mtproto"):
@@ -1066,14 +786,9 @@ def apply(d,restart=True):
         except Exception: pass
         os.chmod(CADDYFILE,0o640)
         run("systemctl","reload","caddy.service",check=False)
-        try:
-            sync_firewall(old_users)
-            wpp_awg.sync(old_users.get("users",[]))
-        except Exception:
-            pass
         raise
 
-def add(protocol,name,requested_port=None,device_count=1):
+def add(protocol,name):
     d=load()
     before=copy.deepcopy(d)
     # A failed request from an older manager can leave a systemd unit in an
@@ -1081,24 +796,14 @@ def add(protocol,name,requested_port=None,device_count=1):
     # orphan units before choosing ports for the next user.
     remove_old_units(d)
     run("systemctl","daemon-reload",check=True)
-    if protocol not in ("web","mtproto","vless","hysteria","awg20","awg31"):
+    if protocol not in ("web","mtproto","vless","hysteria"):
         raise RuntimeError("Unknown proxy protocol")
     if sum(not u.get("subscription_id") for u in d["users"])>=MAX_USERS:
         raise RuntimeError("Maximum panel users reached")
     u={"id":secrets.token_hex(8),"name":name.strip(),"protocol":protocol,"enabled":True,"created_at":int(time.time())}
     if protocol in ("web","mtproto"):
-        if protocol=="mtproto":
-            try: device_count=int(device_count)
-            except (TypeError,ValueError): raise ValueError("Количество устройств MTProto должно быть числом.")
-            if device_count<1 or device_count>20:
-                raise ValueError("Для MTProto можно создать от 1 до 20 отдельных ключей устройств.")
-        else:
-            device_count=1
-        port,stats=alloc_ports(d,requested_port if protocol=="mtproto" else None)
-        device_secrets=[secrets.token_hex(16) for _ in range(device_count)]
-        u.update({"secret":device_secrets[0],"backend_port":port,"stats_port":stats})
-        if protocol=="mtproto":
-            u.update({"max_devices":device_count,"device_secrets":device_secrets})
+        port,stats=alloc_ports(d)
+        u.update({"secret":secrets.token_hex(16),"backend_port":port,"stats_port":stats})
     elif protocol=="vless":
         u.update({"secret":str(uuid.uuid4()),"backend_port":443})
     elif protocol=="hysteria":
@@ -1106,8 +811,6 @@ def add(protocol,name,requested_port=None,device_count=1):
         tls=run(XRAY_TLS_SYNC)
         if tls.returncode:
             raise RuntimeError("Hysteria 2 TLS certificate is not ready: "+(tls.stderr or tls.stdout)[-1500:])
-    elif protocol in wpp_awg.PROTOCOLS:
-        u.update(wpp_awg.new_user(protocol,d["users"],u["id"]))
     d["users"].append(u)
     save(d)
     try:
@@ -1121,14 +824,6 @@ def add(protocol,name,requested_port=None,device_count=1):
         except Exception: pass
         raise
     print(json.dumps(u,ensure_ascii=True))
-
-def add_json(request):
-    if not isinstance(request,dict): raise ValueError("Некорректный запрос.")
-    protocol=str(request.get("protocol",""))
-    name=str(request.get("name","")).strip()
-    if not name or len(name)>80 or any(ord(c)<32 for c in name):
-        raise ValueError("Укажите имя длиной от 1 до 80 символов.")
-    add(protocol,name,request.get("port"),request.get("devices",1))
 
 def federation_sync(request):
     external_id=str(request.get("external_id", ""))
@@ -1243,100 +938,10 @@ def edit_user(uid,enabled=None,name=None):
             except Exception: raise RuntimeError('Не удалось восстановить службы. Проверьте VPS через SSH.')
             raise
 
-def edit_primary_secret(secret):
-    secret=normalize_proxy_secret(secret)
-    with open(PRIMARY_SECRET,encoding="ascii") as f: old_secret=f.read().strip()
-    if secret==old_secret: return
-    d=load()
-    if any(secret in (mtproto_secrets(u) if u.get("protocol")=="mtproto" else [normalize_proxy_secret(u.get("secret",""))])
-           for u in d["users"] if u.get("protocol","web") in ("web","mtproto")):
-        raise ValueError("Этот секрет уже используется другим подключением.")
-    with open(PROFILES,encoding="utf-8") as f: old_profiles=f.read()
-    with open(MT_ENV,encoding="utf-8") as f: old_env=f.read()
-    profiles=json.loads(old_profiles)
-    candidates=[p for p in profiles.get("profiles",[]) if not str(p.get("name","")).startswith("panel:")]
-    target=next((p for p in candidates if p.get("name")=="default"),None)
-    if target is None:
-        target=next((p for p in candidates if str(p.get("backend",""))=="127.0.0.1:2398"),None)
-    if target is None:
-        raise RuntimeError("Основной профиль WEB Proxy не найден.")
-    target["secret"]=secret
-    new_profiles=json.dumps(profiles,ensure_ascii=True,indent=2)+"\n"
-    if re.search(r"(?m)^MTPROXY_SECRET=.*$",old_env):
-        new_env=re.sub(r"(?m)^MTPROXY_SECRET=.*$","MTPROXY_SECRET="+secret,old_env)
-    else:
-        new_env="MTPROXY_SECRET="+secret+"\n"+old_env
-    check_path=PROFILES+".check"
-    try:
-        atomic_text(check_path,new_profiles,0o400,"tproxy")
-        checked=run("/usr/local/bin/tproxy-server","-config","/etc/tproxy-server/config.json",
-                    "-profiles-file",check_path,"-check")
-        if checked.returncode:
-            raise RuntimeError("Новый секрет отклонён relay: "+(checked.stderr or checked.stdout)[-1200:])
-        os.unlink(check_path)
-        atomic_text(PRIMARY_SECRET,secret+"\n",0o600)
-        atomic_text(PROFILES,new_profiles,0o400,"tproxy")
-        atomic_text(MT_ENV,new_env,0o640,"mtproxy")
-        run("systemctl","restart","mtproxy.service",check=True)
-        run("systemctl","restart","tproxy-server.service",check=True)
-        for service in ("mtproxy.service","tproxy-server.service"):
-            if run("systemctl","is-active","--quiet",service).returncode:
-                raise RuntimeError(service+" не запустилась после смены секрета.")
-    except Exception:
-        try: os.unlink(check_path)
-        except FileNotFoundError: pass
-        atomic_text(PRIMARY_SECRET,old_secret+"\n",0o600)
-        atomic_text(PROFILES,old_profiles,0o400,"tproxy")
-        atomic_text(MT_ENV,old_env,0o640,"mtproxy")
-        run("systemctl","restart","mtproxy.service",check=False)
-        run("systemctl","restart","tproxy-server.service",check=False)
-        raise
-
-def edit_direct_secret(uid,secret):
-    before=load()
-    target=next((u for u in before["users"] if u.get("id")==uid),None)
-    if target is None or target.get("subscription_id") or target.get("protocol","web") not in ("web","mtproto"):
-        raise ValueError("Секрет можно изменить только у отдельного WEB Proxy или MTProto.")
-    secret=normalize_proxy_secret(secret)
-    with open(PRIMARY_SECRET,encoding="ascii") as f: primary=normalize_proxy_secret(f.read())
-    occupied=set()
-    for other in before["users"]:
-        if other.get("id")==uid or other.get("protocol","web") not in ("web","mtproto"): continue
-        occupied.update(mtproto_secrets(other) if other.get("protocol")=="mtproto" else [normalize_proxy_secret(other.get("secret",""))])
-    if secret==primary or secret in occupied:
-        raise ValueError("Этот секрет уже используется другим подключением.")
-    if secret==normalize_proxy_secret(target.get("secret","")): return
-    after=copy.deepcopy(before)
-    edited=next(u for u in after["users"] if u.get("id")==uid)
-    edited["secret"]=secret
-    if edited.get("protocol")=="mtproto":
-        current=mtproto_secrets(edited)
-        current[0]=secret
-        edited["device_secrets"]=current
-        edited["max_devices"]=len(current)
-    collect_traffic(before)
-    save(after)
-    try:
-        apply(after,True)
-    except Exception:
-        save(before)
-        try: apply(before,True)
-        except Exception: raise RuntimeError("Не удалось восстановить службы. Проверьте VPS через SSH.")
-        raise
-
-def set_secret(request):
-    if not isinstance(request,dict): raise ValueError("Некорректный запрос.")
-    uid=str(request.get("id",""))
-    if uid=="primary": edit_primary_secret(request.get("secret",""))
-    elif re.fullmatch(r"[a-f0-9]{16}",uid): edit_direct_secret(uid,request.get("secret",""))
-    else: raise ValueError("Подключение не найдено.")
-    print(json.dumps({"ok":True}))
-
 def init():
     d=load()
-    wpp_awg.upgrade_users(d["users"])
-    # Persist stable normalization when upgrading. Profiles from the withdrawn
-    # shared-interface preview receive independent keys, ports and fingerprints.
+    # Persist stable normalization when upgrading or rolling back from an
+    # experimental build; existing user IDs and secrets remain unchanged.
     save(d)
     for u in d["users"]:
         if u.get("enabled",True): write_unit(u)
@@ -1345,7 +950,6 @@ def init():
     sync_firewall(d)
     run("systemctl","daemon-reload",check=True)
     sync_xray(d)
-    wpp_awg.sync(d["users"])
     collect_traffic(d)
 
 def subscription_command():
@@ -1399,7 +1003,6 @@ if cmd not in ("users","traffic"):
 if cmd=="init": init()
 elif cmd=="subscription": subscription_command()
 elif cmd=="add": add(sys.argv[2]," ".join(sys.argv[3:]))
-elif cmd=="add-json": add_json(json.load(sys.stdin))
 elif cmd=="federation-sync": federation_sync(json.load(sys.stdin))
 elif cmd=="federation-delete": federation_delete(json.load(sys.stdin).get("external_id",""))
 elif cmd=="federation-purge": federation_purge()
@@ -1411,14 +1014,13 @@ elif cmd=="set-user":
 elif cmd=="rename-user":
     edit_user(sys.argv[2],name=sys.argv[3])
     print(json.dumps({'ok':True}))
-elif cmd=="set-secret": set_secret(json.load(sys.stdin))
 elif cmd=="sync": apply(load(),True)
 elif cmd=="firewall": sync_firewall(load())
 elif cmd=="traffic":
     traffic_state=collect_traffic()
     print(json.dumps(traffic_state,ensure_ascii=True))
 elif cmd=="users": print(json.dumps(load(),ensure_ascii=True))
-else: raise SystemExit("usage: init|add|delete|set-user|rename-user|set-secret|sync|firewall|traffic|users")
+else: raise SystemExit("usage: init|add|delete|sync|firewall|traffic|users")
 
 PY
 
@@ -1436,7 +1038,7 @@ Type=oneshot
 RemainAfterExit=true
 ExecStart=/usr/local/sbin/web-proxy-panelctl firewall
 ExecReload=/usr/local/sbin/web-proxy-panelctl firewall
-ExecStop=/bin/sh -c '/usr/sbin/nft delete table inet web_proxy_panel 2>/dev/null || true; /usr/sbin/nft delete table ip web_proxy_awg 2>/dev/null || true'
+ExecStop=-/usr/sbin/nft delete table inet web_proxy_panel
 
 [Install]
 WantedBy=multi-user.target
@@ -1701,7 +1303,6 @@ import wpp_metrics as server_metrics
 import wpp_update as web_updates
 import wpp_nodes as node_api
 import wpp_openflux as openflux
-import wpp_awg as awg
 
 HOST="127.0.0.1"
 PORT=8090
@@ -1719,7 +1320,6 @@ HYSTERIA_PORT=8443
 MANAGER="/usr/local/sbin/web-proxy-panelctl"
 QR="/usr/bin/qrencode"
 LOGO="/opt/tproxy-panel/panel-logo.png"
-FLAGS="/opt/tproxy-panel/flags"
 SITE_INDEX="/srv/tproxy-site/index.html"
 SITE_BACKUP="/var/lib/tproxy-panel/index.html.bak"
 SITE_SOURCE="/var/lib/tproxy-panel/site-source.html"
@@ -1730,7 +1330,6 @@ SITE_JS="/srv/tproxy-site/panel-site.js"
 SITE_JS_BACKUP="/var/lib/tproxy-panel/panel-site.js.bak"
 MAX_HTML_BYTES=1024*1024
 SITE_DRAFT="/var/lib/tproxy-panel/site-draft.html"
-CUSTOM_PRESETS_FILE="/var/lib/tproxy-panel/custom-presets.json"
 API_KEY_FILE="/var/lib/tproxy-panel/api.key"
 NODES_FILE="/var/lib/tproxy-panel/nodes.json"
 LOCATION_FILE="/var/lib/tproxy-panel/location.json"
@@ -1749,10 +1348,10 @@ PRESETS=[
 <body><main class="card"><div class="mark">✦</div><h1><span>Скоро</span> открытие</h1><p>Мы готовим что-то особенное. Оставьте эту страницу открытой — запуск уже близко.</p><section class="timer" aria-label="Обратный отсчёт"><div class="unit"><b class="n" id="d">00</b><i class="l">дней</i></div><div class="unit"><b class="n" id="h">00</b><i class="l">часов</i></div><div class="unit"><b class="n" id="m">00</b><i class="l">минут</i></div><div class="unit"><b class="n" id="s">00</b><i class="l">секунд</i></div></section><div class="note"><span class="dot"></span> Следите за обновлениями</div></main><script>const end=Date.now()+14*864e5;function tick(){let x=Math.max(0,end-Date.now());const v=[Math.floor(x/864e5),Math.floor(x/36e5)%24,Math.floor(x/6e4)%60,Math.floor(x/1e3)%60];['d','h','m','s'].forEach((id,i)=>document.getElementById(id).textContent=String(v[i]).padStart(2,'0'))}tick();setInterval(tick,1000)</script></body></html>'''},
  {"id":"cars","name":"Продажа авто","description":"Тёмная автомобильная витрина с акцентом на заявки.","html":'''<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0b0d14"><title>Автомобили скоро</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;overflow:hidden;font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#f8f9fc;background:#0b0d14}.glow{position:fixed;inset:0;background:radial-gradient(ellipse at 18% 15%,#ef4f5d36,transparent 32%),radial-gradient(ellipse at 82% 84%,#ffbb5a22,transparent 35%)}main{position:relative;min-height:100vh;display:grid;align-content:center;max-width:1100px;margin:auto;padding:36px}.tag{display:inline-flex;width:max-content;padding:8px 12px;border:1px solid #ffffff22;border-radius:99px;background:#ffffff0b;color:#ffb861;font-size:12px;font-weight:800;letter-spacing:.1em;text-transform:uppercase}.hero{display:grid;grid-template-columns:1.1fr .9fr;gap:34px;align-items:center;margin-top:22px}.kicker{color:#ffb861;font-weight:700;letter-spacing:.08em;text-transform:uppercase}h1{margin:12px 0 16px;font-size:clamp(44px,8vw,86px);line-height:.95;letter-spacing:-.07em}p{margin:0;max-width:560px;color:#afb6c8;font-size:18px;line-height:1.7}.car{min-height:285px;display:grid;place-items:center;border:1px solid #ffffff14;border-radius:30px;background:linear-gradient(145deg,#1c2132,#10131d);box-shadow:0 26px 70px #0007;font-size:clamp(130px,22vw,230px);transform:rotate(-4deg)}.action{display:inline-block;margin-top:30px;padding:15px 21px;border-radius:14px;background:#f4f6ff;color:#121621;text-decoration:none;font-weight:800;box-shadow:0 12px 28px #0005}.foot{margin-top:42px;padding-top:20px;border-top:1px solid #ffffff14;color:#71798e;font-size:13px}@media(max-width:700px){main{padding:24px}.hero{grid-template-columns:1fr}.car{min-height:190px;order:-1}p{font-size:16px}}</style></head><body><div class="glow"></div><main><span class="tag">Новая коллекция</span><section class="hero"><div><div class="kicker">Премиальный выбор</div><h1>Авто,<br>которые<br>ждут вас.</h1><p>Готовим каталог автомобилей с прозрачной историей, честными ценами и персональным подбором.</p><a class="action" href="mailto:info@example.com">Получить уведомление →</a></div><div class="car" aria-label="Автомобиль">🏎️</div></section><div class="foot">СКОРО ОТКРЫТИЕ · ПОДБОР · ПРОВЕРКА · ДОСТАВКА</div></main></body></html>'''},
- {"id":"cats-repair","name":"Технические работы","description":"Дружелюбная страница обслуживания с анимацией, прогрессом и интерактивной кнопкой.","html":'''<!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#1a1a2e"><title>Технические работы</title><style>
+ {"id":"cats-repair","name":"КОТИКИ ЧИНЯТ САЙТ","description":"Весёлая автономная заглушка с анимированными котиками, прогрессом и интерактивной кнопкой.","html":'''<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#1a1a2e"><title>Котики чинят сайт</title><style>
 *{box-sizing:border-box}html,body{margin:0;min-height:100%}body{min-height:100vh;display:flex;align-items:center;justify-content:center;overflow:hidden;padding:24px;color:#f0ece6;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:radial-gradient(ellipse at 20% 50%,#ffc86414,transparent 60%),radial-gradient(ellipse at 80% 50%,#ff649614,transparent 60%),#1a1a2e}.stars{position:fixed;inset:0;pointer-events:none;overflow:hidden}.star{position:absolute;opacity:.3;font-size:1.5rem;animation:floatStar 8s ease-in-out infinite}.star:nth-child(1){top:10%;left:5%}.star:nth-child(2){top:20%;right:8%;animation-delay:1.5s}.star:nth-child(3){bottom:25%;left:10%;animation-delay:3s;font-size:2rem}.star:nth-child(4){right:5%;bottom:15%;animation-delay:4.5s}.star:nth-child(5){top:50%;left:2%;animation-delay:2s}.star:nth-child(6){top:40%;right:3%;animation-delay:3.5s}.box{position:relative;z-index:1;width:min(700px,100%);padding:48px 40px;text-align:center;border:1px solid #ffffff10;border-radius:48px;background:#ffffff0a;box-shadow:0 40px 80px #0006;backdrop-filter:blur(12px)}.cats{display:flex;justify-content:center;gap:24px;margin-bottom:28px;flex-wrap:wrap}.cat{display:inline-block;font-size:4.5rem;filter:drop-shadow(0 8px 24px #ffc86426);cursor:pointer;user-select:none;animation:catDance 1.8s ease-in-out infinite}.cat:nth-child(2){font-size:5rem;animation-delay:.3s}.cat:nth-child(3){animation-delay:.6s}.cat:nth-child(4){font-size:4.8rem;animation-delay:.9s}.cat:hover{animation-play-state:paused}.title{margin:0 0 8px;font-size:clamp(32px,7vw,44px);font-weight:900;letter-spacing:-.04em}.title span{color:#fbbf24}.subtitle{margin:0 0 28px;color:#a09088;font-size:17px;line-height:1.6}.track{height:8px;overflow:hidden;border-radius:8px;background:#ffffff0f}.bar{width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,#fbbf24,#f59e0b,#fbbf24);transition:width .08s linear}.progress-text{display:flex;justify-content:space-between;margin-top:10px;color:#756861;font-size:13px}.paws{color:#fbbf24;letter-spacing:2px}.status{min-height:72px;margin:24px 0 28px;padding:18px;display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;border:1px solid #ffffff0a;border-radius:20px;background:#ffffff08}.status-emoji{font-size:2rem;animation:pop 1s ease-in-out infinite}.message{font-size:17px}.message span{color:#fbbf24}.fun{display:inline-flex;align-items:center;justify-content:center;gap:10px;padding:15px 38px;border:0;border-radius:60px;color:#1a1a2e;background:linear-gradient(135deg,#fbbf24,#f59e0b);box-shadow:0 8px 24px #fbbf2433;font:700 17px inherit;cursor:pointer;transition:transform .2s,box-shadow .2s}.fun:hover{transform:scale(1.04);box-shadow:0 12px 32px #fbbf244d}.counter{margin-top:22px;color:#756861;font-size:14px}.counter b{color:#fbbf24;font-size:18px}@keyframes floatStar{50%{transform:translateY(-30px) rotate(180deg);opacity:.8}}@keyframes catDance{0%,100%{transform:rotate(-8deg)}25%{transform:rotate(8deg) translateY(-8px)}50%{transform:rotate(-5deg)}75%{transform:rotate(10deg) translateY(-5px)}}@keyframes pop{50%{transform:scale(1.2)}}@media(max-width:600px){.box{padding:32px 24px;border-radius:32px}.cats{gap:12px}.cat,.cat:nth-child(2),.cat:nth-child(4){font-size:3.2rem}.subtitle{font-size:15px}.message{font-size:14px}.fun{width:100%;padding:14px}.stars{display:none}}@media(max-width:400px){.cat,.cat:nth-child(2),.cat:nth-child(4){font-size:2.6rem}.box{padding:28px 16px}.status{padding:14px}}
-</style></head><body><div class="stars"><span class="star">✨</span><span class="star">⭐</span><span class="star">🌟</span><span class="star">✨</span><span class="star">⭐</span><span class="star">🌟</span></div><main class="box"><div class="cats"><span class="cat">🐱</span><span class="cat">😺</span><span class="cat">😸</span><span class="cat">🐈</span></div><h1 class="title"><span>Сайт</span> на обслуживании</h1><p class="subtitle">🐾 Мяу-инженеры уже в пути! Подождите немного… 🐾</p><section><div class="track"><div class="bar" id="progressBar"></div></div><div class="progress-text"><span class="paws">🐾🐾🐾</span><span id="progressPercent">0%</span><span class="paws">🐾🐾🐾</span></div></section><div class="status"><span class="status-emoji" id="statusEmoji">🔧</span><span class="message" id="statusMessage"><span>Котики</span> настраивают сервер…</span></div><button class="fun" id="funButton">🐾 Погладить котика 🐾</button><div class="counter">Котиков погладили: <b id="clickCount">0</b> раз</div></main><script>
+</style></head><body><div class="stars"><span class="star">✨</span><span class="star">⭐</span><span class="star">🌟</span><span class="star">✨</span><span class="star">⭐</span><span class="star">🌟</span></div><main class="box"><div class="cats"><span class="cat">🐱</span><span class="cat">😺</span><span class="cat">😸</span><span class="cat">🐈</span></div><h1 class="title"><span>Котики</span> чинят сайт</h1><p class="subtitle">🐾 Мяу-инженеры уже в пути! Подождите немного… 🐾</p><section><div class="track"><div class="bar" id="progressBar"></div></div><div class="progress-text"><span class="paws">🐾🐾🐾</span><span id="progressPercent">0%</span><span class="paws">🐾🐾🐾</span></div></section><div class="status"><span class="status-emoji" id="statusEmoji">🔧</span><span class="message" id="statusMessage"><span>Котики</span> настраивают сервер…</span></div><button class="fun" id="funButton">🐾 Погладить котика 🐾</button><div class="counter">Котиков погладили: <b id="clickCount">0</b> раз</div></main><script>
 (function(){const statuses=[['🔧','<span>Котики</span> настраивают сервер…'],['🐱','Один котик <span>залип</span> в клавиатуре…'],['💻','<span>Кот-программист</span> пишет мяу-код…'],['☕','Котики <span>пьют</span> кофе…'],['🐾','Котики <span>топчут</span> сервер лапками…'],['😹','Котики <span>смеются</span> над багами…'],['🍕','Котики <span>едят</span> пиццу…'],['✨','Котики <span>колдуют</span> над сайтом…'],['🛠️','<span>Главный кот</span> чинит провода…']];const emoji=document.getElementById('statusEmoji'),message=document.getElementById('statusMessage'),bar=document.getElementById('progressBar'),percent=document.getElementById('progressPercent'),button=document.getElementById('funButton'),countNode=document.getElementById('clickCount');let statusIndex=0,progress=0,count=0;function changeStatus(){const item=statuses[statusIndex++%statuses.length];emoji.textContent=item[0];message.innerHTML=item[1]}function pet(){countNode.textContent=++count;emoji.textContent='🐱';message.innerHTML='<span>Котик</span> мурлычет от счастья!';const old=button.textContent;button.textContent='😻 Котик доволен!';setTimeout(function(){button.textContent=old;changeStatus()},900)}button.addEventListener('click',pet);document.querySelectorAll('.cat').forEach(function(cat){cat.addEventListener('click',pet)});changeStatus();setInterval(changeStatus,2500);setInterval(function(){progress=(progress+.8)%100;bar.style.width=progress+'%';percent.textContent=Math.round(progress)+'%'},80)})();
 </script></body></html>'''},
  {"id":"loading","name":"Загрузка","description":"Минималистичный экран статуса для технического запуска.","html":'''<!doctype html>
@@ -1893,46 +1492,20 @@ def restart_public_site():
     r=subprocess.run(["systemctl","restart","tproxy-server.service"],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=30)
     if r.returncode or subprocess.run(["systemctl","is-active","--quiet","tproxy-server.service"],timeout=10).returncode:
         raise RuntimeError((r.stderr or r.stdout or "tproxy-server failed to restart").strip())
-    # systemd considers the process active before both HTTP listeners have
-    # completed their startup. Wait for the local health endpoint instead of
-    # racing the first landing-page request.
-    for _ in range(30):
-        health=subprocess.run(["curl","-fsS","--noproxy","*","--max-time","2",
-                               "http://127.0.0.1:8081/healthz"],
-                              stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=4)
-        if health.returncode==0: break
-        time.sleep(0.5)
-    else:
-        raise RuntimeError("Relay health endpoint did not become ready after restart")
-def fetch_published(path):
-    # Resolve the real HTTPS hostname to loopback. This validates Caddy and the
-    # relay without depending on public DNS, IPv6 routing or hairpin NAT.
-    commands=(
-        ["curl","-kfsS","--noproxy","*","--resolve",DOMAIN+":443:127.0.0.1",
-         "--connect-timeout","2","--max-time","5","https://"+DOMAIN+path],
-        ["curl","-fsS","--noproxy","*","-H","Host: "+DOMAIN,
-         "--connect-timeout","2","--max-time","5","http://127.0.0.1:8080"+path],
-    )
-    last=""
-    for attempt in range(12):
-        for command in commands:
-            result=subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=8)
-            if result.returncode==0: return result.stdout
-            last=(result.stderr or result.stdout or "relay request failed").strip()
-        time.sleep(min(0.5+attempt*0.15,1.5))
-    raise RuntimeError("Relay did not publish the landing page after restart: "+last[-300:])
 def verify_public_asset(path, marker):
-    body=fetch_published(path)
-    if marker not in body:
+    r=subprocess.run(["curl","-kfsS","--max-time","12","https://"+DOMAIN+path],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=15)
+    if r.returncode or marker not in r.stdout:
         raise RuntimeError("Relay did not publish "+path+" after restart")
 def verify_public_page(css_name,js_name):
     # A query forces the relay's no-store path, avoiding a false success from
     # the five-minute public index cache while a new design is being published.
     stamp=hashlib.sha256(((css_name or "")+(js_name or "")).encode()).hexdigest()[:12]
-    body=fetch_published("/?wpp-site-check="+stamp)
-    if css_name and ('/'+css_name) not in body:
+    r=subprocess.run(["curl","-kfsS","--max-time","12","https://"+DOMAIN+"/?wpp-site-check="+stamp],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=15)
+    if r.returncode:
+        raise RuntimeError("Relay did not publish the landing page after restart")
+    if css_name and ('/'+css_name) not in r.stdout:
         raise RuntimeError("Published landing page does not reference its stylesheet")
-    if js_name and ('/'+js_name) not in body:
+    if js_name and ('/'+js_name) not in r.stdout:
         raise RuntimeError("Published landing page does not reference its script")
 def insert_into_head(document,tag):
     """Insert an asset without placing anything before <!doctype html>."""
@@ -2090,22 +1663,8 @@ def write_site_html(source):
                     restart_public_site()
                 except Exception: pass
             raise
-def custom_presets():
-    try:
-        with open(CUSTOM_PRESETS_FILE,encoding="utf-8") as stream: value=json.load(stream)
-        if not isinstance(value,list): return []
-        return [item for item in value if isinstance(item,dict) and
-                isinstance(item.get("id"),str) and item["id"].startswith("custom-") and
-                isinstance(item.get("name"),str) and isinstance(item.get("description"),str) and
-                isinstance(item.get("html"),str)]
-    except (OSError,ValueError,TypeError,json.JSONDecodeError):
-        return []
-def save_custom_presets(items):
-    install_private_file(CUSTOM_PRESETS_FILE,json.dumps(items,ensure_ascii=False,indent=2).encode("utf-8"))
-def all_presets():
-    return PRESETS+custom_presets()
 def get_preset(preset_id):
-    for preset in all_presets():
+    for preset in PRESETS:
         if preset.get("id")==preset_id: return preset
     raise ValueError("Пресет не найден")
 
@@ -2133,11 +1692,7 @@ def ctl_subscription(request):
 def ctl_manager_json(command,request):
     r=subprocess.run([MANAGER,command],input=json.dumps(request),stdout=subprocess.PIPE,
                      stderr=subprocess.PIPE,text=True,timeout=180)
-    if r.returncode:
-        message=r.stderr.strip() or "manager failed"
-        marker="ValueError: "
-        if marker in message: raise ValueError(message.rsplit(marker,1)[-1].strip())
-        raise RuntimeError(message)
+    if r.returncode: raise RuntimeError(r.stderr.strip() or "manager failed")
     value=json.loads(r.stdout)
     if not isinstance(value,dict): raise RuntimeError("manager returned invalid JSON")
     return value
@@ -2181,7 +1736,7 @@ def xray_path():
 def proxy_link(protocol,secret,port=443,name="Proxy",username=""):
     if protocol=="mtproto": return mtproto_link(secret,port)
     if protocol=="web": return web_link(secret)
-    protocol_label={"vless":"VLESS","hysteria":"Hysteria2","awg20":"AWG 2.0","awg31":"AWG 3.1"}.get(protocol,protocol)
+    protocol_label={"vless":"VLESS","hysteria":"Hysteria2"}.get(protocol,protocol)
     if not (name.startswith("🌐") or (name and 0x1F1E6 <= ord(name[0]) <= 0x1F1FF)):
         name=node_api.location_prefix(node_api.load_location(LOCATION_FILE))+" · "+protocol_label
     label=quote(name or "Proxy",safe="")
@@ -2191,10 +1746,6 @@ def proxy_link(protocol,secret,port=443,name="Proxy",username=""):
     if protocol=="hysteria":
         query=urlencode({"sni":DOMAIN,"alpn":"h3"})
         return "hysteria2://"+quote(secret,safe="-")+"@"+DOMAIN+":"+str(HYSTERIA_PORT)+"/?"+query+"#"+label
-    if protocol in awg.PROTOCOLS:
-        user=next((u for u in users() if u.get("protocol")==protocol and secrets.compare_digest(str(u.get("secret","")),str(secret))),None)
-        if user is None: raise RuntimeError("Профиль AWG не найден")
-        return awg.client_config(user,DOMAIN,name)
     raise RuntimeError("Неизвестный протокол")
 def qr_png_bytes(link):
     return subprocess.run([QR,"-o","-","-t","PNG","-s","6","-m","2",link],
@@ -2228,8 +1779,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200); self.send_header("Content-Type","image/png"); self.send_header("Cache-Control","no-store"); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
     def send_logo(self,b):
         self.send_response(200); self.send_header("Content-Type","image/png"); self.send_header("Cache-Control","public, max-age=86400"); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
-    def send_svg(self,b):
-        self.send_response(200); self.send_header("Content-Type","image/svg+xml"); self.send_header("Cache-Control","public, max-age=604800, immutable"); self.send_header("Content-Length",str(len(b))); self.send_header("X-Content-Type-Options","nosniff"); self.end_headers(); self.wfile.write(b)
     def redirect(self,p):
         self.send_response(303); self.send_header("Location",PANEL_PATH+p if p.startswith("/") else p); self.end_headers()
     def form(self,max_bytes=MAX_HTML_BYTES*3+8192):
@@ -2277,8 +1826,8 @@ class Handler(BaseHTTPRequestHandler):
             if not self.api_auth(): return
             if path==node_api.API_PREFIX+"/status":
                 loc=node_api.load_location(LOCATION_FILE)
-                self.send_json({"ok":True,"api_version":1,"version":"2.4.0","domain":DOMAIN,
-                    "location":loc,"capabilities":["vless","hysteria","awg20","awg31","federation"]}); return
+                self.send_json({"ok":True,"api_version":1,"version":"2.3.6","domain":DOMAIN,
+                    "location":loc,"capabilities":["vless","hysteria","federation"]}); return
             if path==node_api.API_PREFIX+"/profiles":
                 result=[]
                 for user in users():
@@ -2306,18 +1855,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_logo(logo)
             except OSError:
                 self.send_html("Logo not found",404)
-            return
-
-        flag_match=re.fullmatch(re.escape(PANEL_PATH)+r"/__flag/([a-z]{2})\.svg",path)
-        if flag_match:
-            flag_path=os.path.join(FLAGS,flag_match.group(1)+".svg")
-            if not os.path.isfile(flag_path): flag_path=os.path.join(FLAGS,"un.svg")
-            try:
-                with open(flag_path,"rb") as stream: flag_data=stream.read(131073)
-                if len(flag_data)>131072: raise OSError("flag is too large")
-                self.send_svg(flag_data)
-            except OSError:
-                self.send_html("Flag not found",404)
             return
 
         if path==PANEL_PATH+"/login":
@@ -2374,36 +1911,19 @@ class Handler(BaseHTTPRequestHandler):
             query=parse_qs(urlparse(self.path).query)
             q=query.get("secret",[""])[0]; protocol=query.get("protocol",["web"])[0]
             port=query.get("port",["443"])[0]
-            uid=query.get("id",[""])[0]
             current_users=users()
-            matching=(next((x for x in current_users if x.get("id")==uid and x.get("protocol") in awg.PROTOCOLS),None)
-                      if uid else next((x for x in current_users if x.get("secret")==q or
-                          (x.get("protocol")=="mtproto" and q in x.get("device_secrets",[]))),None))
-            if uid and matching:
-                q=matching.get("secret",""); protocol=matching.get("protocol",""); port=str(matching.get("backend_port",0))
+            matching=next((x for x in current_users if x.get("secret")==q),None)
             if q==primary(): matching={"protocol":"web","backend_port":443,"name":"Основной WEB Proxy"}
             if not matching or protocol!=matching.get("protocol","web"):
                 self.send_html("Not found",404); return
             try:
                 expected=str(int(matching.get("backend_port",443)))
-                if protocol in ("mtproto","hysteria","awg20","awg31") and port!=expected:
+                if protocol in ("mtproto","hysteria") and port!=expected:
                     self.send_html("Not found",404); return
                 if protocol in ("web","vless") and port!="443":
                     self.send_html("Not found",404); return
                 self.send_png(qr_png_bytes(proxy_link(protocol,q,expected,matching.get("name","Proxy"),matching.get("username",""))))
             except Exception:self.send_json({'message':'Не удалось сформировать QR. Проверьте qrencode на сервере.'},503)
-            return
-
-        if path==PANEL_PATH+"/awg-config":
-            uid=parse_qs(urlparse(self.path).query).get("id",[""])[0]
-            user=next((u for u in users() if u.get("id")==uid and u.get("protocol") in awg.PROTOCOLS),None)
-            if user is None: self.send_html("Not found",404); return
-            try:
-                config=awg.client_config(user,DOMAIN,user.get("name","AWG"))
-                self.send_data(config,mime="text/plain; charset=utf-8",
-                    headers={"Content-Disposition":"attachment; filename=\"wpp-%s.conf\""%uid})
-            except Exception:
-                self.send_html("Не удалось сформировать конфигурацию AWG.",503)
             return
 
 
@@ -2415,8 +1935,10 @@ class Handler(BaseHTTPRequestHandler):
                     with open(SITE_DRAFT,encoding="utf-8") as f: site_html=f.read()
                 else: site_html=read_site_html()
             except Exception: site_html="<!-- Не удалось прочитать исходник -->"
-            editor=editor_ui(site_html,PANEL_PATH,self.csrf(),all_presets(),has_draft)
+            editor=editor_ui(site_html,PANEL_PATH,self.csrf(),PRESETS,has_draft)
+            flux=openflux_ui(openflux.state(),PANEL_PATH,self.csrf())
             body=f'''<div class="page-head"><div><span class="eyebrow">WPP / STUDIO</span><h1>Настройки</h1><p>Оформление сайта и доступ к панели</p></div></div>
+{flux}
 {editor}
 <div class=card><h2>Пароль администратора</h2><form method=post action="{PANEL_PATH}/password"><input type=hidden name=csrf value="{token}"><label for="adminNewPassword">Новый пароль</label><input id="adminNewPassword" type=password name=a minlength=3 required autocomplete=new-password><div class="actions" style="margin-top:16px"><button class="btn primary">Сохранить пароль</button><small>Минимум 3 символа · смена пароля завершит все сессии панели</small></div></form></div>'''
             self.send_html(layout("Настройки",body,"settings")); return
@@ -2444,11 +1966,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"ok":True,"deleted":int(result.get("deleted",0))}); return
                 if path==node_api.API_PREFIX+"/profiles/create":
                     protocol=str(request.get("protocol","")); name=str(request.get("name","")).strip()
-                    if protocol not in ("web","mtproto","vless","hysteria","awg20","awg31") or not name or len(name)>80:
+                    if protocol not in ("web","mtproto","vless","hysteria") or not name or len(name)>80:
                         self.send_json({"ok":False,"message":"Invalid profile"},400); return
-                    user=(ctl_manager_json("add-json",{"protocol":protocol,"name":name,
-                        "port":request.get("port"),"devices":request.get("devices",1)})
-                        if protocol=="mtproto" else ctl("add",protocol,name))
+                    user=ctl("add",protocol,name)
                     self.send_json({"ok":True,"profile":{"id":user["id"],"name":user["name"],"protocol":protocol,
                         "link":proxy_link(protocol,user["secret"],user.get("backend_port",443),name,user.get("username",""))}},201); return
                 if path==node_api.API_PREFIX+"/profiles/delete":
@@ -2553,14 +2073,8 @@ class Handler(BaseHTTPRequestHandler):
                                          "protocols":[p for p in ("vless","hysteria") if form.get(p)=="1"]})
                 if not result.get("ok"):
                     self.send_html(esc(result.get("message","Ошибка создания подписки")),int(result.get("status",400))); return
-            elif kind in ("web","mtproto","vless","hysteria","awg20","awg31"):
-                try:
-                    if kind=="mtproto":
-                        ctl_manager_json("add-json",{"protocol":kind,"name":name,
-                            "port":form.get("mtproto_port",""),"devices":form.get("mtproto_devices","1")})
-                    else: ctl("add",kind,name)
-                except ValueError as exc:
-                    self.send_html(esc(str(exc)),400); return
+            elif kind in ("web","mtproto","vless","hysteria"):
+                try: ctl("add",kind,name)
                 except Exception as exc:
                     print("create connection failed:",type(exc).__name__,file=sys.stderr,flush=True)
                     self.send_html("Не удалось создать подключение. Проверьте службы через SSH и повторите попытку.",503); return
@@ -2599,16 +2113,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if path==PANEL_PATH+"/client-action":
             uid=form.get('id',''); kind=form.get('kind',''); operation=form.get('operation','')
-            if uid!='primary' and not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',uid):
-                self.send_json({'message':'Подключение не найдено.'},400); return
-            if uid=='primary' and operation!='secret':
-                self.send_json({'message':'У основного подключения можно изменить только секрет.'},400); return
+            if uid=='primary' or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',uid):
+                self.send_json({'message':'Основное подключение нельзя изменить.'},400); return
             if operation=='state' and form.get('enabled') not in ('0','1'):
                 self.send_json({'message':'Некорректное состояние доступа.'},400); return
-            if kind not in ('subscription','direct') or operation not in ('state','rename','secret'):
+            if kind not in ('subscription','direct') or operation not in ('state','rename'):
                 self.send_json({'message':'Недопустимая операция.'},400); return
-            if operation=='secret' and (kind!='direct' or not re.fullmatch(r'(?:dd)?[0-9A-Fa-f]{32}',form.get('secret','').strip())):
-                self.send_json({'message':'Секрет должен содержать 32 символа 0–9, a–f; префикс dd допускается.'},400); return
             if operation=='rename' and (not form.get('name','').strip() or len(form['name'].strip())>80 or any(ord(c)<32 for c in form['name'])):
                 self.send_json({'message':'Имя должно содержать от 1 до 80 символов без управляющих знаков.'},400); return
             try:
@@ -2624,8 +2134,7 @@ class Handler(BaseHTTPRequestHandler):
                         purge_remote_profiles(previous)
                 else:
                     if operation=='state': ctl('set-user',uid,form['enabled'])
-                    elif operation=='rename': ctl('rename-user',uid,form.get('name',''))
-                    else: ctl_manager_json('set-secret',{'id':uid,'secret':form.get('secret','')})
+                    else: ctl('rename-user',uid,form.get('name',''))
                 self.send_json({'ok':True})
             except Exception:
                 self.send_json({'message':'Изменение не применено. Проверьте службы через SSH и обновите список.'},503)
@@ -2646,36 +2155,6 @@ class Handler(BaseHTTPRequestHandler):
                     purge_remote_profiles(previous,request.get("device_id"))
                 self.redirect("/users")
             else: self.send_html(esc(result.get("message","Ошибка подписки")),int(result.get("status",400)))
-            return
-
-        if path==PANEL_PATH+"/custom-preset":
-            try:
-                operation=form.get("operation","")
-                items=custom_presets()
-                if operation=="create":
-                    name=form.get("name","").strip()
-                    description=form.get("description","").strip() or "Пользовательская заглушка"
-                    if not 1<=len(name)<=80: raise ValueError("Название должно содержать от 1 до 80 символов.")
-                    if len(description)>180: raise ValueError("Описание не должно превышать 180 символов.")
-                    if len(items)>=20: raise ValueError("Можно сохранить не более 20 своих заглушек.")
-                    source=validate_html(form.get("html",""))
-                    items.append({"id":"custom-"+secrets.token_hex(8),"name":name,
-                                  "description":description,"html":source,"custom":True})
-                    save_custom_presets(items)
-                elif operation=="delete":
-                    preset_id=form.get("preset","")
-                    if not preset_id.startswith("custom-"): raise ValueError("Встроенный пресет удалить нельзя.")
-                    retained=[item for item in items if item.get("id")!=preset_id]
-                    if len(retained)==len(items): raise ValueError("Заглушка не найдена.")
-                    save_custom_presets(retained)
-                else:
-                    raise ValueError("Неизвестная операция.")
-                self.redirect("/settings")
-            except ValueError as exc:
-                self.send_html("Ошибка сохранения заглушки: "+esc(exc),400)
-            except OSError as exc:
-                print("custom preset failed:",type(exc).__name__,file=sys.stderr,flush=True)
-                self.send_html("Не удалось сохранить заглушку на сервере.",503)
             return
 
         if path in (PANEL_PATH+"/preview-html",PANEL_PATH+"/save-draft",PANEL_PATH+"/draft-preset",PANEL_PATH+"/discard-draft"):
@@ -2701,7 +2180,7 @@ class Handler(BaseHTTPRequestHandler):
             protocol=form.get("protocol","web").strip().lower()
             if not name or len(name)>80:
                 self.send_html("Имя пользователя обязательно.",400); return
-            if protocol not in ("web","mtproto","vless","hysteria","awg20","awg31"):
+            if protocol not in ("web","mtproto","vless","hysteria"):
                 self.send_html("Неизвестный протокол подключения.",400); return
             try:
                 result=ctl("add",protocol,name)
@@ -2849,7 +2328,7 @@ PY
 fi
 
 python3 -m py_compile "$APP_FILE"
-python3 -m py_compile "$APP_DIR/wpp_subscriptions.py" "$APP_DIR/wpp_panel_extras.py" "$APP_DIR/wpp_ui.py" "$APP_DIR/wpp_metrics.py" "$APP_DIR/wpp_update.py" "$APP_DIR/wpp_nodes.py" "$APP_DIR/wpp_openflux.py" "$APP_DIR/wpp_awg.py"
+python3 -m py_compile "$APP_DIR/wpp_subscriptions.py" "$APP_DIR/wpp_panel_extras.py" "$APP_DIR/wpp_ui.py" "$APP_DIR/wpp_metrics.py" "$APP_DIR/wpp_update.py" "$APP_DIR/wpp_nodes.py" "$APP_DIR/wpp_openflux.py"
 
 
 # ---- Finish installation: service, Caddy route, permissions, start ----
@@ -2889,7 +2368,7 @@ fi
 echo "[4/6] Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=WEB PANEL PROXY V 2.4.0
+Description=WEB PANEL PROXY V 2.3.6
 After=network-online.target caddy.service tproxy-server.service mtproxy.service web-proxy-panel-firewall.service
 Wants=network-online.target
 Requires=web-proxy-panel-firewall.service
@@ -2978,7 +2457,7 @@ unlock_changes(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 show_info(){
     local d p version
-    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.4.0')"
+    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.3.6')"
     echo
     echo "============================================================"
     echo "                 WEB PANEL PROXY"
@@ -3427,9 +2906,9 @@ fi
 echo
 echo "============================================================"
 if [[ "$UPDATING" == "1" ]]; then
-echo "          WEB PANEL PROXY V 2.4.0 UPDATED"
+echo "          WEB PANEL PROXY V 2.3.6 UPDATED"
 else
-echo "         WEB PANEL PROXY V 2.4.0 IS READY"
+echo "         WEB PANEL PROXY V 2.3.6 IS READY"
 fi
 echo "============================================================"
 echo

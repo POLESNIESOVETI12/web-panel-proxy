@@ -18,26 +18,6 @@ CONNECTION_TOKEN_PREFIX = 'wppnode1_'
 MAX_NODES = 16
 MAX_RESPONSE = 1024 * 1024
 
-COUNTRY_NAMES = {
-    'FI': 'Финляндия', 'DE': 'Германия', 'NL': 'Нидерланды', 'FR': 'Франция',
-    'GB': 'Великобритания', 'US': 'США', 'CA': 'Канада', 'SE': 'Швеция',
-    'NO': 'Норвегия', 'DK': 'Дания', 'PL': 'Польша', 'CZ': 'Чехия',
-    'AT': 'Австрия', 'CH': 'Швейцария', 'ES': 'Испания', 'IT': 'Италия',
-    'RO': 'Румыния', 'BG': 'Болгария', 'TR': 'Турция', 'KZ': 'Казахстан',
-    'RU': 'Россия', 'UA': 'Украина', 'JP': 'Япония', 'SG': 'Сингапур',
-    'HK': 'Гонконг', 'AE': 'ОАЭ', 'LT': 'Литва', 'LV': 'Латвия',
-    'EE': 'Эстония', 'IS': 'Исландия', 'IE': 'Ирландия', 'BE': 'Бельгия',
-}
-
-CITY_NAMES = {
-    'Helsinki': 'Хельсинки', 'Frankfurt am Main': 'Франкфурт',
-    'Frankfurt': 'Франкфурт', 'Amsterdam': 'Амстердам', 'Stockholm': 'Стокгольм',
-    'Warsaw': 'Варшава', 'Paris': 'Париж', 'London': 'Лондон',
-    'Vienna': 'Вена', 'Prague': 'Прага', 'Bucharest': 'Бухарест',
-    'Tallinn': 'Таллин', 'Riga': 'Рига', 'Vilnius': 'Вильнюс',
-    'New York': 'Нью-Йорк', 'Los Angeles': 'Лос-Анджелес',
-}
-
 
 class NodeError(ValueError):
     pass
@@ -163,30 +143,6 @@ def save_location(path, value):
     value = location(value)
     atomic_json(path, value)
     return value
-
-
-def detect_location(current=None, timeout=8):
-    """Resolve the VPS public IP location, retaining current data on any failure."""
-    fallback = location(current or {})
-    request = urllib.request.Request(
-        'https://ipapi.co/json/',
-        headers={'Accept': 'application/json', 'User-Agent': 'WEB-PANEL-PROXY/2.4'},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = response.read(65537)
-        if len(payload) > 65536:
-            return fallback
-        data = json.loads(payload.decode('utf-8'))
-        code = str(data.get('country_code') or data.get('country') or '').upper()
-        city = clean_text(data.get('city'), 'Город')
-        if not re.fullmatch(r'[A-Z]{2}', code):
-            return fallback
-        country = COUNTRY_NAMES.get(code) or clean_text(data.get('country_name'), 'Страна')
-        return location({'country_code': code, 'country_name': country,
-                         'name': CITY_NAMES.get(city, city)})
-    except (OSError, ValueError, TypeError, json.JSONDecodeError, urllib.error.URLError):
-        return fallback
 
 
 def load_nodes(path):
