@@ -1,65 +1,303 @@
-<p align="center">
-  <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
-</p>
+#!/usr/bin/env bash
+# WEB PANEL PROXY V 2.4.0 complete removal utility.
+set -Eeuo pipefail
 
-<h1 align="center">WEB PANEL PROXY 2.4.0</h1>
+[[ ${EUID:-1} -eq 0 ]] || { echo "Run this script as root." >&2; exit 1; }
+command -v flock >/dev/null 2>&1 || { echo "flock is required (package: util-linux)." >&2; exit 1; }
+exec 9>/run/lock/web-panel-proxy.lock
+flock -n 9 || { echo "Another WEB PANEL PROXY install, update or removal is already running." >&2; exit 1; }
 
-<p align="center">WEB Proxy, MTProto, VLESS XHTTP, Hysteria2, AWG 2.0 / 3.1, OpenFlux и удобная панель управления для собственного VPS</p>
+echo "WEB PANEL PROXY V 2.4.0 — complete removal"
+echo "Removing all WEB PANEL PROXY V 2.4.0 components..."
 
-## Быстрый старт
+DOMAIN="$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' /etc/systemd/system/caddy.service.d/tproxy.conf 2>/dev/null | head -n1 || true)"
+CADDY_MARKER="$(cat /etc/web-proxy-panel/caddy-owned 2>/dev/null || true)"
+CADDY_OWNED=0
+CADDY_SHARED=0
+XRAY_USER_OWNED=0
+XRAY_GROUP_OWNED=0
+HYSTERIA_UFW_OWNED=0
+HYSTERIA_UFW_PORTS=""
+MTPROTO_UFW_PORTS=""
+AWG_UFW_PORTS=""
+AWG_UFW_ROUTES=""
+AWG_OWNED=0
+MIERU_UFW_OWNED=0
+MIERU_PACKAGE_OWNED=0
+NAIVE_CADDY_OWNED=0
+[[ "$CADDY_MARKER" == "WEB_PANEL_PROXY_V2_CADDY_OWNER" ]] && CADDY_OWNED=1
+[[ "$CADDY_MARKER" == "WEB_PANEL_PROXY_V2_CADDY_SHARED" ]] && CADDY_SHARED=1
+[[ -e /etc/web-proxy-panel/xray-user-owned ]] && XRAY_USER_OWNED=1
+[[ -e /etc/web-proxy-panel/xray-group-owned ]] && XRAY_GROUP_OWNED=1
+[[ -e /etc/web-proxy-panel/mieru-ufw-owned ]] && MIERU_UFW_OWNED=1
+[[ -e /etc/web-proxy-panel/mita-package-owned ]] && MIERU_PACKAGE_OWNED=1
+[[ -e /etc/web-proxy-panel/naive-caddy-owned ]] && NAIVE_CADDY_OWNED=1
+[[ -e /etc/web-proxy-panel/awg-owned ]] && AWG_OWNED=1
+if [[ -e /etc/web-proxy-panel/hysteria-ufw-owned ]]; then
+  HYSTERIA_UFW_OWNED=1
+  HYSTERIA_UFW_PORTS="$(grep -Eo '[0-9]{1,5}' /etc/web-proxy-panel/hysteria-ufw-owned 2>/dev/null | sort -nu | tr '\n' ' ' || true)"
+  [[ -n "$HYSTERIA_UFW_PORTS" ]] || HYSTERIA_UFW_PORTS="8443"
+fi
+if [[ -e /etc/web-proxy-panel/mtproto-ufw-owned ]]; then
+  MTPROTO_UFW_PORTS="$(grep -Eo '[0-9]{1,5}' /etc/web-proxy-panel/mtproto-ufw-owned 2>/dev/null | sort -nu | tr '\n' ' ' || true)"
+fi
+if [[ -e /etc/web-proxy-panel/awg-ufw-owned ]]; then
+  AWG_UFW_PORTS="$(grep -Eo '[0-9]{1,5}' /etc/web-proxy-panel/awg-ufw-owned 2>/dev/null | sort -nu | tr '\n' ' ' || true)"
+fi
+[[ -e /etc/web-proxy-panel/awg-route-ufw-owned ]] && AWG_UFW_ROUTES="$(cat /etc/web-proxy-panel/awg-route-ufw-owned 2>/dev/null || true)"
 
-Подключитесь к серверу по SSH и перейдите в режим `root`:
+echo "Stopping services..."
+for unit in \
+  web-panel-proxy-web-update.service \
+  web-panel-proxy-metrics.timer web-panel-proxy-metrics.service \
+  tproxy-panel.service web-proxy-panel.service web-proxy-panel-mtproxy.service \
+  web-proxy-panel-firewall.service web-proxy-panel-traffic.timer web-proxy-panel-traffic.service web-panel-proxy-xray.service \
+  web-panel-proxy-sync-tls.timer web-panel-proxy-sync-tls.service \
+  tproxy-firewall.service refresh-mtproxy-config.timer refresh-mtproxy-config.service \
+  tproxy-server.service mtproxy.service
+do
+  systemctl disable --now "$unit" 2>/dev/null || true
+done
+for unit in $(systemctl list-units --all 'web-panel-proxy-awg@*.service' --no-legend 2>/dev/null | awk '{print $1}'); do
+  systemctl disable --now "$unit" 2>/dev/null || true
+done
+mita stop >/dev/null 2>&1 || true
 
-```bash
-sudo -i
-```
+shopt -s nullglob
+USER_UNITS=(/etc/systemd/system/web-proxy-user-*.service)
+for unit_path in "${USER_UNITS[@]}"; do
+  unit="$(basename "$unit_path")"
+  systemctl disable --now "$unit" 2>/dev/null || true
+  rm -f -- "$unit_path"
+done
 
-### Установка
+# Remove the firewall tables created by the panel and the proxy firewall.
+nft delete table inet web_proxy_panel 2>/dev/null || true
+nft delete table ip web_proxy_awg 2>/dev/null || true
+nft delete table inet tproxy_backend 2>/dev/null || true
+if [[ "$HYSTERIA_UFW_OWNED" == 1 ]] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  for port in $HYSTERIA_UFW_PORTS; do
+    [[ "$port" =~ ^[0-9]+$ ]] || continue
+    (( port >= 1 && port <= 65535 )) || continue
+    ufw --force delete allow "$port/udp" >/dev/null 2>&1 || true
+    ufw --force delete allow "$port/udp" >/dev/null 2>&1 || true
+  done
+fi
+if [[ -n "$AWG_UFW_PORTS" ]] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  for port in $AWG_UFW_PORTS; do ufw --force delete allow "$port/udp" >/dev/null 2>&1 || true; done
+fi
+if [[ -n "$AWG_UFW_ROUTES" ]] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  while read -r awg_if awg_out; do
+    [[ "$awg_if" =~ ^[A-Za-z0-9_.:-]+$ && "$awg_out" =~ ^[A-Za-z0-9_.:-]+$ ]] || continue
+    ufw --force route delete allow in on "$awg_if" out on "$awg_out" >/dev/null 2>&1 || true
+  done <<< "$AWG_UFW_ROUTES"
+fi
+if [[ -n "$MTPROTO_UFW_PORTS" ]] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  for port in $MTPROTO_UFW_PORTS; do
+    [[ "$port" =~ ^[0-9]+$ ]] || continue
+    (( port >= 1 && port <= 65535 )) || continue
+    ufw --force delete allow "$port/tcp" >/dev/null 2>&1 || true
+  done
+fi
+if [[ "$MIERU_UFW_OWNED" == 1 ]] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  ufw --force delete allow 8965/tcp >/dev/null 2>&1 || true
+fi
 
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.4.0/install.sh)
-```
+# Remove Caddy only when this release installed it and its configuration still
+# contains only the project site. If another site was added later, remove just
+# the project's top-level site block and preserve the shared Caddy deployment.
+REMOVE_CADDY=0
+PRESERVE_CADDY=0
+if [[ "$((CADDY_OWNED + CADDY_SHARED))" -gt 0 && -n "$DOMAIN" && -f /etc/caddy/Caddyfile ]]; then
+  CADDY_TMP="$(mktemp /tmp/web-panel-proxy-Caddyfile.XXXXXX)"
+  set +e
+  python3 - /etc/caddy/Caddyfile "$CADDY_TMP" "$DOMAIN" <<'PY'
+import re,sys
+source,target,domain=sys.argv[1:]
+text=open(source,encoding="utf-8").read()
+text=re.sub(r"\n?[ \t]*# WPP NAIVE GLOBAL BEGIN\n.*?\n[ \t]*# WPP NAIVE GLOBAL END\n?","\n",text,flags=re.S)
+text=re.sub(r"\n?[ \t]*# WPP NAIVE BEGIN\n.*?\n[ \t]*# WPP NAIVE END\n?","\n",text,flags=re.S)
+text=re.sub(r"(?m)^\s*:443,\s*"+re.escape(domain)+r"\s*\{\s*$",domain+" {",text,count=1)
+lines=text.splitlines(keepends=True)
+start=None
+pattern=re.compile(r"^\s*"+re.escape(domain)+r"\s*\{\s*$")
+for i,line in enumerate(lines):
+    if pattern.match(line):
+        start=i
+        break
+if start is None:
+    raise SystemExit(2)
+depth=0
+end=None
+for i in range(start,len(lines)):
+    depth+=lines[i].count("{")-lines[i].count("}")
+    if depth==0:
+        end=i
+        break
+if end is None:
+    raise SystemExit(3)
+remaining=lines[:start]+lines[end+1:]
+while remaining and not remaining[0].strip(): remaining.pop(0)
+while remaining and not remaining[-1].strip(): remaining.pop()
+meaningful=[x for x in remaining if x.strip() and not x.lstrip().startswith("#")]
+if not meaningful:
+    open(target,"w",encoding="utf-8").write("")
+    raise SystemExit(10)
+open(target,"w",encoding="utf-8").writelines(remaining)
 
-Установщик запросит домен, email для HTTPS-сертификата, логин и пароль панели. После установки он покажет адрес панели и данные для входа.
+# A project-owned canonical Caddyfile also contains one global options block
+# (`{ ... }`). It is not another website. Report status 10 when that block and
+# comments/blank lines are all that remain. Shared Caddy is still preserved by
+# the shell branch below, together with this global block.
+depth=0
+outside=[]
+for line in remaining:
+    stripped=line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    if depth == 0 and stripped == "{":
+        depth=1
+        continue
+    if depth > 0:
+        depth+=line.count("{")-line.count("}")
+        continue
+    outside.append(stripped)
+if depth != 0:
+    raise SystemExit(3)
+if not outside:
+    raise SystemExit(10)
+PY
+  PARSE_STATUS=$?
+  set -e
+  if [[ "$PARSE_STATUS" == 10 ]]; then
+    if [[ "$CADDY_OWNED" == 1 ]]; then
+      REMOVE_CADDY=1
+      systemctl disable --now caddy.service 2>/dev/null || true
+    else
+      install -o root -g caddy -m 0640 "$CADDY_TMP" /etc/caddy/Caddyfile
+      PRESERVE_CADDY=1
+    fi
+  elif [[ "$PARSE_STATUS" == 0 ]]; then
+    if caddy validate --config "$CADDY_TMP" --adapter caddyfile >/dev/null 2>&1; then
+      install -o root -g caddy -m 0640 "$CADDY_TMP" /etc/caddy/Caddyfile
+      PRESERVE_CADDY=1
+    else
+      PRESERVE_CADDY=1
+      echo "WARNING: the remaining Caddy configuration did not validate; the original file was preserved."
+    fi
+  else
+    PRESERVE_CADDY=1
+    echo "WARNING: the project Caddy block could not be removed automatically; Caddy was preserved."
+  fi
+  rm -f -- "$CADDY_TMP"
+  [[ "$PRESERVE_CADDY" == 1 ]] && rm -f -- /etc/caddy/Caddyfile.before-web-panel-proxy
+fi
 
-### Обновление
+echo "Removing WEB PANEL PROXY V 2.4.0 files..."
+systemctl disable --now web-panel-proxy-openflux.service 2>/dev/null || true
+for unit in /etc/systemd/system/web-panel-proxy-openflux-*.service; do
+  [[ -e "$unit" ]] || continue
+  systemctl disable --now "$(basename "$unit")" 2>/dev/null || true
+  rm -f -- "$unit"
+done
+rm -f -- \
+  /etc/systemd/system/web-panel-proxy-web-update.service \
+  /etc/systemd/system/web-panel-proxy-metrics.service \
+  /etc/systemd/system/web-panel-proxy-metrics.timer \
+  /etc/systemd/system/tproxy-panel.service \
+  /etc/systemd/system/web-proxy-panel.service \
+  /etc/systemd/system/web-proxy-panel-mtproxy.service \
+  /etc/systemd/system/web-proxy-panel-firewall.service \
+  /etc/systemd/system/web-proxy-panel-traffic.service \
+  /etc/systemd/system/web-proxy-panel-traffic.timer \
+  /etc/systemd/system/web-panel-proxy-xray.service \
+  /etc/systemd/system/web-panel-proxy-openflux.service \
+  /etc/systemd/system/web-panel-proxy-awg@.service \
+  /etc/systemd/system/web-panel-proxy-sync-tls.service \
+  /etc/systemd/system/web-panel-proxy-sync-tls.timer \
+  /etc/systemd/system/tproxy-firewall.service \
+  /etc/systemd/system/tproxy-server.service \
+  /etc/systemd/system/mtproxy.service \
+  /etc/systemd/system/refresh-mtproxy-config.timer \
+  /etc/systemd/system/refresh-mtproxy-config.service \
+  /usr/local/bin/tproxy-server \
+  /usr/local/bin/tproxy-server.previous \
+  /usr/local/bin/tproxy-server.next \
+  /usr/local/sbin/web-proxy-panelctl \
+  /usr/local/sbin/web-proxy-panel-user-firewall \
+  /usr/local/sbin/web-panel-proxy-sync-tls \
+  /usr/local/sbin/web-panel-proxy-awg-run \
+  /usr/local/sbin/web-panel-proxy-awg-up \
+  /usr/local/sbin/web-panel-proxy-awg-down \
+  /usr/local/sbin/web-panel-proxy-update \
+  /usr/local/sbin/WPP \
+  /usr/local/sbin/wpp \
+  /usr/local/sbin/web-proxy-public-mtproxy \
+  /usr/local/sbin/web-proxy-panel-mtproxy \
+  /usr/local/sbin/web-panel-proxy-uninstall \
+  /usr/local/sbin/refresh-mtproxy-config \
+  /usr/local/libexec/web-proxy-user-backend.py
 
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/main/update.sh)
-```
+rm -rf -- \
+  /var/lib/web-panel-proxy-update \
+  /etc/systemd/system/mtproxy.service.d \
+  /etc/tproxy-server \
+  /etc/mtproxy \
+  /etc/web-proxy-panel \
+  /etc/web-panel-proxy-xray \
+  /etc/tproxy-panel \
+  /opt/MTProxy \
+  /opt/go1.26.5 \
+  /opt/tproxy-panel \
+  /opt/web-panel-proxy \
+  /opt/tproxy-site \
+  /srv/tproxy-site \
+  /var/lib/tproxy-panel \
+  /var/lib/web-panel-proxy-xray \
+  /root/tproxy-server
 
-Обновление устанавливает последний стабильный релиз и сохраняет пользователей, ключи, настройки, адрес панели и HTML-заглушки.
+rm -f -- /etc/sysctl.d/90-web-panel-proxy-awg.conf
+if [[ "$AWG_OWNED" == 1 ]]; then
+  rm -f -- /usr/local/bin/amneziawg-go /usr/local/bin/awg /usr/local/bin/awg-quick
+fi
 
-### Удаление
+# qrencode is the only Debian package installed exclusively for the panel.
+if command -v apt-get >/dev/null 2>&1; then
+  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 purge -y qrencode 2>/dev/null || true
+  if [[ "$MIERU_PACKAGE_OWNED" == 1 ]]; then
+    DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 purge -y mita 2>/dev/null || true
+  fi
+fi
 
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.4.0/uninstall-web-proxy.sh)
-```
+if [[ "$REMOVE_CADDY" == 1 ]]; then
+  rm -f -- /usr/local/bin/caddy /etc/caddy/Caddyfile /etc/systemd/system/caddy.service.d/tproxy.conf
+  rmdir /etc/systemd/system/caddy.service.d 2>/dev/null || true
+  rm -f -- /etc/systemd/system/caddy.service
+  rm -rf -- /etc/caddy /var/lib/caddy
+  id caddy >/dev/null 2>&1 && userdel caddy 2>/dev/null || true
+  echo "WEB PROXY Caddy configuration removed."
+elif [[ "$PRESERVE_CADDY" == 1 ]]; then
+  rm -f -- /etc/systemd/system/caddy.service.d/tproxy.conf
+  rmdir /etc/systemd/system/caddy.service.d 2>/dev/null || true
+  systemctl daemon-reload
+  if command -v caddy >/dev/null 2>&1 && caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+    systemctl restart caddy.service 2>/dev/null || true
+    echo "Other Caddy sites were preserved; only the WEB PANEL PROXY site block was removed."
+  else
+    echo "WARNING: preserved Caddy configuration requires manual validation."
+  fi
+else
+  rm -f -- /etc/systemd/system/caddy.service.d/tproxy.conf
+  rmdir /etc/systemd/system/caddy.service.d 2>/dev/null || true
+  echo "Caddy was preserved because it was not marked as installed by WEB PANEL PROXY V 2.4.0."
+fi
 
-> **Внимание:** удаление выполняется без дополнительного подтверждения и стирает пользователей, ключи, конфигурации, службы и сайт WEB PANEL PROXY.
+id mtproxy >/dev/null 2>&1 && userdel mtproxy 2>/dev/null || true
+id tproxy >/dev/null 2>&1 && userdel tproxy 2>/dev/null || true
+id wpp-openflux >/dev/null 2>&1 && userdel wpp-openflux 2>/dev/null || true
+[[ "$XRAY_USER_OWNED" == 1 ]] && id xray >/dev/null 2>&1 && userdel xray 2>/dev/null || true
+[[ "$XRAY_GROUP_OWNED" == 1 ]] && getent group xray >/dev/null 2>&1 && groupdel xray 2>/dev/null || true
 
-## Требования
-
-- Чистый VPS с Ubuntu 22.04+, Ubuntu 24.04+ или Debian 12+.
-- Архитектура `x86_64`.
-- Домен или поддомен с A-записью на IPv4 сервера.
-- Доступ `root` и установленные `curl` и `ca-certificates`.
-- Свободные и открытые `80/tcp` и `443/tcp`.
-
-Дополнительные порты выбранных подключений установщик и панель покажут автоматически. Их также необходимо открыть во внешнем firewall VPS-провайдера.
-
-## Полезно знать
-
-- Команда `WPP` открывает консольное меню управления.
-- Caddy постоянно использует `80/tcp` и `443/tcp` для HTTP/HTTPS и сертификатов.
-- Адрес панели, Node API token и ссылки подключений являются секретными — не публикуйте их.
-- Перед обновлением автоматически создаётся резервная копия.
-
-## Ссылки
-
-- [GitHub проекта](https://github.com/POLESNIESOVETI12/web-panel-proxy)
-- [YouTube автора](https://www.youtube.com/@POLESNIESOVETI12)
-
-## Лицензия
-
-MIT License. Подробности находятся в файле [LICENSE](LICENSE).
+systemctl daemon-reload
+systemctl reset-failed 2>/dev/null || true
+echo "WEB PANEL PROXY V 2.4.0 has been removed."
