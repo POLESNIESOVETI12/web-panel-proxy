@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -13,8 +14,9 @@ TRAFFIC = Path('/var/lib/tproxy-panel/traffic.json')
 ERROR = Path('/var/lib/tproxy-panel/metrics-error.json')
 PROC = Path('/proc')
 SERVICES = {'xray': 'web-panel-proxy-xray.service', 'panel': 'tproxy-panel.service',
-            'caddy': 'caddy.service', 'relay': 'tproxy-server.service',
-            'openflux': 'web-panel-proxy-openflux.service'}
+            'caddy': 'caddy.service', 'relay': 'tproxy-server.service'}
+OPENFLUX_PROFILES = Path('/etc/web-proxy-panel/openflux/profiles')
+AWG_CONFIGS = Path('/etc/web-proxy-panel/awg')
 
 
 def read_state(path=None):
@@ -44,21 +46,74 @@ def proc_text(name):
         return ''
 
 
+def _service_fields(unit):
+    run = subprocess.run(['systemctl', 'show', unit, '--no-pager',
+        '-p', 'ActiveState', '-p', 'MemoryCurrent', '-p', 'TasksCurrent',
+        '-p', 'ExecMainStartTimestampMonotonic'], capture_output=True, text=True, timeout=3,
+        env={**os.environ, 'LC_ALL':'C', 'SYSTEMD_COLORS':'0'})
+    fields = dict(line.split('=', 1) for line in run.stdout.splitlines() if '=' in line)
+    numeric = lambda key: int(fields[key]) if fields.get(key, '').isdigit() and int(fields[key]) < 2**63 else None
+    return {'state': fields.get('ActiveState', 'unknown'), 'memory': numeric('MemoryCurrent'),
+            'tasks': numeric('TasksCurrent'), 'start_us': numeric('ExecMainStartTimestampMonotonic')}
+
+
+def _openflux_snapshot():
+    units = ['web-panel-proxy-openflux.service']
+    try:
+        profile_ids = sorted(entry.name for entry in OPENFLUX_PROFILES.iterdir()
+                             if entry.is_dir() and re.fullmatch(r'[0-9a-f]{16}', entry.name))
+    except OSError:
+        profile_ids = []
+    units.extend('web-panel-proxy-openflux-' + profile_id + '.service' for profile_id in profile_ids)
+    states = [_service_fields(unit) for unit in units]
+    active = [value for value in states if value.get('state') == 'active']
+    selected = active or states
+    numbers = lambda key: [value[key] for value in selected if value.get(key) is not None]
+    starts = numbers('start_us')
+    memories = numbers('memory')
+    tasks = numbers('tasks')
+    return {'state': 'active' if active else ('inactive' if states else 'unknown'),
+            'memory': sum(memories) if memories else None,
+            'tasks': sum(tasks) if tasks else None,
+            'start_us': min(starts) if starts else None,
+            'active_profiles': len(active), 'profiles': len(units)}
+
+
+def _awg_snapshot():
+    try:
+        profile_ids = sorted(entry.stem for entry in AWG_CONFIGS.glob('*.conf')
+                             if re.fullmatch(r'[0-9a-f]{16}', entry.stem))
+    except OSError:
+        profile_ids = []
+    if not profile_ids:
+        return {'state':'inactive','active_profiles':0,'profiles':0}
+    states = [_service_fields('web-panel-proxy-awg@' + profile_id + '.service') for profile_id in profile_ids]
+    active = [value for value in states if value.get('state') == 'active']
+    selected = active or states
+    numbers = lambda key: [value[key] for value in selected if value.get(key) is not None]
+    starts=numbers('start_us'); memories=numbers('memory'); tasks=numbers('tasks')
+    return {'state':'active' if active else 'inactive',
+            'memory':sum(memories) if memories else None,
+            'tasks':sum(tasks) if tasks else None,
+            'start_us':min(starts) if starts else None,
+            'active_profiles':len(active),'profiles':len(states)}
+
+
 def service_snapshot():
     result = {}
     for name, unit in SERVICES.items():
         try:
-            run = subprocess.run(['systemctl', 'show', unit, '--no-pager',
-                '-p', 'ActiveState', '-p', 'MemoryCurrent', '-p', 'TasksCurrent',
-                '-p', 'ExecMainStartTimestampMonotonic'], capture_output=True, text=True, timeout=3,
-                env={**os.environ, 'LC_ALL':'C', 'SYSTEMD_COLORS':'0'})
-            fields = dict(line.split('=', 1) for line in run.stdout.splitlines() if '=' in line)
-            numeric = lambda key: int(fields[key]) if fields.get(key, '').isdigit() and int(fields[key]) < 2**63 else None
-            start = numeric('ExecMainStartTimestampMonotonic')
-            result[name] = {'state': fields.get('ActiveState', 'unknown'), 'memory': numeric('MemoryCurrent'),
-                            'tasks': numeric('TasksCurrent'), 'start_us': start}
+            result[name] = _service_fields(unit)
         except (OSError, subprocess.TimeoutExpired, ValueError):
             result[name] = {'state': 'unknown'}
+    try:
+        result['openflux'] = _openflux_snapshot()
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        result['openflux'] = {'state': 'unknown'}
+    try:
+        result['awg'] = _awg_snapshot()
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        result['awg'] = {'state':'unknown'}
     return result
 
 
