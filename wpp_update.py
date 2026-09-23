@@ -16,6 +16,30 @@ REPO = 'https://github.com/POLESNIESOVETI12/web-panel-proxy.git'
 UPDATER = '/usr/local/sbin/web-panel-proxy-update'
 
 
+def failure_message(log_path):
+    """Return a safe, useful diagnosis without exposing URLs or credentials."""
+    try:
+        tail = log_path.read_text(encoding='utf-8', errors='replace')[-24000:].lower()
+    except OSError:
+        return 'Обновление завершилось ошибкой. Журнал обновления недоступен.'
+    cases = (
+        (('ssl connection timeout', 'connection timed out', 'could not resolve host'),
+         'Не удалось скачать файлы релиза: GitHub недоступен или соединение прервано.'),
+        (('openflux-linux-amd64 is missing', 'missing assets/openflux-linux-amd64', 'openflux checksum verification failed'),
+         'Пакет OpenFlux отсутствует или повреждён.'),
+        (('xray checksum verification failed',), 'Архив Xray не прошёл проверку целостности.'),
+        (('port 80 is occupied', 'port 443 is occupied', 'port 8080 is occupied'),
+         'Один из обязательных портов занят другой программой.'),
+        (('caddy reload failed', 'could not configure caddy', 'caddy diagnostic'),
+         'Не удалось применить конфигурацию HTTPS/Caddy.'),
+        (('no supported web proxy installation was found',),
+         'Установленная версия панели не распознана безопасным обновлением.'),
+    )
+    for needles, message in cases:
+        if any(needle in tail for needle in needles): return message
+    return 'Обновление завершилось ошибкой. Откройте журнал через WPP или SSH.'
+
+
 def current_version():
     try: return VERSION.read_text(encoding='ascii').strip()
     except OSError: return 'unknown'
@@ -113,7 +137,7 @@ def run_update():
             os.chmod(log.name, 0o600)
             result = subprocess.run(['/usr/bin/bash', UPDATER], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, env=env)
         state.update(phase='done' if result.returncode == 0 else 'failed', code=result.returncode,
-                     message='Обновление завершено. Войдите в панель заново.' if result.returncode == 0 else 'Обновление завершилось ошибкой. Проверьте службы и /var/lib/web-panel-proxy-update/update.log через SSH.')
+                     message='Обновление завершено. Войдите в панель заново.' if result.returncode == 0 else failure_message(ROOT / 'update.log'))
     except OSError:
         state.update(phase='failed', message='Не удалось выполнить установщик. Проверьте журнал через SSH.')
     state['finished'] = int(time.time())

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# WEB PANEL PROXY V 2.3.6 complete removal utility.
+# WEB PANEL PROXY V 2.4.0 complete removal utility.
 set -Eeuo pipefail
 
 [[ ${EUID:-1} -eq 0 ]] || { echo "Run this script as root." >&2; exit 1; }
@@ -7,8 +7,8 @@ command -v flock >/dev/null 2>&1 || { echo "flock is required (package: util-lin
 exec 9>/run/lock/web-panel-proxy.lock
 flock -n 9 || { echo "Another WEB PANEL PROXY install, update or removal is already running." >&2; exit 1; }
 
-echo "WEB PANEL PROXY V 2.3.6 — complete removal"
-echo "Removing all WEB PANEL PROXY V 2.3.6 components..."
+echo "WEB PANEL PROXY V 2.4.0 — complete removal"
+echo "Removing all WEB PANEL PROXY V 2.4.0 components..."
 
 DOMAIN="$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' /etc/systemd/system/caddy.service.d/tproxy.conf 2>/dev/null | head -n1 || true)"
 CADDY_MARKER="$(cat /etc/web-proxy-panel/caddy-owned 2>/dev/null || true)"
@@ -19,6 +19,9 @@ XRAY_GROUP_OWNED=0
 HYSTERIA_UFW_OWNED=0
 HYSTERIA_UFW_PORTS=""
 MTPROTO_UFW_PORTS=""
+AWG_UFW_PORTS=""
+AWG_UFW_ROUTES=""
+AWG_OWNED=0
 MIERU_UFW_OWNED=0
 MIERU_PACKAGE_OWNED=0
 NAIVE_CADDY_OWNED=0
@@ -29,6 +32,7 @@ NAIVE_CADDY_OWNED=0
 [[ -e /etc/web-proxy-panel/mieru-ufw-owned ]] && MIERU_UFW_OWNED=1
 [[ -e /etc/web-proxy-panel/mita-package-owned ]] && MIERU_PACKAGE_OWNED=1
 [[ -e /etc/web-proxy-panel/naive-caddy-owned ]] && NAIVE_CADDY_OWNED=1
+[[ -e /etc/web-proxy-panel/awg-owned ]] && AWG_OWNED=1
 if [[ -e /etc/web-proxy-panel/hysteria-ufw-owned ]]; then
   HYSTERIA_UFW_OWNED=1
   HYSTERIA_UFW_PORTS="$(grep -Eo '[0-9]{1,5}' /etc/web-proxy-panel/hysteria-ufw-owned 2>/dev/null | sort -nu | tr '\n' ' ' || true)"
@@ -37,6 +41,10 @@ fi
 if [[ -e /etc/web-proxy-panel/mtproto-ufw-owned ]]; then
   MTPROTO_UFW_PORTS="$(grep -Eo '[0-9]{1,5}' /etc/web-proxy-panel/mtproto-ufw-owned 2>/dev/null | sort -nu | tr '\n' ' ' || true)"
 fi
+if [[ -e /etc/web-proxy-panel/awg-ufw-owned ]]; then
+  AWG_UFW_PORTS="$(grep -Eo '[0-9]{1,5}' /etc/web-proxy-panel/awg-ufw-owned 2>/dev/null | sort -nu | tr '\n' ' ' || true)"
+fi
+[[ -e /etc/web-proxy-panel/awg-route-ufw-owned ]] && AWG_UFW_ROUTES="$(cat /etc/web-proxy-panel/awg-route-ufw-owned 2>/dev/null || true)"
 
 echo "Stopping services..."
 for unit in \
@@ -48,6 +56,9 @@ for unit in \
   tproxy-firewall.service refresh-mtproxy-config.timer refresh-mtproxy-config.service \
   tproxy-server.service mtproxy.service
 do
+  systemctl disable --now "$unit" 2>/dev/null || true
+done
+for unit in $(systemctl list-units --all 'web-panel-proxy-awg@*.service' --no-legend 2>/dev/null | awk '{print $1}'); do
   systemctl disable --now "$unit" 2>/dev/null || true
 done
 mita stop >/dev/null 2>&1 || true
@@ -62,6 +73,7 @@ done
 
 # Remove the firewall tables created by the panel and the proxy firewall.
 nft delete table inet web_proxy_panel 2>/dev/null || true
+nft delete table ip web_proxy_awg 2>/dev/null || true
 nft delete table inet tproxy_backend 2>/dev/null || true
 if [[ "$HYSTERIA_UFW_OWNED" == 1 ]] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
   for port in $HYSTERIA_UFW_PORTS; do
@@ -70,6 +82,15 @@ if [[ "$HYSTERIA_UFW_OWNED" == 1 ]] && command -v ufw >/dev/null 2>&1 && ufw sta
     ufw --force delete allow "$port/udp" >/dev/null 2>&1 || true
     ufw --force delete allow "$port/udp" >/dev/null 2>&1 || true
   done
+fi
+if [[ -n "$AWG_UFW_PORTS" ]] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  for port in $AWG_UFW_PORTS; do ufw --force delete allow "$port/udp" >/dev/null 2>&1 || true; done
+fi
+if [[ -n "$AWG_UFW_ROUTES" ]] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  while read -r awg_if awg_out; do
+    [[ "$awg_if" =~ ^[A-Za-z0-9_.:-]+$ && "$awg_out" =~ ^[A-Za-z0-9_.:-]+$ ]] || continue
+    ufw --force route delete allow in on "$awg_if" out on "$awg_out" >/dev/null 2>&1 || true
+  done <<< "$AWG_UFW_ROUTES"
 fi
 if [[ -n "$MTPROTO_UFW_PORTS" ]] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
   for port in $MTPROTO_UFW_PORTS; do
@@ -172,7 +193,7 @@ PY
   [[ "$PRESERVE_CADDY" == 1 ]] && rm -f -- /etc/caddy/Caddyfile.before-web-panel-proxy
 fi
 
-echo "Removing WEB PANEL PROXY V 2.3.6 files..."
+echo "Removing WEB PANEL PROXY V 2.4.0 files..."
 systemctl disable --now web-panel-proxy-openflux.service 2>/dev/null || true
 for unit in /etc/systemd/system/web-panel-proxy-openflux-*.service; do
   [[ -e "$unit" ]] || continue
@@ -191,6 +212,7 @@ rm -f -- \
   /etc/systemd/system/web-proxy-panel-traffic.timer \
   /etc/systemd/system/web-panel-proxy-xray.service \
   /etc/systemd/system/web-panel-proxy-openflux.service \
+  /etc/systemd/system/web-panel-proxy-awg@.service \
   /etc/systemd/system/web-panel-proxy-sync-tls.service \
   /etc/systemd/system/web-panel-proxy-sync-tls.timer \
   /etc/systemd/system/tproxy-firewall.service \
@@ -204,6 +226,9 @@ rm -f -- \
   /usr/local/sbin/web-proxy-panelctl \
   /usr/local/sbin/web-proxy-panel-user-firewall \
   /usr/local/sbin/web-panel-proxy-sync-tls \
+  /usr/local/sbin/web-panel-proxy-awg-run \
+  /usr/local/sbin/web-panel-proxy-awg-up \
+  /usr/local/sbin/web-panel-proxy-awg-down \
   /usr/local/sbin/web-panel-proxy-update \
   /usr/local/sbin/WPP \
   /usr/local/sbin/wpp \
@@ -230,6 +255,11 @@ rm -rf -- \
   /var/lib/tproxy-panel \
   /var/lib/web-panel-proxy-xray \
   /root/tproxy-server
+
+rm -f -- /etc/sysctl.d/90-web-panel-proxy-awg.conf
+if [[ "$AWG_OWNED" == 1 ]]; then
+  rm -f -- /usr/local/bin/amneziawg-go /usr/local/bin/awg /usr/local/bin/awg-quick
+fi
 
 # qrencode is the only Debian package installed exclusively for the panel.
 if command -v apt-get >/dev/null 2>&1; then
@@ -259,7 +289,7 @@ elif [[ "$PRESERVE_CADDY" == 1 ]]; then
 else
   rm -f -- /etc/systemd/system/caddy.service.d/tproxy.conf
   rmdir /etc/systemd/system/caddy.service.d 2>/dev/null || true
-  echo "Caddy was preserved because it was not marked as installed by WEB PANEL PROXY V 2.3.6."
+  echo "Caddy was preserved because it was not marked as installed by WEB PANEL PROXY V 2.4.0."
 fi
 
 id mtproxy >/dev/null 2>&1 && userdel mtproxy 2>/dev/null || true
@@ -270,4 +300,4 @@ id wpp-openflux >/dev/null 2>&1 && userdel wpp-openflux 2>/dev/null || true
 
 systemctl daemon-reload
 systemctl reset-failed 2>/dev/null || true
-echo "WEB PANEL PROXY V 2.3.6 has been removed."
+echo "WEB PANEL PROXY V 2.4.0 has been removed."

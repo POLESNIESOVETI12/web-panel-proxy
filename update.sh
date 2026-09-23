@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Safe in-place updater for WEB PANEL PROXY V 2.3.6.
+# Safe in-place updater for WEB PANEL PROXY V 2.4.0.
 set -Eeuo pipefail
 umask 077
 
@@ -15,10 +15,19 @@ RELEASE_REF="$REQUESTED_REF"
 LOCAL_SOURCE=""
 if [[ "${1:-}" == "--local" ]]; then
     LOCAL_SOURCE="$(cd "$(dirname "$0")" && pwd)"
-    RELEASE_REF="v2.3.6"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py; do
+    RELEASE_REF="v2.4.0"
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py; do
         [[ -s "$LOCAL_SOURCE/$file" ]] || { echo "Incomplete local archive: $file is missing." >&2; exit 1; }
     done
+    [[ -s "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" || -s "$LOCAL_SOURCE/OpenFlux-linux-amd64" ]] || {
+        echo "Incomplete local archive: OpenFlux-linux-amd64 is missing." >&2; exit 1;
+    }
+    for asset in amneziawg-go-linux-amd64 awg-linux-amd64 awg-quick-linux-amd64; do
+        [[ -s "$LOCAL_SOURCE/assets/$asset" ]] || { echo "Incomplete local archive: assets/$asset is missing." >&2; exit 1; }
+    done
+    [[ -s "$LOCAL_SOURCE/wpp-panel/flags.tar.gz" ]] || {
+        echo "Incomplete local archive: wpp-panel/flags.tar.gz is missing." >&2; exit 1;
+    }
 elif [[ $# != 0 ]]; then
     echo "Usage: bash update.sh [--local]" >&2; exit 1
 fi
@@ -34,7 +43,7 @@ exec 9>/run/lock/web-panel-proxy.lock
 flock -n 9 || die "Another WEB PANEL PROXY install, update or removal is already running."
 
 echo "============================================================"
-echo "     WEB PANEL PROXY V 2.3.6 — SAFE UPDATE"
+echo "     WEB PANEL PROXY V 2.4.0 — SAFE UPDATE"
 echo "============================================================"
 echo "Users, administrator password, panel URL and site HTML will be retained."
 
@@ -99,7 +108,7 @@ trap 'if [[ "$PANEL_WAS_RUNNING" == 1 ]]; then systemctl start tproxy-panel.serv
 BACKUP="/root/web-panel-proxy-update-backup-${STAMP}"
 install -d -m 0700 "$BACKUP"
 BACKUP_ITEMS=()
-for item in /opt/tproxy-panel /opt/web-panel-proxy /opt/MTProxy /usr/local/bin/caddy /usr/local/bin/tproxy-server /usr/local/sbin/web-proxy-panelctl /usr/local/sbin/web-proxy-panel-user-firewall /usr/local/sbin/web-panel-proxy-sync-tls /usr/local/sbin/web-panel-proxy-update /usr/local/sbin/web-panel-proxy-uninstall /usr/local/sbin/WPP /usr/local/sbin/wpp /etc/systemd/system/tproxy-panel.service /etc/systemd/system/web-proxy-panel-firewall.service /etc/systemd/system/web-proxy-panel-traffic.service /etc/systemd/system/web-proxy-panel-traffic.timer /etc/systemd/system/web-panel-proxy-xray.service /etc/systemd/system/web-panel-proxy-openflux.service /etc/systemd/system/web-panel-proxy-sync-tls.service /etc/systemd/system/web-panel-proxy-sync-tls.timer /etc/systemd/system/tproxy-server.service /etc/systemd/system/mtproxy.service /etc/systemd/system/caddy.service.d/tproxy.conf /etc/caddy/Caddyfile /etc/tproxy-server /etc/mtproxy /etc/mita /etc/web-panel-proxy-xray /var/lib/web-panel-proxy-xray /var/lib/tproxy-panel /etc/web-proxy-panel /srv/tproxy-site; do
+for item in /opt/tproxy-panel /opt/web-panel-proxy /opt/MTProxy /usr/local/bin/caddy /usr/local/bin/tproxy-server /usr/local/bin/amneziawg-go /usr/local/bin/awg /usr/local/bin/awg-quick /usr/local/sbin/web-proxy-panelctl /usr/local/sbin/web-proxy-panel-user-firewall /usr/local/sbin/web-panel-proxy-sync-tls /usr/local/sbin/web-panel-proxy-awg-run /usr/local/sbin/web-panel-proxy-awg-up /usr/local/sbin/web-panel-proxy-awg-down /usr/local/sbin/web-panel-proxy-update /usr/local/sbin/web-panel-proxy-uninstall /usr/local/sbin/WPP /usr/local/sbin/wpp /etc/systemd/system/tproxy-panel.service /etc/systemd/system/web-proxy-panel-firewall.service /etc/systemd/system/web-proxy-panel-traffic.service /etc/systemd/system/web-proxy-panel-traffic.timer /etc/systemd/system/web-panel-proxy-xray.service /etc/systemd/system/web-panel-proxy-openflux.service /etc/systemd/system/web-panel-proxy-awg@.service /etc/systemd/system/web-panel-proxy-sync-tls.service /etc/systemd/system/web-panel-proxy-sync-tls.timer /etc/systemd/system/tproxy-server.service /etc/systemd/system/mtproxy.service /etc/systemd/system/caddy.service.d/tproxy.conf /etc/caddy/Caddyfile /etc/tproxy-server /etc/mtproxy /etc/mita /etc/web-panel-proxy-xray /etc/sysctl.d/90-web-panel-proxy-awg.conf /var/lib/web-panel-proxy-xray /var/lib/tproxy-panel /etc/web-proxy-panel /srv/tproxy-site; do
     [[ -e "$item" ]] && BACKUP_ITEMS+=("$item")
     [[ -e "$item" ]] && cp -a --parents "$item" "$BACKUP"
 done
@@ -129,6 +138,7 @@ HAD_XRAY_USER=0
 HAD_XRAY_GROUP=0
 HAD_OPENFLUX_UNIT=0
 HAD_OPENFLUX_USER=0
+HAD_AWG=0
 HAD_WPP_MENU=0
 HAD_WEB_UPDATE_UNIT=0
 [[ -e /etc/systemd/system/web-panel-proxy-web-update.service ]] && HAD_WEB_UPDATE_UNIT=1
@@ -142,6 +152,7 @@ id xray >/dev/null 2>&1 && HAD_XRAY_USER=1
 getent group xray >/dev/null 2>&1 && HAD_XRAY_GROUP=1
 [[ -e /etc/systemd/system/web-panel-proxy-openflux.service ]] && HAD_OPENFLUX_UNIT=1
 id wpp-openflux >/dev/null 2>&1 && HAD_OPENFLUX_USER=1
+[[ -e /etc/systemd/system/web-panel-proxy-awg@.service || -x /usr/local/bin/amneziawg-go ]] && HAD_AWG=1
 [[ -e /usr/local/sbin/WPP ]] && HAD_WPP_MENU=1
 UPDATE_COMMITTED=0
 rollback_update() {
@@ -149,6 +160,7 @@ rollback_update() {
     [[ "$UPDATE_COMMITTED" == 1 || "$code" == 0 ]] && return 0
     echo "Update failed; restoring the previous working state..." >&2
     systemctl stop tproxy-panel.service web-proxy-panel-firewall.service web-proxy-panel-traffic.timer web-proxy-panel-traffic.service web-panel-proxy-metrics.timer web-panel-proxy-metrics.service web-panel-proxy-xray.service web-panel-proxy-openflux.service web-panel-proxy-sync-tls.timer 2>/dev/null || true
+    for unit in $(systemctl list-units --all 'web-panel-proxy-awg@*.service' --no-legend 2>/dev/null | awk '{print $1}'); do systemctl stop "$unit" 2>/dev/null || true; done
     tar --numeric-owner -xpf "$BACKUP/state.tar" -C / 2>/dev/null || true
     if [[ "$HAD_FIREWALL_SERVICE" == 0 ]]; then
         rm -f /etc/systemd/system/web-proxy-panel-firewall.service
@@ -206,11 +218,23 @@ rollback_update() {
     if [[ "$HAD_OPENFLUX_USER" == 0 ]]; then
         userdel wpp-openflux 2>/dev/null || true
     fi
+    if [[ "$HAD_AWG" == 0 ]]; then
+        rm -f /usr/local/bin/amneziawg-go /usr/local/bin/awg /usr/local/bin/awg-quick \
+            /usr/local/sbin/web-panel-proxy-awg-run /usr/local/sbin/web-panel-proxy-awg-up /usr/local/sbin/web-panel-proxy-awg-down \
+            /etc/systemd/system/web-panel-proxy-awg@.service /etc/sysctl.d/90-web-panel-proxy-awg.conf
+        rm -f /etc/systemd/system/multi-user.target.wants/web-panel-proxy-awg@*.service
+        nft delete table ip web_proxy_awg 2>/dev/null || true
+    fi
     systemctl daemon-reload
     systemctl restart mtproxy.service tproxy-server.service caddy.service tproxy-panel.service 2>/dev/null || true
     [[ -e /etc/web-proxy-panel/openflux/enabled ]] && systemctl restart web-panel-proxy-openflux.service 2>/dev/null || true
     [[ "$HAD_FIREWALL_SERVICE" == 1 ]] && systemctl restart web-proxy-panel-firewall.service 2>/dev/null || true
     [[ "$HAD_XRAY_STATE" == 1 ]] && systemctl restart web-panel-proxy-xray.service 2>/dev/null || true
+    if [[ "$HAD_AWG" == 1 ]]; then
+        for unit in $(systemctl list-unit-files 'web-panel-proxy-awg@*.service' --no-legend 2>/dev/null | awk '$2=="enabled" {print $1}'); do
+            systemctl restart "$unit" 2>/dev/null || true
+        done
+    fi
     [[ "$HAD_TRAFFIC_TIMER" == 1 ]] && systemctl restart web-proxy-panel-traffic.timer 2>/dev/null || true
     [[ "$HAD_METRICS_TIMER" == 1 ]] && systemctl restart web-panel-proxy-metrics.timer 2>/dev/null || true
     echo "Previous files restored from: $BACKUP" >&2
@@ -250,16 +274,23 @@ finish() {
 }
 trap finish EXIT
 
-echo "Downloading the current WEB PANEL PROXY V 2.3.6 files..."
+echo "Downloading the current WEB PANEL PROXY V 2.4.0 files..."
 if [[ -n "$LOCAL_SOURCE" ]]; then
     install -d -m 0700 "$TEMP_DIR/source"
     install -d -m 0700 "$TEMP_DIR/source/assets"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py; do
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py; do
         cp -a "$LOCAL_SOURCE/$file" "$TEMP_DIR/source/$file"
     done
     if [[ -s "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" ]]; then
         cp -a "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" "$TEMP_DIR/source/assets/OpenFlux-linux-amd64"
+    else
+        cp -a "$LOCAL_SOURCE/OpenFlux-linux-amd64" "$TEMP_DIR/source/assets/OpenFlux-linux-amd64"
     fi
+    for asset in amneziawg-go-linux-amd64 awg-linux-amd64 awg-quick-linux-amd64; do
+        cp -a "$LOCAL_SOURCE/assets/$asset" "$TEMP_DIR/source/assets/$asset"
+    done
+    install -d -m 0700 "$TEMP_DIR/source/wpp-panel"
+    cp -a "$LOCAL_SOURCE/wpp-panel/flags.tar.gz" "$TEMP_DIR/source/wpp-panel/flags.tar.gz"
 else
 git clone --depth 1 --branch "$RELEASE_REF" "$REPOSITORY" "$TEMP_DIR/source"
 fi
