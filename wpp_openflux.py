@@ -27,12 +27,30 @@ PROFILES_DIR = CONFIG_DIR / "profiles"
 VERSION = "1.0.0"
 MAX_OPENFLUX_PROFILES = 32
 TRANSPORT = "yandex"
+TRANSPORTS = {"yandex", "mailru"}
 CODEC = "batched"
 MODE = "l4"
 
 
 class OpenFluxError(RuntimeError):
     pass
+
+
+def _codec_for(config):
+    """Use the codec built into the current iOS and Android clients."""
+    return CODEC
+
+
+def _clean_transport(value):
+    value = str(value or TRANSPORT).strip().lower()
+    if value not in TRANSPORTS:
+        raise OpenFluxError("Выберите Яндекс Документы или Mail.ru Документы.")
+    return value
+
+
+def _transport_for(config):
+    value = str((config or {}).get("transport", TRANSPORT)).lower()
+    return value if value in TRANSPORTS else TRANSPORT
 
 
 def _run(args, *, check=True, timeout=20):
@@ -62,7 +80,8 @@ def _atomic(path, value, mode, uid=0, gid=0):
             pass
 
 
-def validate_document_url(value):
+def validate_document_url(value, transport=TRANSPORT):
+    transport = _clean_transport(transport)
     value = str(value or "").strip()
     if not value or len(value) > 2048 or any(ord(char) < 32 for char in value):
         raise OpenFluxError("Укажите корректную ссылку на документ Яндекса.")
@@ -72,9 +91,14 @@ def validate_document_url(value):
     except ValueError as exc:
         raise OpenFluxError("Ссылка на документ имеет неверный формат.") from exc
     host = (parsed.hostname or "").lower().rstrip(".")
-    allowed = host in {"yandex.ru", "yandex.com"} or host.endswith(".yandex.ru") or host.endswith(".yandex.com")
+    if transport == "mailru":
+        allowed = host == "cloud.mail.ru" and bool(re.fullmatch(r"/public/[^/]+/[^/]+/?", parsed.path))
+        provider = "Mail.ru"
+    else:
+        allowed = host in {"yandex.ru", "yandex.com"} or host.endswith(".yandex.ru") or host.endswith(".yandex.com")
+        provider = "Яндекса"
     if parsed.scheme != "https" or not allowed or port not in (None, 443):
-        raise OpenFluxError("Разрешена только HTTPS-ссылка на домене Яндекса.")
+        raise OpenFluxError(f"Укажите публичную HTTPS-ссылку на документ {provider}.")
     if parsed.username or parsed.password or parsed.fragment or not parsed.path or parsed.path == "/":
         raise OpenFluxError("Используйте публичную ссылку на конкретный документ без логина и фрагмента.")
     return value
@@ -129,6 +153,8 @@ def _write_private_files(config):
 def _unit_text(config=None):
     config = config if isinstance(config, dict) else _load()
     encryption_argument = "" if config.get("ios_compatible", False) else f" --encryption-key-file={KEY_FILE}"
+    codec = _codec_for(config)
+    transport = _transport_for(config)
     return f"""[Unit]
 Description=WEB PANEL PROXY OpenFlux exit node
 After=network-online.target
@@ -140,7 +166,7 @@ Type=simple
 User={SERVICE_USER}
 Group={SERVICE_USER}
 UMask=0077
-ExecStart=/bin/sh -c 'exec {BIN} --role=exit --mode={MODE} --codec={CODEC} --transport={TRANSPORT} --url "$$(cat {URL_FILE})"{encryption_argument}'
+ExecStart=/bin/sh -c 'exec {BIN} --role=exit --mode={MODE} --codec={codec} --transport={transport} --url "$$(cat {URL_FILE})"{encryption_argument}'
 Restart=on-failure
 RestartSec=4
 TimeoutStopSec=15
@@ -209,14 +235,15 @@ def _start():
     raise OpenFluxError("OpenFlux не запустился. " + journal.strip()[-900:])
 
 
-def configure(document_url, ios_compatible=False):
-    url = validate_document_url(document_url)
+def configure(document_url, ios_compatible=False, transport=TRANSPORT):
+    transport = _clean_transport(transport)
+    url = validate_document_url(document_url, transport)
     previous = _load()
     config = {
         "enabled": True,
         "url": url,
         "key": previous.get("key") if isinstance(previous.get("key"), str) and len(previous["key"]) >= 24 else secrets.token_urlsafe(32),
-        "transport": TRANSPORT,
+        "transport": transport,
         "codec": CODEC,
         "mode": MODE,
         "ios_compatible": bool(ios_compatible),
@@ -312,8 +339,8 @@ def state():
         "active": _service_active() if configured else False,
         "url": config.get("url", "") if configured else "",
         "key": config.get("key", "") if configured else "",
-        "transport": TRANSPORT,
-        "codec": CODEC,
+        "transport": _transport_for(config),
+        "codec": _codec_for(config),
         "mode": MODE,
         "ios_compatible": bool(config.get("ios_compatible", False)),
         "encrypted": not bool(config.get("ios_compatible", False)),
@@ -397,6 +424,8 @@ def _write_extra_files(config):
 def _extra_unit_text(config):
     paths = _extra_paths(config["id"])
     encryption = "" if config.get("platform") == "ios" else " --encryption-key-file=" + str(paths["key"])
+    codec = _codec_for(config)
+    transport = _transport_for(config)
     return f"""[Unit]
 Description=WEB PANEL PROXY OpenFlux profile {config['id']}
 After=network-online.target
@@ -408,7 +437,7 @@ Type=simple
 User={SERVICE_USER}
 Group={SERVICE_USER}
 UMask=0077
-ExecStart=/bin/sh -c 'exec {BIN} --role=exit --mode={MODE} --codec={CODEC} --transport={TRANSPORT} --url "$$(cat {paths['url']})"{encryption}'
+ExecStart=/bin/sh -c 'exec {BIN} --role=exit --mode={MODE} --codec={codec} --transport={transport} --url "$$(cat {paths['url']})"{encryption}'
 Restart=on-failure
 RestartSec=4
 TimeoutStopSec=15
@@ -482,23 +511,27 @@ def profile_states():
             "platform": config.get("platform", "android"), "url": config.get("url", ""),
             "key": config.get("key", ""), "configured": True,
             "enabled": bool(config.get("enabled", True)), "active": _extra_active(config["id"]),
-            "encrypted": config.get("platform") != "ios", "version": VERSION,
+            "encrypted": config.get("platform") != "ios", "transport": _transport_for(config),
+            "codec": _codec_for(config), "version": VERSION,
+            "created_at": int(config.get("created_at", 0) or 0),
         })
     return result
 
 
-def create_profile(name, document_url, platform):
+def create_profile(name, document_url, platform, transport=TRANSPORT):
     if len(_extra_configs()) >= MAX_OPENFLUX_PROFILES:
         raise OpenFluxError("Достигнут лимит профилей OpenFlux.")
     profile_id = secrets.token_hex(8)
-    document_url = validate_document_url(document_url)
+    transport = _clean_transport(transport)
+    document_url = validate_document_url(document_url, transport)
+    platform = _clean_platform(platform)
     existing_urls = {item.get("url") for item in _extra_configs()}
     existing_urls.add(_load().get("url"))
     if document_url in existing_urls:
         raise OpenFluxError("Этот документ уже используется другим профилем OpenFlux.")
     config = {"id": profile_id, "name": _clean_profile_name(name),
-              "url": document_url, "platform": _clean_platform(platform),
-              "key": secrets.token_urlsafe(32), "enabled": True, "transport": TRANSPORT,
+              "url": document_url, "platform": platform,
+              "key": secrets.token_urlsafe(32), "enabled": True, "transport": transport,
               "codec": CODEC, "mode": MODE, "version": VERSION,
               "created_at": int(time.time()), "updated_at": int(time.time())}
     _write_extra_files(config)
@@ -551,7 +584,19 @@ def profile_rotate(profile_id):
 
 def delete_profile(profile_id):
     if profile_id == "main":
-        raise OpenFluxError("Основной профиль удаляется в настройках OpenFlux.")
+        config = _load()
+        if not config.get("url"):
+            raise OpenFluxError("Профиль OpenFlux не найден.")
+        _run(["systemctl", "disable", "--now", SERVICE], check=False)
+        for path in (STATE_FILE, URL_FILE, KEY_FILE, ENABLED_FILE):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        # Keep the unit template installed so a new main profile can be
+        # created later without reinstalling the panel.
+        install_service()
+        return
     profile_id = _extra_id(profile_id)
     paths = _extra_paths(profile_id)
     if not paths["state"].exists():

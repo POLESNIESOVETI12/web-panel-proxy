@@ -4,7 +4,7 @@ BASE="$(cd "$(dirname "$0")" && pwd)"
 umask 077
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-for file in install-panel.sh install-webproxy-core.sh uninstall-web-proxy.sh update.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py; do
+for file in install-panel.sh install-webproxy-core.sh uninstall-web-proxy.sh update.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py; do
     [[ -s "$BASE/$file" ]] || die "Package is incomplete: missing $file. Extract the complete archive."
 done
 [[ -s "$BASE/assets/OpenFlux-linux-amd64" || -s "$BASE/OpenFlux-linux-amd64" ]] ||
@@ -25,7 +25,7 @@ cleanup_credentials() {
 }
 trap cleanup_credentials EXIT
 
-echo "WEB PANEL PROXY V 2.4.0: preparing server..."
+echo "WEB PANEL PROXY V 2.4.1: preparing server..."
 
 PANEL_UPDATE=0
 if [[ -s /var/lib/tproxy-panel/data.json ]] &&
@@ -72,5 +72,5 @@ nft list table ip web_proxy_awg >/dev/null 2>&1 ||
 systemctl is-active --quiet web-panel-proxy-sync-tls.timer ||
     die "The Xray TLS synchronization timer did not start."
 echo "Installation complete."
-printf '%s\n' '2.4.0' > /etc/web-proxy-panel/version
+printf '%s\n' '2.4.1' > /etc/web-proxy-panel/version
 chmod 0600 /etc/web-proxy-panel/version

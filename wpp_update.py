@@ -70,6 +70,7 @@ def get_status():
         except (OSError, subprocess.TimeoutExpired): pass
     data['current'] = current_version()
     data['available'] = newer(data.get('latest', ''), data['current'])
+    data['can_install'] = bool(data.get('releases'))
     return data
 
 
@@ -96,22 +97,30 @@ def check_release():
             if r.returncode: raise ValueError('GitHub недоступен. Повторите позже.')
             tags = re.findall(r'refs/tags/(v\d+\.\d+\.\d+)\s*$', r.stdout, re.M)
             if not tags: raise ValueError('Опубликованные стабильные теги не найдены.')
-            latest = max(tags, key=version_tuple)
-            state.update(latest=latest, checked=int(time.time()), phase='checked', message='Проверка завершена.')
+            tags = sorted(set(tags), key=version_tuple, reverse=True)[:30]
+            latest = tags[0]
+            state.update(latest=latest, releases=tags, checked=int(time.time()), phase='checked', message='Версии загружены.')
         except (OSError, subprocess.TimeoutExpired):
             raise ValueError('Не удалось проверить GitHub. Повторите позже.')
         atomic_json(STATUS, state)
         return get_status()
 
 
-def start_update():
+def start_update(target=''):
     with _lock():
         state = get_status()
         if state.get('phase') in ('running', 'queued') or unit_running():
             raise ValueError('Обновление уже выполняется.')
-        if time.time() - state.get('checked', 0) > 600 or not state.get('available'):
-            raise ValueError('Сначала проверьте обновления. Нужен новый опубликованный стабильный релиз.')
-        state.update(phase='queued', target=state['latest'], started=int(time.time()), message='Обновление запускается. Панель временно отключится.')
+        releases=state.get('releases',[])
+        target=str(target or state.get('latest',''))
+        if time.time() - state.get('checked', 0) > 600 or target not in releases:
+            raise ValueError('Сначала обновите список и выберите опубликованный стабильный релиз.')
+        if target.lstrip('v') == current_version().lstrip('v'):
+            raise ValueError('Эта версия уже установлена.')
+        target_version, installed_version = version_tuple(target), version_tuple(current_version())
+        action = 'Откат' if target_version and installed_version and target_version < installed_version else 'Обновление'
+        state.update(phase='queued', target=target, started=int(time.time()),
+                     message=action+' запускается. Панель временно отключится.')
         atomic_json(STATUS, state)
         r = subprocess.run(['systemctl', 'start', '--no-block', UNIT], capture_output=True, text=True, timeout=10)
         if r.returncode:
@@ -126,8 +135,9 @@ def run_update():
     with _lock(blocking=True):
         state = read_state(STATUS)
         tag = state.get('target', '')
-        if state.get('phase') != 'queued' or time.time() - state.get('started', 0) > 120 or not newer(tag, current_version()):
-            raise ValueError('Нет подтверждённого нового релиза для установки.')
+        if (state.get('phase') != 'queued' or time.time() - state.get('started', 0) > 120 or
+                tag not in state.get('releases',[]) or not version_tuple(tag) or tag.lstrip('v')==current_version().lstrip('v')):
+            raise ValueError('Нет подтверждённого релиза для установки.')
         state.update(phase='running', message='Создание резервной копии и обновление. Подождите несколько минут.')
         atomic_json(STATUS, state)
     # Preserve status outside panel backup paths; run in a separate systemd unit.

@@ -109,7 +109,7 @@ fi
 MTPROTO_HOST="${MTPROTO_HOST:-$DOMAIN}"
 [[ -s "$PRIMARY_SECRET" ]] || die "Primary install-time secret not found."
 [[ -s "$LOGO_SOURCE" ]] || die "Panel logo file is missing: panel-logo.png"
-for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py; do
+for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py; do
     [[ -s "$BASE/$module" ]] || die "Missing panel module: $module; extract the complete archive."
 done
 FLAG_ARCHIVE="$BASE/wpp-panel/flags.tar.gz"
@@ -392,9 +392,9 @@ XRAY_PATH="$(cat "$XRAY_PATH_FILE")"
 [[ "$XRAY_PATH" =~ ^/vless-[a-f0-9]{24}$ ]] || die "Stored VLESS path is invalid."
 
 if [[ "$UPDATING" == "1" ]]; then
-    echo "Updating WEB PANEL PROXY V 2.4.0..."
+    echo "Updating WEB PANEL PROXY V 2.4.1..."
 else
-    echo "Configuring WEB PANEL PROXY V 2.4.0..."
+    echo "Configuring WEB PANEL PROXY V 2.4.1..."
 fi
 INSTALL_CREDENTIALS="/etc/web-proxy-panel/install-credentials"
 if [[ "$UPDATING" == "1" ]]; then
@@ -427,7 +427,7 @@ fi
 
 echo "[1/6] Writing manager..."
 
-for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py; do
+for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py; do
     [[ -s "$BASE/$module" ]] || die "Package is incomplete: $module is missing."
     install -o root -g root -m 0644 "$BASE/$module" "$APP_DIR/$module"
 done
@@ -474,6 +474,7 @@ import copy, fcntl, grp, json, os, re, secrets, shutil, subprocess, sys, time, u
 sys.path.insert(0,"/opt/tproxy-panel")
 from wpp_subscriptions import mutate as mutate_subscription, issue as issue_subscription, SubscriptionError
 import wpp_awg
+import wpp_firewall
 
 USERS="/etc/web-proxy-panel/users.json"
 PROFILES="/etc/tproxy-server/profiles.json"
@@ -692,99 +693,17 @@ def sync_firewall(d):
     os.chmod(tmp,0o750)
     os.replace(tmp,FIREWALL_SCRIPT)
     run(FIREWALL_SCRIPT,check=True)
-    if shutil.which("ufw"):
-        status=run("ufw","status").stdout or ""
-        if "Status: active" in status:
-            # Track only rules actually created by WPP, so deleting a client
-            # never removes a pre-existing administrator firewall rule.
-            previous_mt=set()
-            if os.path.exists(UFW_MTPROTO_MARKER):
-                try:
-                    previous_mt={int(x) for x in re.findall(r"\b\d{1,5}\b",open(UFW_MTPROTO_MARKER,encoding="ascii").read()) if 1 <= int(x) <= 65535}
-                except Exception:
-                    previous_mt=set()
-            desired_mt=set(mtproto_ports)
-            for port in sorted(previous_mt-desired_mt):
-                run("ufw","--force","delete","allow",str(port)+"/tcp")
-            owned_mt=previous_mt & desired_mt
-            status=run("ufw","status").stdout or ""
-            for port in sorted(desired_mt):
-                present=re.search(r"(?m)^%d/tcp\s+ALLOW\b" % port,status) is not None
-                if not present:
-                    added=run("ufw","--force","allow",str(port)+"/tcp","comment","WEB PANEL PROXY MTProto")
-                    if added.returncode:
-                        raise RuntimeError("Could not open MTProto in UFW: "+(added.stderr or added.stdout)[-1000:])
-                    owned_mt.add(port)
-            if owned_mt:
-                with open(UFW_MTPROTO_MARKER,"w",encoding="ascii") as f: f.write("".join(str(p)+"\n" for p in sorted(owned_mt)))
-                os.chmod(UFW_MTPROTO_MARKER,0o600)
-            elif os.path.exists(UFW_MTPROTO_MARKER):
-                os.unlink(UFW_MTPROTO_MARKER)
-            previous=[]
-            if os.path.exists(UFW_HYSTERIA_MARKER):
-                try:
-                    marker=open(UFW_HYSTERIA_MARKER,encoding="ascii").read()
-                    previous=[int(x) for x in re.findall(r"\b\d{1,5}\b",marker) if 1 <= int(x) <= 65535]
-                    if not previous and marker.strip()=="owned": previous=[HYSTERIA_PORT]
-                except Exception:
-                    previous=[]
-            # Close only ports recorded as owned by WEB PANEL PROXY.  This also
-            # removes experimental V2.2 Hysteria ports during a stable rollback.
-            for port in sorted(set(previous)-({HYSTERIA_PORT} if hysteria_enabled else set())):
-                run("ufw","--force","delete","allow",str(port)+"/udp")
-            status=run("ufw","status").stdout or ""
-            present=re.search(r"(?m)^%d/udp\s+ALLOW\b" % HYSTERIA_PORT,status) is not None
-            if hysteria_enabled and not present:
-                added=run("ufw","--force","allow",str(HYSTERIA_PORT)+"/udp","comment","WEB PANEL PROXY Hysteria 2")
-                if added.returncode:
-                    raise RuntimeError("Could not open Hysteria 2 in UFW: "+(added.stderr or added.stdout)[-1000:])
-            if hysteria_enabled:
-                with open(UFW_HYSTERIA_MARKER,"w",encoding="ascii") as f: f.write(str(HYSTERIA_PORT)+"\n")
-                os.chmod(UFW_HYSTERIA_MARKER,0o600)
-            elif os.path.exists(UFW_HYSTERIA_MARKER):
-                os.unlink(UFW_HYSTERIA_MARKER)
-            previous_awg=set()
-            if os.path.exists(UFW_AWG_MARKER):
-                try:
-                    previous_awg={int(x) for x in re.findall(r"\b\d{1,5}\b",open(UFW_AWG_MARKER,encoding="ascii").read()) if 1 <= int(x) <= 65535}
-                except Exception: previous_awg=set()
-            desired_awg={int(u["backend_port"]) for u in awg_users}
-            for port in sorted(previous_awg-desired_awg):
-                run("ufw","--force","delete","allow",str(port)+"/udp")
-            owned_awg=previous_awg & desired_awg
-            status=run("ufw","status").stdout or ""
-            for port in sorted(desired_awg):
-                if re.search(r"(?m)^%d/udp\s+ALLOW\b" % port,status) is None:
-                    added=run("ufw","--force","allow",str(port)+"/udp","comment","WEB PANEL PROXY AWG")
-                    if added.returncode: raise RuntimeError("Could not open AWG in UFW: "+(added.stderr or added.stdout)[-1000:])
-                    owned_awg.add(port)
-            if owned_awg:
-                with open(UFW_AWG_MARKER,"w",encoding="ascii") as f: f.write("".join(str(p)+"\n" for p in sorted(owned_awg)))
-                os.chmod(UFW_AWG_MARKER,0o600)
-            elif os.path.exists(UFW_AWG_MARKER): os.unlink(UFW_AWG_MARKER)
-            route=run("ip","-4","route","show","default").stdout or ""
-            match=re.search(r"\bdev\s+([A-Za-z0-9_.:-]+)",route)
-            external_if=match.group(1) if match else ""
-            previous_routes=set()
-            if os.path.exists(UFW_AWG_ROUTE_MARKER):
-                try:
-                    for row in open(UFW_AWG_ROUTE_MARKER,encoding="ascii"):
-                        parts=row.split()
-                        if len(parts)==2: previous_routes.add(tuple(parts))
-                except Exception: previous_routes=set()
-            desired_routes={(u["awg_interface"],external_if) for u in awg_users if external_if}
-            for iface,out_if in sorted(previous_routes-desired_routes):
-                run("ufw","--force","route","delete","allow","in","on",iface,"out","on",out_if)
-            owned_routes=previous_routes & desired_routes
-            for iface,out_if in sorted(desired_routes-owned_routes):
-                added=run("ufw","--force","route","allow","in","on",iface,"out","on",out_if,"comment","WEB PANEL PROXY AWG")
-                if added.returncode: raise RuntimeError("Could not allow AWG forwarding in UFW: "+(added.stderr or added.stdout)[-1000:])
-                owned_routes.add((iface,out_if))
-            if owned_routes:
-                with open(UFW_AWG_ROUTE_MARKER,"w",encoding="ascii") as f:
-                    f.write("".join("%s %s\n"%item for item in sorted(owned_routes)))
-                os.chmod(UFW_AWG_ROUTE_MARKER,0o600)
-            elif os.path.exists(UFW_AWG_ROUTE_MARKER): os.unlink(UFW_AWG_ROUTE_MARKER)
+    # UFW output is localized on many VPS images, so all UFW state management
+    # lives in wpp_firewall and reads /etc/ufw/ufw.conf instead.  Fixed HTTPS
+    # ports and every dynamic client port are reconciled in one transaction.
+    route=run("ip","-4","route","show","default").stdout or ""
+    match=re.search(r"\bdev\s+([A-Za-z0-9_.:-]+)",route)
+    external_if=match.group(1) if match else ""
+    wpp_firewall.reconcile(
+        tcp={80,443,*mtproto_ports},
+        udp=({HYSTERIA_PORT} if hysteria_enabled else set()) | {int(u["backend_port"]) for u in awg_users},
+        routes={(u["awg_interface"],external_if) for u in awg_users if external_if},
+    )
 
 def sync_profiles(d):
     with open(PROFILES,encoding="utf-8") as f:
@@ -1696,9 +1615,10 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 from collections import defaultdict, deque
 from wpp_subscriptions import PREFIX as SUB_PREFIX
 from wpp_panel_extras import preview_document
-from wpp_ui import page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, openflux_ui, client_records, nodes_ui
+from wpp_ui import page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, openflux_ui, client_records, nodes_ui, updates_ui, openflux_import_uri
 import wpp_metrics as server_metrics
 import wpp_update as web_updates
+import wpp_components as components
 import wpp_nodes as node_api
 import wpp_openflux as openflux
 import wpp_awg as awg
@@ -2277,7 +2197,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.api_auth(): return
             if path==node_api.API_PREFIX+"/status":
                 loc=node_api.load_location(LOCATION_FILE)
-                self.send_json({"ok":True,"api_version":1,"version":"2.4.0","domain":DOMAIN,
+                self.send_json({"ok":True,"api_version":1,"version":"2.4.1","domain":DOMAIN,
                     "location":loc,"capabilities":["vless","hysteria","awg20","awg31","federation"]}); return
             if path==node_api.API_PREFIX+"/profiles":
                 result=[]
@@ -2346,8 +2266,12 @@ class Handler(BaseHTTPRequestHandler):
         if path==PANEL_PATH+'/clients-state':
             profiles=[{'id':'primary','name':'Основной WEB Proxy','secret':primary(),'protocol':'web','enabled':True,'backend_port':443}]+users()
             records=client_records(subscription_registry(),profiles,traffic(),DOMAIN,proxy_link)
-            self.send_json({'clients':[{'id':r['id'],'name':r['name'],'kind':r['kind'],'enabled':r['enabled'],
-                'protocols':r['protocols'],'devices':r['devices'],'limit':r['limit'],**r['totals']} for r in records]})
+            clients=[{'id':r['id'],'name':r['name'],'kind':r['kind'],'enabled':r['enabled'],
+                'protocols':r['protocols'],'devices':r['devices'],'limit':r['limit'],**r['totals']} for r in records]
+            clients.extend({'id':'openflux-'+p['id'],'name':p.get('name','OpenFlux'),'kind':'openflux',
+                'enabled':bool(p.get('enabled',True)),'protocols':['openflux'],'devices':0,'limit':0,
+                'up':0,'down':0,'active':bool(p.get('active',False))} for p in openflux.profile_states())
+            self.send_json({'clients':clients})
             return
 
         if path==PANEL_PATH+"/users":
@@ -2358,10 +2282,22 @@ class Handler(BaseHTTPRequestHandler):
             body=nodes_ui([node_api.public_node(n) for n in node_api.load_nodes(NODES_FILE)],
                           node_api.load_location(LOCATION_FILE),node_api.make_connection_token(DOMAIN,API_KEY),PANEL_PATH,self.csrf())
             self.send_html(layout("Ноды",body,"nodes")); return
+        if path==PANEL_PATH+"/updates":
+            self.send_html(layout("Обновления",updates_ui(PANEL_PATH,self.csrf(),web_updates.current_version()),"updates")); return
         if path==PANEL_PATH+"/subscriptions":
             self.redirect("/users"); return
         if path==PANEL_PATH+"/update-status":
             self.send_json(web_updates.get_status()); return
+        if path==PANEL_PATH+"/component-status":
+            self.send_json(components.status()); return
+        if path==PANEL_PATH+"/openflux-qr":
+            profile_id=parse_qs(urlparse(self.path).query).get("id",[""])[0]
+            profile=next((item for item in openflux.profile_states() if item.get("id")==profile_id),None)
+            if profile is None: self.send_html("Not found",404); return
+            try: self.send_png(qr_png_bytes(openflux_import_uri(profile)))
+            except (OSError,subprocess.SubprocessError):
+                self.send_json({'message':'Не удалось сформировать QR OpenFlux. Проверьте qrencode на сервере.'},503)
+            return
         if path==PANEL_PATH+"/subscription-qr":
             sid=parse_qs(urlparse(self.path).query).get("id",[""])[0]
             sub=next((s for s in subscription_registry() if s["id"]==sid),None)
@@ -2512,10 +2448,21 @@ class Handler(BaseHTTPRequestHandler):
 
         if path in (PANEL_PATH+"/update-check",PANEL_PATH+"/update-start"):
             try:
-                result=web_updates.start_update() if path.endswith("/update-start") else web_updates.check_release()
+                result=web_updates.start_update(form.get("target","")) if path.endswith("/update-start") else web_updates.check_release()
                 self.send_json(result)
             except ValueError as exc: self.send_json({"message":str(exc)},400)
             except (OSError,subprocess.TimeoutExpired): self.send_json({"message":"Служба обновления недоступна. Проверьте VPS через SSH."},503)
+            return
+
+        if path in (PANEL_PATH+"/component-check",PANEL_PATH+"/component-install"):
+            try:
+                result=(components.start(form.get("component",""),form.get("target",""))
+                        if path.endswith("/component-install") else components.catalog(force=True))
+                self.send_json(result)
+            except ValueError as exc:
+                self.send_json({"message":str(exc)},400)
+            except (OSError,subprocess.TimeoutExpired):
+                self.send_json({"message":"Не удалось связаться с GitHub или службой обновления."},503)
             return
 
         if path==PANEL_PATH+"/node-action":
@@ -2544,15 +2491,19 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path==PANEL_PATH+"/create-account":
+            async_create=self.headers.get("X-WPP-Async","")=="1"
+            def create_error(message,status=400):
+                if async_create: self.send_json({"ok":False,"message":str(message)},status)
+                else: self.send_html(esc(str(message)),status)
             name=form.get("name","").strip()
             kind=form.get("kind","")
             if not name or len(name)>80 or any(ord(c)<32 for c in name):
-                self.send_html("Укажите имя длиной от 1 до 80 символов.",400); return
+                create_error("Укажите имя длиной от 1 до 80 символов."); return
             if kind=="subscription":
                 result=ctl_subscription({"operation":"create","name":name,"max_devices":form.get("max_devices","2"),
                                          "protocols":[p for p in ("vless","hysteria") if form.get(p)=="1"]})
                 if not result.get("ok"):
-                    self.send_html(esc(result.get("message","Ошибка создания подписки")),int(result.get("status",400))); return
+                    create_error(result.get("message","Ошибка создания подписки"),int(result.get("status",400))); return
             elif kind in ("web","mtproto","vless","hysteria","awg20","awg31"):
                 try:
                     if kind=="mtproto":
@@ -2560,13 +2511,15 @@ class Handler(BaseHTTPRequestHandler):
                             "port":form.get("mtproto_port",""),"devices":form.get("mtproto_devices","1")})
                     else: ctl("add",kind,name)
                 except ValueError as exc:
-                    self.send_html(esc(str(exc)),400); return
+                    create_error(str(exc)); return
                 except Exception as exc:
                     print("create connection failed:",type(exc).__name__,file=sys.stderr,flush=True)
-                    self.send_html("Не удалось создать подключение. Проверьте службы через SSH и повторите попытку.",503); return
+                    create_error("Не удалось создать подключение. Проверьте службы через SSH и повторите попытку.",503); return
             else:
-                self.send_html("Неизвестный тип доступа",400); return
-            self.redirect("/users"); return
+                create_error("Неизвестный тип доступа"); return
+            if async_create: self.send_json({"ok":True})
+            else: self.redirect("/users")
+            return
 
         if path==PANEL_PATH+"/openflux":
             operation=form.get("operation","")
@@ -2586,7 +2539,7 @@ class Handler(BaseHTTPRequestHandler):
             operation=form.get("operation","")
             try:
                 if operation=="create":
-                    openflux.create_profile(form.get("name",""),form.get("url",""),form.get("platform",""))
+                    openflux.create_profile(form.get("name",""),form.get("url",""),form.get("platform",""),form.get("transport","yandex"))
                 elif operation=="enable": openflux.profile_set_enabled(form.get("id",""),True)
                 elif operation=="disable": openflux.profile_set_enabled(form.get("id",""),False)
                 elif operation=="rotate": openflux.profile_rotate(form.get("id",""))
@@ -2849,7 +2802,7 @@ PY
 fi
 
 python3 -m py_compile "$APP_FILE"
-python3 -m py_compile "$APP_DIR/wpp_subscriptions.py" "$APP_DIR/wpp_panel_extras.py" "$APP_DIR/wpp_ui.py" "$APP_DIR/wpp_metrics.py" "$APP_DIR/wpp_update.py" "$APP_DIR/wpp_nodes.py" "$APP_DIR/wpp_openflux.py" "$APP_DIR/wpp_awg.py"
+python3 -m py_compile "$APP_DIR/wpp_subscriptions.py" "$APP_DIR/wpp_panel_extras.py" "$APP_DIR/wpp_ui.py" "$APP_DIR/wpp_metrics.py" "$APP_DIR/wpp_update.py" "$APP_DIR/wpp_nodes.py" "$APP_DIR/wpp_openflux.py" "$APP_DIR/wpp_awg.py" "$APP_DIR/wpp_firewall.py" "$APP_DIR/wpp_components.py"
 
 
 # ---- Finish installation: service, Caddy route, permissions, start ----
@@ -2889,7 +2842,7 @@ fi
 echo "[4/6] Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=WEB PANEL PROXY V 2.4.0
+Description=WEB PANEL PROXY V 2.4.1
 After=network-online.target caddy.service tproxy-server.service mtproxy.service web-proxy-panel-firewall.service
 Wants=network-online.target
 Requires=web-proxy-panel-firewall.service
@@ -2932,6 +2885,21 @@ TimeoutStartSec=infinity
 # No Install section: this unit runs only after an authenticated admin request.
 UNIT
 chmod 0644 /etc/systemd/system/web-panel-proxy-web-update.service
+cat > /etc/systemd/system/web-panel-proxy-component-update.service <<'UNIT'
+[Unit]
+Description=WEB PANEL PROXY component version manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/tproxy-panel/wpp_components.py run
+TimeoutStartSec=infinity
+UNIT
+chmod 0644 /etc/systemd/system/web-panel-proxy-component-update.service
 cat > /usr/local/sbin/WPP <<'WPP'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -2978,7 +2946,7 @@ unlock_changes(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 show_info(){
     local d p version
-    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.4.0')"
+    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.4.1')"
     echo
     echo "============================================================"
     echo "                 WEB PANEL PROXY"
@@ -3427,9 +3395,9 @@ fi
 echo
 echo "============================================================"
 if [[ "$UPDATING" == "1" ]]; then
-echo "          WEB PANEL PROXY V 2.4.0 UPDATED"
+echo "          WEB PANEL PROXY V 2.4.1 UPDATED"
 else
-echo "         WEB PANEL PROXY V 2.4.0 IS READY"
+echo "         WEB PANEL PROXY V 2.4.1 IS READY"
 fi
 echo "============================================================"
 echo

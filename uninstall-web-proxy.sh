@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# WEB PANEL PROXY V 2.4.0 complete removal utility.
+# WEB PANEL PROXY V 2.4.1 complete removal utility.
 set -Eeuo pipefail
 
 [[ ${EUID:-1} -eq 0 ]] || { echo "Run this script as root." >&2; exit 1; }
@@ -7,8 +7,8 @@ command -v flock >/dev/null 2>&1 || { echo "flock is required (package: util-lin
 exec 9>/run/lock/web-panel-proxy.lock
 flock -n 9 || { echo "Another WEB PANEL PROXY install, update or removal is already running." >&2; exit 1; }
 
-echo "WEB PANEL PROXY V 2.4.0 — complete removal"
-echo "Removing all WEB PANEL PROXY V 2.4.0 components..."
+echo "WEB PANEL PROXY V 2.4.1 — complete removal"
+echo "Removing all WEB PANEL PROXY V 2.4.1 components..."
 
 DOMAIN="$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' /etc/systemd/system/caddy.service.d/tproxy.conf 2>/dev/null | head -n1 || true)"
 CADDY_MARKER="$(cat /etc/web-proxy-panel/caddy-owned 2>/dev/null || true)"
@@ -49,6 +49,7 @@ fi
 echo "Stopping services..."
 for unit in \
   web-panel-proxy-web-update.service \
+  web-panel-proxy-component-update.service \
   web-panel-proxy-metrics.timer web-panel-proxy-metrics.service \
   tproxy-panel.service web-proxy-panel.service web-proxy-panel-mtproxy.service \
   web-proxy-panel-firewall.service web-proxy-panel-traffic.timer web-proxy-panel-traffic.service web-panel-proxy-xray.service \
@@ -193,7 +194,10 @@ PY
   [[ "$PRESERVE_CADDY" == 1 ]] && rm -f -- /etc/caddy/Caddyfile.before-web-panel-proxy
 fi
 
-echo "Removing WEB PANEL PROXY V 2.4.0 files..."
+echo "Removing WEB PANEL PROXY V 2.4.1 files..."
+if [[ -s /opt/tproxy-panel/wpp_firewall.py ]]; then
+  PYTHONPATH=/opt/tproxy-panel python3 -c 'import wpp_firewall; wpp_firewall.purge()' 2>/dev/null || true
+fi
 systemctl disable --now web-panel-proxy-openflux.service 2>/dev/null || true
 for unit in /etc/systemd/system/web-panel-proxy-openflux-*.service; do
   [[ -e "$unit" ]] || continue
@@ -202,6 +206,7 @@ for unit in /etc/systemd/system/web-panel-proxy-openflux-*.service; do
 done
 rm -f -- \
   /etc/systemd/system/web-panel-proxy-web-update.service \
+  /etc/systemd/system/web-panel-proxy-component-update.service \
   /etc/systemd/system/web-panel-proxy-metrics.service \
   /etc/systemd/system/web-panel-proxy-metrics.timer \
   /etc/systemd/system/tproxy-panel.service \
@@ -240,6 +245,7 @@ rm -f -- \
 
 rm -rf -- \
   /var/lib/web-panel-proxy-update \
+  /var/lib/web-panel-proxy-components \
   /etc/systemd/system/mtproxy.service.d \
   /etc/tproxy-server \
   /etc/mtproxy \
@@ -289,7 +295,7 @@ elif [[ "$PRESERVE_CADDY" == 1 ]]; then
 else
   rm -f -- /etc/systemd/system/caddy.service.d/tproxy.conf
   rmdir /etc/systemd/system/caddy.service.d 2>/dev/null || true
-  echo "Caddy was preserved because it was not marked as installed by WEB PANEL PROXY V 2.4.0."
+  echo "Caddy was preserved because it was not marked as installed by WEB PANEL PROXY V 2.4.1."
 fi
 
 id mtproxy >/dev/null 2>&1 && userdel mtproxy 2>/dev/null || true
@@ -300,4 +306,4 @@ id wpp-openflux >/dev/null 2>&1 && userdel wpp-openflux 2>/dev/null || true
 
 systemctl daemon-reload
 systemctl reset-failed 2>/dev/null || true
-echo "WEB PANEL PROXY V 2.4.0 has been removed."
+echo "WEB PANEL PROXY V 2.4.1 has been removed."
