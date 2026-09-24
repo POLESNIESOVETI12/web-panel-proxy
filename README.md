@@ -2,7 +2,7 @@
   <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
 </p>
 
-<h1 align="center">WEB PANEL PROXY 2.4.1</h1>
+<h1 align="center">WEB PANEL PROXY 2.4.2</h1>
 
 <p align="center">WEB Proxy, MTProto, VLESS XHTTP, Hysteria2, AWG 2.0 / 3.1, OpenFlux и удобная панель управления для собственного VPS</p>
 
@@ -16,6 +16,14 @@
 - Автоматическое определение страны и города ноды с отображением флага.
 - Готовые HTML-заглушки и собственные страницы с HTML, CSS, JavaScript, SEO и аналитикой.
 - Проверка обновлений и безопасное обновление с резервной копией настроек.
+
+## Что нового в 2.4.2
+
+- Исправлена кнопка «Добавить клиента» после объединения обычных подключений и OpenFlux в одном списке.
+- Удаление, переключение доступа и переименование клиентов выполняются без полной перезагрузки страницы.
+- Создание и изменение подключений ускорены: панель перезапускает только затронутые службы, а не весь набор протоколов.
+- Очистка клиентских профилей на удалённых нодах выполняется в фоне и больше не задерживает интерфейс.
+- Добавлена понятная индикация выполняемой операции непосредственно в строке клиента.
 
 ## Что нового в 2.4.1
 
@@ -49,7 +57,7 @@ sudo -i
 ### Установка
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=600 update && apt-get -o DPkg::Lock::Timeout=600 install -y git ca-certificates && WPP_DIR="$(mktemp -d /root/wpp-install.XXXXXX)" && git clone --depth 1 --branch v2.4.1 https://github.com/POLESNIESOVETI12/web-panel-proxy.git "$WPP_DIR" && cd "$WPP_DIR" && bash ./install-final.sh
+apt-get -o DPkg::Lock::Timeout=600 update && apt-get -o DPkg::Lock::Timeout=600 install -y git ca-certificates && WPP_DIR="$(mktemp -d /root/wpp-install.XXXXXX)" && git clone --depth 1 --branch v2.4.2 https://github.com/POLESNIESOVETI12/web-panel-proxy.git "$WPP_DIR" && cd "$WPP_DIR" && bash ./install-final.sh
 ```
 
 Команда загружает релиз непосредственно с GitHub и не использует `raw.githubusercontent.com`. Установщик запросит домен, email для HTTPS-сертификата, логин и пароль панели. После установки он покажет адрес панели и данные для входа.

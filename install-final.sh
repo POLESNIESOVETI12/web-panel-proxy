@@ -25,7 +25,7 @@ cleanup_credentials() {
 }
 trap cleanup_credentials EXIT
 
-echo "WEB PANEL PROXY V 2.4.1: preparing server..."
+echo "WEB PANEL PROXY V 2.4.2: preparing server..."
 
 PANEL_UPDATE=0
 if [[ -s /var/lib/tproxy-panel/data.json ]] &&
@@ -72,5 +72,5 @@ nft list table ip web_proxy_awg >/dev/null 2>&1 ||
 systemctl is-active --quiet web-panel-proxy-sync-tls.timer ||
     die "The Xray TLS synchronization timer did not start."
 echo "Installation complete."
-printf '%s\n' '2.4.1' > /etc/web-proxy-panel/version
+printf '%s\n' '2.4.2' > /etc/web-proxy-panel/version
 chmod 0600 /etc/web-proxy-panel/version
