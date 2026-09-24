@@ -392,9 +392,9 @@ XRAY_PATH="$(cat "$XRAY_PATH_FILE")"
 [[ "$XRAY_PATH" =~ ^/vless-[a-f0-9]{24}$ ]] || die "Stored VLESS path is invalid."
 
 if [[ "$UPDATING" == "1" ]]; then
-    echo "Updating WEB PANEL PROXY V 2.4.1..."
+    echo "Updating WEB PANEL PROXY V 2.4.0..."
 else
-    echo "Configuring WEB PANEL PROXY V 2.4.1..."
+    echo "Configuring WEB PANEL PROXY V 2.4.0..."
 fi
 INSTALL_CREDENTIALS="/etc/web-proxy-panel/install-credentials"
 if [[ "$UPDATING" == "1" ]]; then
@@ -510,17 +510,6 @@ def run(*args, check=False, timeout=60):
     if check and p.returncode:
         raise RuntimeError(p.stderr.strip() or "command failed")
     return p
-
-def ufw_rules():
-    """Return active and persisted UFW rules, including when UFW is disabled."""
-    active=run("ufw","status").stdout or ""
-    persisted=run("ufw","show","added").stdout or ""
-    return active+"\n"+persisted
-
-def ufw_has_allow(rules,port,protocol):
-    port=int(port); protocol=str(protocol)
-    return (re.search(r"(?m)^%d/%s\s+ALLOW\b"%(port,protocol),rules) is not None or
-            re.search(r"(?m)^ufw\s+allow\s+%d/%s(?:\s|$)"%(port,protocol),rules) is not None)
 
 def load():
     try:
@@ -705,11 +694,7 @@ def sync_firewall(d):
     run(FIREWALL_SCRIPT,check=True)
     if shutil.which("ufw"):
         status=run("ufw","status").stdout or ""
-        # Manage the persistent UFW rules even while UFW is disabled. This
-        # makes ports available when an administrator enables UFW later and
-        # avoids depending on the localized text printed by `ufw status`.
-        # /etc/ufw/ufw.conf exists for every normal UFW installation.
-        if "Status: active" in status or os.path.exists("/etc/ufw/ufw.conf"):
+        if "Status: active" in status:
             # Track only rules actually created by WPP, so deleting a client
             # never removes a pre-existing administrator firewall rule.
             previous_mt=set()
@@ -722,9 +707,9 @@ def sync_firewall(d):
             for port in sorted(previous_mt-desired_mt):
                 run("ufw","--force","delete","allow",str(port)+"/tcp")
             owned_mt=previous_mt & desired_mt
-            status=ufw_rules()
+            status=run("ufw","status").stdout or ""
             for port in sorted(desired_mt):
-                present=ufw_has_allow(status,port,"tcp")
+                present=re.search(r"(?m)^%d/tcp\s+ALLOW\b" % port,status) is not None
                 if not present:
                     added=run("ufw","--force","allow",str(port)+"/tcp","comment","WEB PANEL PROXY MTProto")
                     if added.returncode:
@@ -747,15 +732,13 @@ def sync_firewall(d):
             # removes experimental V2.2 Hysteria ports during a stable rollback.
             for port in sorted(set(previous)-({HYSTERIA_PORT} if hysteria_enabled else set())):
                 run("ufw","--force","delete","allow",str(port)+"/udp")
-            status=ufw_rules()
-            present=ufw_has_allow(status,HYSTERIA_PORT,"udp")
-            owned_hysteria=HYSTERIA_PORT in previous
+            status=run("ufw","status").stdout or ""
+            present=re.search(r"(?m)^%d/udp\s+ALLOW\b" % HYSTERIA_PORT,status) is not None
             if hysteria_enabled and not present:
                 added=run("ufw","--force","allow",str(HYSTERIA_PORT)+"/udp","comment","WEB PANEL PROXY Hysteria 2")
                 if added.returncode:
                     raise RuntimeError("Could not open Hysteria 2 in UFW: "+(added.stderr or added.stdout)[-1000:])
-                owned_hysteria=True
-            if hysteria_enabled and owned_hysteria:
+            if hysteria_enabled:
                 with open(UFW_HYSTERIA_MARKER,"w",encoding="ascii") as f: f.write(str(HYSTERIA_PORT)+"\n")
                 os.chmod(UFW_HYSTERIA_MARKER,0o600)
             elif os.path.exists(UFW_HYSTERIA_MARKER):
@@ -769,9 +752,9 @@ def sync_firewall(d):
             for port in sorted(previous_awg-desired_awg):
                 run("ufw","--force","delete","allow",str(port)+"/udp")
             owned_awg=previous_awg & desired_awg
-            status=ufw_rules()
+            status=run("ufw","status").stdout or ""
             for port in sorted(desired_awg):
-                if not ufw_has_allow(status,port,"udp"):
+                if re.search(r"(?m)^%d/udp\s+ALLOW\b" % port,status) is None:
                     added=run("ufw","--force","allow",str(port)+"/udp","comment","WEB PANEL PROXY AWG")
                     if added.returncode: raise RuntimeError("Could not open AWG in UFW: "+(added.stderr or added.stdout)[-1000:])
                     owned_awg.add(port)
@@ -1444,7 +1427,7 @@ chmod 0755 "$MANAGER"
 cat > "$FIREWALL_SERVICE_FILE" <<'EOF'
 [Unit]
 Description=WEB PANEL PROXY persistent user-port firewall
-After=ufw.service nftables.service
+After=nftables.service
 PartOf=nftables.service
 Before=network-online.target tproxy-panel.service
 
@@ -2294,7 +2277,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.api_auth(): return
             if path==node_api.API_PREFIX+"/status":
                 loc=node_api.load_location(LOCATION_FILE)
-                self.send_json({"ok":True,"api_version":1,"version":"2.4.1","domain":DOMAIN,
+                self.send_json({"ok":True,"api_version":1,"version":"2.4.0","domain":DOMAIN,
                     "location":loc,"capabilities":["vless","hysteria","awg20","awg31","federation"]}); return
             if path==node_api.API_PREFIX+"/profiles":
                 result=[]
@@ -2906,7 +2889,7 @@ fi
 echo "[4/6] Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=WEB PANEL PROXY V 2.4.1
+Description=WEB PANEL PROXY V 2.4.0
 After=network-online.target caddy.service tproxy-server.service mtproxy.service web-proxy-panel-firewall.service
 Wants=network-online.target
 Requires=web-proxy-panel-firewall.service
@@ -2995,7 +2978,7 @@ unlock_changes(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 show_info(){
     local d p version
-    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.4.1')"
+    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.4.0')"
     echo
     echo "============================================================"
     echo "                 WEB PANEL PROXY"
@@ -3444,9 +3427,9 @@ fi
 echo
 echo "============================================================"
 if [[ "$UPDATING" == "1" ]]; then
-echo "          WEB PANEL PROXY V 2.4.1 UPDATED"
+echo "          WEB PANEL PROXY V 2.4.0 UPDATED"
 else
-echo "         WEB PANEL PROXY V 2.4.1 IS READY"
+echo "         WEB PANEL PROXY V 2.4.0 IS READY"
 fi
 echo "============================================================"
 echo

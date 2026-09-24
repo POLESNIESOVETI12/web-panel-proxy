@@ -2,7 +2,7 @@
   <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
 </p>
 
-<h1 align="center">WEB PANEL PROXY 2.4.1</h1>
+<h1 align="center">WEB PANEL PROXY 2.4.0</h1>
 
 <p align="center">WEB Proxy, MTProto, VLESS XHTTP, Hysteria2, AWG 2.0 / 3.1, OpenFlux и удобная панель управления для собственного VPS</p>
 
@@ -37,7 +37,7 @@ sudo -i
 ### Установка
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=600 update && apt-get -o DPkg::Lock::Timeout=600 install -y git ca-certificates && WPP_DIR="$(mktemp -d /root/wpp-install.XXXXXX)" && git clone --depth 1 --branch v2.4.1 https://github.com/POLESNIESOVETI12/web-panel-proxy.git "$WPP_DIR" && cd "$WPP_DIR" && bash ./install-final.sh
+apt-get -o DPkg::Lock::Timeout=600 update && apt-get -o DPkg::Lock::Timeout=600 install -y git ca-certificates && WPP_DIR="$(mktemp -d /root/wpp-install.XXXXXX)" && git clone --depth 1 --branch v2.4.0 https://github.com/POLESNIESOVETI12/web-panel-proxy.git "$WPP_DIR" && cd "$WPP_DIR" && bash ./install-final.sh
 ```
 
 Команда загружает релиз непосредственно с GitHub и не использует `raw.githubusercontent.com`. Установщик запросит домен, email для HTTPS-сертификата, логин и пароль панели. После установки он покажет адрес панели и данные для входа.
