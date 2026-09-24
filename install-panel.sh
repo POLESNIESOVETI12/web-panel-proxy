@@ -929,7 +929,7 @@ def remove_old_units(d):
             try: os.remove(os.path.join(UNIT_DIR,name))
             except FileNotFoundError: pass
 
-def apply(d,restart=True):
+def apply(d,restart=True,previous=None):
     with open(PROFILES,encoding="utf-8") as f:
         old_profiles=f.read()
     if os.path.exists(XRAY_CONFIG):
@@ -939,19 +939,29 @@ def apply(d,restart=True):
         old_xray=None
     with open(CADDYFILE,encoding="utf-8") as f:
         old_caddy=f.read()
-    old_users=load()
+    old_users=copy.deepcopy(previous) if previous is not None else load()
+    force=previous is None
+    old_by_id={u.get("id"):u for u in old_users.get("users",[])}
+    new_by_id={u.get("id"):u for u in d.get("users",[])}
+    changed_ids={uid for uid in set(old_by_id)|set(new_by_id) if old_by_id.get(uid)!=new_by_id.get(uid)}
+    def protocol_changed(*protocols):
+        return force or any((old_by_id.get(uid) or new_by_id.get(uid) or {}).get("protocol","web") in protocols for uid in changed_ids)
+    direct_changed=protocol_changed("web","mtproto")
+    web_changed=protocol_changed("web")
+    xray_changed=protocol_changed("vless","hysteria")
+    awg_changed=protocol_changed(*wpp_awg.PROTOCOLS)
     try:
         for u in d["users"]:
             if u.get("enabled",True): write_unit(u)
         remove_old_units(d)
-        sync_profiles(d)
+        if web_changed: sync_profiles(d)
         sync_firewall(d)
-        run("systemctl","daemon-reload",check=True)
-        sync_xray(d)
-        wpp_awg.sync(d["users"])
+        if direct_changed: run("systemctl","daemon-reload",check=True)
+        if xray_changed: sync_xray(d)
+        if awg_changed: wpp_awg.sync(d["users"])
         if restart:
             for u in d["users"]:
-                if u.get("enabled",True) and u.get("protocol","web") in ("web","mtproto"):
+                if (u.get("id") in changed_ids or force) and u.get("enabled",True) and u.get("protocol","web") in ("web","mtproto"):
                     unit="web-proxy-user-"+u["id"]+".service"
                     run("systemctl","enable",unit,check=True)
                     run("systemctl","restart",unit,check=True)
@@ -965,7 +975,7 @@ def apply(d,restart=True):
                     if chk.returncode:
                         st=run("systemctl","status",unit,"--no-pager","--full")
                         raise RuntimeError("User MTProxy is active but backend port is not listening: "+(st.stdout or st.stderr)[-2000:])
-            run("systemctl","restart","tproxy-server.service",check=True)
+            if web_changed: run("systemctl","restart","tproxy-server.service",check=True)
     except Exception:
         with open(PROFILES,"w",encoding="utf-8") as f: f.write(old_profiles)
         os.chmod(PROFILES,0o400)
@@ -987,7 +997,7 @@ def apply(d,restart=True):
         run("systemctl","reload","caddy.service",check=False)
         try:
             sync_firewall(old_users)
-            wpp_awg.sync(old_users.get("users",[]))
+            if awg_changed: wpp_awg.sync(old_users.get("users",[]))
         except Exception:
             pass
         raise
@@ -1030,13 +1040,13 @@ def add(protocol,name,requested_port=None,device_count=1):
     d["users"].append(u)
     save(d)
     try:
-        apply(d,True)
+        apply(d,True,before)
     except Exception:
         # Re-apply the saved state so that a failed new unit is stopped and
         # deleted. Without this rollback a restart loop holds the same port
         # and every following attempt to create a user fails as well.
         save(before)
-        try: apply(before,True)
+        try: apply(before,True,d)
         except Exception: pass
         raise
     print(json.dumps(u,ensure_ascii=True))
@@ -1077,10 +1087,10 @@ def federation_sync(request):
             "backend_port":443 if protocol=="vless" else HYSTERIA_PORT,
             "federation_id":external_id,"created_at":int(time.time())})
     save(d)
-    try: apply(d,True)
+    try: apply(d,True,before)
     except Exception:
         save(before)
-        try: apply(before,True)
+        try: apply(before,True,d)
         except Exception: pass
         raise
     print(json.dumps({"ok":True,"profiles":[u for u in d["users"] if u.get("federation_id")==external_id]},ensure_ascii=True))
@@ -1092,10 +1102,10 @@ def federation_delete(external_id):
     if d==before:
         print(json.dumps({"ok":True,"deleted":False})); return
     save(d)
-    try: apply(d,True)
+    try: apply(d,True,before)
     except Exception:
         save(before)
-        try: apply(before,True)
+        try: apply(before,True,d)
         except Exception: pass
         raise
     print(json.dumps({"ok":True,"deleted":True}))
@@ -1107,10 +1117,10 @@ def federation_purge():
     if not removed:
         print(json.dumps({"ok":True,"deleted":0})); return
     save(d)
-    try: apply(d,True)
+    try: apply(d,True,before)
     except Exception:
         save(before)
-        try: apply(before,True)
+        try: apply(before,True,d)
         except Exception: pass
         raise
     print(json.dumps({"ok":True,"deleted":removed}))
@@ -1130,10 +1140,10 @@ def delete(uid):
     d["users"]=[u for u in d["users"] if u.get("id")!=uid]
     save(d)
     try:
-        apply(d,True)
+        apply(d,True,before)
     except Exception:
         save(before)
-        try: apply(before,True)
+        try: apply(before,True,d)
         except Exception: pass
         raise
     return True
@@ -1155,10 +1165,10 @@ def edit_user(uid,enabled=None,name=None):
     if runtime_changed: collect_traffic(before)
     save(after)
     if runtime_changed:
-        try: apply(after,True)
+        try: apply(after,True,before)
         except Exception:
             save(before)
-            try: apply(before,True)
+            try: apply(before,True,after)
             except Exception: raise RuntimeError('Не удалось восстановить службы. Проверьте VPS через SSH.')
             raise
 
@@ -1236,10 +1246,10 @@ def edit_direct_secret(uid,secret):
     collect_traffic(before)
     save(after)
     try:
-        apply(after,True)
+        apply(after,True,before)
     except Exception:
         save(before)
-        try: apply(before,True)
+        try: apply(before,True,after)
         except Exception: raise RuntimeError("Не удалось восстановить службы. Проверьте VPS через SSH.")
         raise
 
@@ -2072,6 +2082,10 @@ def purge_remote_profiles(subscription,device_id=None):
             try: node_api.delete_profile(node,federation_id(subscription.get("id",""),device.get("id","")))
             except node_api.NodeError as exc:
                 print("node profile cleanup failed:",node.get("url"),str(exc),file=sys.stderr,flush=True)
+def purge_remote_profiles_async(subscription,device_id=None):
+    if not subscription: return
+    threading.Thread(target=purge_remote_profiles,args=(subscription,device_id),
+                     name="wpp-node-cleanup",daemon=True).start()
 def allow_subscription_request(client):
     now=time.monotonic()
     with SUB_RATE_LOCK:
@@ -2536,6 +2550,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path==PANEL_PATH+"/openflux-profile":
+            async_action=self.headers.get("X-WPP-Async","")=="1"
             operation=form.get("operation","")
             try:
                 if operation=="create":
@@ -2545,9 +2560,11 @@ class Handler(BaseHTTPRequestHandler):
                 elif operation=="rotate": openflux.profile_rotate(form.get("id",""))
                 elif operation=="delete": openflux.delete_profile(form.get("id",""))
                 else: raise openflux.OpenFluxError("Неизвестная операция OpenFlux.")
-                self.redirect("/users")
+                if async_action: self.send_json({"ok":True})
+                else: self.redirect("/users")
             except openflux.OpenFluxError as exc:
-                self.send_html("Ошибка OpenFlux: "+esc(str(exc)),400)
+                if async_action: self.send_json({"ok":False,"message":str(exc)},400)
+                else: self.send_html("Ошибка OpenFlux: "+esc(str(exc)),400)
             return
 
         if path==PANEL_PATH+"/client-action":
@@ -2574,7 +2591,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not result.get('ok'):
                         self.send_json({'message':result.get('message','Изменение не применено.')},int(result.get('status',400))); return
                     if operation=='rename' or (operation=='state' and form['enabled']=='0'):
-                        purge_remote_profiles(previous)
+                        purge_remote_profiles_async(previous)
                 else:
                     if operation=='state': ctl('set-user',uid,form['enabled'])
                     elif operation=='rename': ctl('rename-user',uid,form.get('name',''))
@@ -2585,6 +2602,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path==PANEL_PATH+"/subscription-action":
+            async_action=self.headers.get("X-WPP-Async","")=="1"
             request={k:form[k] for k in ("operation","id","device_id","name","max_devices") if k in form}
             if request.get("operation") not in ("create","update","toggle","rotate","delete","revoke","allow"):
                 self.send_html("Недопустимая операция",400); return
@@ -2594,10 +2612,12 @@ class Handler(BaseHTTPRequestHandler):
             result=ctl_subscription(request)
             if result.get("ok"):
                 if request["operation"] in ("update","delete","rotate","toggle"):
-                    purge_remote_profiles(previous)
+                    purge_remote_profiles_async(previous)
                 elif request["operation"]=="revoke":
-                    purge_remote_profiles(previous,request.get("device_id"))
-                self.redirect("/users")
+                    purge_remote_profiles_async(previous,request.get("device_id"))
+                if async_action: self.send_json({"ok":True})
+                else: self.redirect("/users")
+            elif async_action: self.send_json({"ok":False,"message":result.get("message","Ошибка подписки")},int(result.get("status",400)))
             else: self.send_html(esc(result.get("message","Ошибка подписки")),int(result.get("status",400)))
             return
 
@@ -2665,15 +2685,20 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path==PANEL_PATH+"/delete-user":
+            async_action=self.headers.get("X-WPP-Async","")=="1"
             uid=form.get("id","")
             if not uid or uid=="primary":
-                self.send_html("Нельзя удалить основной профиль.",400); return
+                if async_action: self.send_json({"ok":False,"message":"Нельзя удалить основной профиль."},400)
+                else: self.send_html("Нельзя удалить основной профиль.",400)
+                return
             try:
                 ctl("delete",uid)
-                self.redirect("/users")
+                if async_action: self.send_json({"ok":True})
+                else: self.redirect("/users")
             except Exception as exc:
                 print("delete user failed:",type(exc).__name__,file=sys.stderr,flush=True)
-                self.send_html("Не удалось удалить пользователя. Обновите список и повторите попытку.",503)
+                if async_action: self.send_json({"ok":False,"message":"Не удалось удалить пользователя. Обновите список и повторите попытку."},503)
+                else: self.send_html("Не удалось удалить пользователя. Обновите список и повторите попытку.",503)
             return
 
         if path==PANEL_PATH+"/site-html":
