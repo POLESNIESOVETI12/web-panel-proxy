@@ -551,7 +551,16 @@ def profile_rotate(profile_id):
 
 def delete_profile(profile_id):
     if profile_id == "main":
-        raise OpenFluxError("Основной профиль удаляется в настройках OpenFlux.")
+        config = _load()
+        if not config.get("url") and not config.get("key"):
+            raise OpenFluxError("Профиль OpenFlux не найден.")
+        _run(["systemctl", "stop", SERVICE], check=False)
+        for path in (ENABLED_FILE, URL_FILE, KEY_FILE, STATE_FILE):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        return
     profile_id = _extra_id(profile_id)
     paths = _extra_paths(profile_id)
     if not paths["state"].exists():

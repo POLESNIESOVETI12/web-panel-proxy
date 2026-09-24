@@ -6,7 +6,7 @@ import re
 import time
 from urllib.parse import urlencode, urlsplit, parse_qs
 
-VERSION = '2.4.0'
+VERSION = '2.4.1'
 
 
 def esc(value): return html.escape(str(value), quote=True)
@@ -328,8 +328,7 @@ def openflux_profiles_ui(profiles, path, csrf):
         controls=f'''<form method="post" action="{esc(path)}/openflux-profile">{hidden(csrf,operation='disable' if profile.get('enabled') else 'enable',id=pid)}<button>{'Остановить' if profile.get('enabled') else 'Запустить'}</button></form>'''
         if not ios:
             controls+=f'''<form method="post" action="{esc(path)}/openflux-profile" data-confirm="Создать новый ключ для этого Android-профиля?">{hidden(csrf,operation='rotate',id=pid)}<button>Новый ключ</button></form>'''
-        if pid!='main':
-            controls+=f'''<form method="post" action="{esc(path)}/openflux-profile" data-confirm="Удалить профиль OpenFlux «{esc(profile.get('name',''))}»?">{hidden(csrf,operation='delete',id=pid)}<button class="danger">Удалить</button></form>'''
+        controls+=f'''<form method="post" action="{esc(path)}/openflux-profile" data-confirm="Удалить пользователя OpenFlux «{esc(profile.get('name',''))}» и остановить его службу?">{hidden(csrf,operation='delete',id=pid)}<button class="danger">Удалить</button></form>'''
         cards.append(f'''<article class="flux-profile"><div class="flux-profile-head"><span class="flux-platform">{platform}</span><div><h3>{esc(profile.get('name','OpenFlux'))}</h3><small>{'Без AES · System VPN' if ios else 'AES-256-GCM'}</small></div><span class="badge {'on' if active else ''}">{'Работает' if active else 'Остановлен'}</span></div><div class="flux-profile-secret"><span>Документ</span><input value="{esc(profile.get('url',''))}" readonly aria-label="Документ OpenFlux — {esc(profile.get('name',''))}"><button type="button" data-copy="{esc(profile.get('url',''))}">{icon('copy')}</button></div>{key}<div class="actions">{controls}</div></article>''')
     empty='<div class="flux-empty"><b>Профилей пока нет</b><span>Создайте отдельный доступ для iPhone, iPad или Android.</span></div>'
     return f'''<section class="openflux-users"><div class="section-head"><div><span class="eyebrow">YANDEX DOCS TUNNEL</span><h2>Пользователи OpenFlux</h2><p>Каждому пользователю — отдельный документ и режим клиента</p></div><button class="primary" type="button" data-open-dialog="newOpenFlux">＋ Добавить</button></div><div class="flux-profile-grid">{''.join(cards) if cards else empty}</div></section><dialog id="newOpenFlux" class="create-dialog"><div class="dialog-head"><div><h2>Новый профиль OpenFlux</h2><small>Используйте отдельный публичный документ Яндекса</small></div><button type="button" data-close-dialog>×</button></div><form method="post" action="{esc(path)}/openflux-profile">{hidden(csrf,operation='create')}<label>Имя пользователя</label><input name="name" maxlength="80" required placeholder="Например, iPhone Анны"><label>Ссылка на документ Яндекса</label><input name="url" type="url" maxlength="2048" required placeholder="https://disk.yandex.ru/i/…"><label>Устройство</label><div class="create-mode-grid flux-platform-picker"><label class="choice-card"><input type="radio" name="platform" value="ios" checked><span><strong>iOS</strong><small>iPhone и iPad · без AES-ключа</small></span></label><label class="choice-card"><input type="radio" name="platform" value="android"><span><strong>Android</strong><small>AES-256-GCM · ссылка и ключ</small></span></label></div><p class="note">Один и тот же документ нельзя одновременно использовать в нескольких активных профилях.</p><div class="actions create-actions"><button type="button" data-close-dialog>Отмена</button><button class="primary">Создать профиль</button></div></form></dialog>'''
