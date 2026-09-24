@@ -1625,7 +1625,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 from collections import defaultdict, deque
 from wpp_subscriptions import PREFIX as SUB_PREFIX
 from wpp_panel_extras import preview_document
-from wpp_ui import page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, openflux_ui, client_records, nodes_ui, updates_ui, openflux_import_uri
+from wpp_ui import page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, openflux_ui, client_records, nodes_ui, updates_ui
 import wpp_metrics as server_metrics
 import wpp_update as web_updates
 import wpp_components as components
@@ -2308,7 +2308,7 @@ class Handler(BaseHTTPRequestHandler):
             profile_id=parse_qs(urlparse(self.path).query).get("id",[""])[0]
             profile=next((item for item in openflux.profile_states() if item.get("id")==profile_id),None)
             if profile is None: self.send_html("Not found",404); return
-            try: self.send_png(qr_png_bytes(openflux_import_uri(profile)))
+            try: self.send_png(qr_png_bytes(str(profile.get("url") or "")))
             except (OSError,subprocess.SubprocessError):
                 self.send_json({'message':'Не удалось сформировать QR OpenFlux. Проверьте qrencode на сервере.'},503)
             return
