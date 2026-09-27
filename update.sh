@@ -1,7 +1,40 @@
 #!/usr/bin/env bash
-# Safe in-place updater for WEB PANEL PROXY V 2.4.2.
+# Safe in-place updater for WEB PANEL PROXY V 2.4.3.
 set -Eeuo pipefail
 umask 077
+
+WPP_PROGRESS_TTY=0 WPP_PROGRESS_ROWS=0 WPP_PROGRESS_LAST=-1 WPP_PROGRESS_ACTIVE=0
+wpp_progress_start() {
+    WPP_PROGRESS_ACTIVE=1
+    if [[ -t 1 && "${TERM:-dumb}" != "dumb" ]] && command -v tput >/dev/null 2>&1; then
+        WPP_PROGRESS_ROWS="$(tput lines 2>/dev/null || echo 0)"
+        if (( WPP_PROGRESS_ROWS >= 6 )); then
+            WPP_PROGRESS_TTY=1
+            printf '\033[1;%dr\033[%d;1H' "$((WPP_PROGRESS_ROWS-1))" "$((WPP_PROGRESS_ROWS-1))"
+        fi
+    fi
+    wpp_progress 0 "$1"
+}
+wpp_progress() {
+    local percent="$1" label="$2" width=28 filled empty bar
+    (( percent < 0 )) && percent=0; (( percent > 100 )) && percent=100
+    filled=$((percent*width/100)); empty=$((width-filled))
+    printf -v bar '%*s' "$filled" ''; bar="${bar// /#}"
+    printf -v empty '%*s' "$empty" ''; bar+="${empty// /-}"
+    if (( WPP_PROGRESS_TTY )); then
+        printf '\0337\033[%d;1H\033[2K[%s] %3d%%  %s\0338' "$WPP_PROGRESS_ROWS" "$bar" "$percent" "$label"
+    elif (( percent != WPP_PROGRESS_LAST )); then printf '[%s] %3d%%  %s\n' "$bar" "$percent" "$label"; fi
+    WPP_PROGRESS_LAST="$percent"
+}
+wpp_progress_finish() {
+    local code="$1"
+    (( WPP_PROGRESS_ACTIVE )) || return 0
+    if (( code == 0 )); then wpp_progress 100 "Обновление завершено"; else wpp_progress "$WPP_PROGRESS_LAST" "Обновление прервано"; fi
+    if (( WPP_PROGRESS_TTY )); then
+        printf '\0337\033[%d;1H\033[2K\0338\033[r\033[%d;1H' "$WPP_PROGRESS_ROWS" "$WPP_PROGRESS_ROWS"
+        printf '[############################] %3d%%  %s\n' "$([[ $code == 0 ]] && echo 100 || echo "$WPP_PROGRESS_LAST")" "$([[ $code == 0 ]] && echo 'Обновление завершено' || echo 'Обновление прервано')"
+    fi
+}
 
 # Use the fixed public repository without interactive credentials or local
 # Git URL substitutions.
@@ -15,7 +48,7 @@ RELEASE_REF="$REQUESTED_REF"
 LOCAL_SOURCE=""
 if [[ "${1:-}" == "--local" ]]; then
     LOCAL_SOURCE="$(cd "$(dirname "$0")" && pwd)"
-    RELEASE_REF="v2.4.2"
+    RELEASE_REF="v2.4.3"
     for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py; do
         [[ -s "$LOCAL_SOURCE/$file" ]] || { echo "Incomplete local archive: $file is missing." >&2; exit 1; }
     done
@@ -43,9 +76,10 @@ exec 9>/run/lock/web-panel-proxy.lock
 flock -n 9 || die "Another WEB PANEL PROXY install, update or removal is already running."
 
 echo "============================================================"
-echo "     WEB PANEL PROXY V 2.4.2 — SAFE UPDATE"
+echo "     WEB PANEL PROXY V 2.4.3 — SAFE UPDATE"
 echo "============================================================"
 echo "Users, administrator password, panel URL and site HTML will be retained."
+wpp_progress_start "Проверка установленной версии"
 
 MIGRATING_LEGACY=0
 PANEL_PATH=""
@@ -104,7 +138,8 @@ if systemctl is-active --quiet tproxy-panel.service; then
     PANEL_WAS_RUNNING=1
     systemctl stop tproxy-panel.service
 fi
-trap 'if [[ "$PANEL_WAS_RUNNING" == 1 ]]; then systemctl start tproxy-panel.service || true; fi' EXIT
+early_finish() { local code=$?; if [[ "$PANEL_WAS_RUNNING" == 1 ]]; then systemctl start tproxy-panel.service || true; fi; wpp_progress_finish "$code"; }
+trap early_finish EXIT
 BACKUP="/root/web-panel-proxy-update-backup-${STAMP}"
 install -d -m 0700 "$BACKUP"
 BACKUP_ITEMS=()
@@ -121,6 +156,7 @@ done
 shopt -u nullglob
 tar --numeric-owner -cpf "$BACKUP/state.tar" "${BACKUP_ITEMS[@]}"
 echo "Backup created: $BACKUP"
+wpp_progress 15 "Резервная копия создана"
 
 HAD_FIREWALL_SERVICE=0
 [[ -e /etc/systemd/system/web-proxy-panel-firewall.service ]] && HAD_FIREWALL_SERVICE=1
@@ -276,11 +312,13 @@ finish() {
     trap - EXIT
     rollback_update "$code"
     rm -rf "$TEMP_DIR"
+    wpp_progress_finish "$code"
     exit "$code"
 }
 trap finish EXIT
 
 echo "Downloading WEB PANEL PROXY files..."
+wpp_progress 25 "Получение файлов обновления"
 if [[ -n "$LOCAL_SOURCE" ]]; then
     install -d -m 0700 "$TEMP_DIR/source"
     install -d -m 0700 "$TEMP_DIR/source/assets"
@@ -302,6 +340,7 @@ git clone --depth 1 --branch "$RELEASE_REF" "$REPOSITORY" "$TEMP_DIR/source"
 fi
 [[ -f "$TEMP_DIR/source/install-panel.sh" ]] || die "Update package is incomplete."
 chmod 0700 "$TEMP_DIR/source/install-panel.sh"
+wpp_progress 40 "Файлы обновления подготовлены"
 
 if [[ "$MIGRATING_LEGACY" == 1 ]]; then
     DOMAIN="$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' /etc/systemd/system/caddy.service.d/tproxy.conf 2>/dev/null | head -n1 || true)"
@@ -351,10 +390,12 @@ fi
 # Keep the relay binary current as part of the same public update command.
 # Configuration, users, secrets and public-site files are not replaced.
 if [[ -f "$TEMP_DIR/source/repair-landing-pages.sh" ]]; then
+    wpp_progress 50 "Проверка публичного сайта"
     chmod 0700 "$TEMP_DIR/source/repair-landing-pages.sh"
     bash "$TEMP_DIR/source/repair-landing-pages.sh"
 fi
 
+wpp_progress 60 "Установка компонентов панели"
 if [[ "$MIGRATING_LEGACY" == 1 ]]; then
     # New panel bootstrap: install-panel asks for a login and one password,
     # creates the private URL and leaves the old core proxy data in place.
@@ -365,6 +406,7 @@ fi
 install -o root -g root -m 0755 \
     "$TEMP_DIR/source/uninstall-web-proxy.sh" \
     /usr/local/sbin/web-panel-proxy-uninstall
+wpp_progress 90 "Финальная проверка служб"
 
 if [[ -f "$LEGACY_SERVICE" ]]; then
     systemctl disable --now web-proxy-panel.service 2>/dev/null || true
@@ -392,6 +434,7 @@ fi
 printf '%s\n' "${RELEASE_REF#v}" > /etc/web-proxy-panel/version
 chmod 0600 /etc/web-proxy-panel/caddy-owned /etc/web-proxy-panel/version
 UPDATE_COMMITTED=1
+wpp_progress 100 "Обновление завершено"
 echo
 echo "Update completed. Open the panel at: https://${DOMAIN}${PANEL_PATH}/login"
 NODE_API_TOKEN="$(python3 - "$DOMAIN" <<'PY'

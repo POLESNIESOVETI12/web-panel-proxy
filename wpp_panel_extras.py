@@ -1,5 +1,4 @@
 """Panel-only HTML helpers. No public subscription request may render admin data."""
-import base64
 import html
 import time
 

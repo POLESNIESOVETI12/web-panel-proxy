@@ -392,9 +392,9 @@ XRAY_PATH="$(cat "$XRAY_PATH_FILE")"
 [[ "$XRAY_PATH" =~ ^/vless-[a-f0-9]{24}$ ]] || die "Stored VLESS path is invalid."
 
 if [[ "$UPDATING" == "1" ]]; then
-    echo "Updating WEB PANEL PROXY V 2.4.2..."
+    echo "Updating WEB PANEL PROXY V 2.4.3..."
 else
-    echo "Configuring WEB PANEL PROXY V 2.4.2..."
+    echo "Configuring WEB PANEL PROXY V 2.4.3..."
 fi
 INSTALL_CREDENTIALS="/etc/web-proxy-panel/install-credentials"
 if [[ "$UPDATING" == "1" ]]; then
@@ -1625,7 +1625,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 from collections import defaultdict, deque
 from wpp_subscriptions import PREFIX as SUB_PREFIX
 from wpp_panel_extras import preview_document
-from wpp_ui import page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, openflux_ui, client_records, nodes_ui, updates_ui
+from wpp_ui import page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, openflux_ui, client_records, nodes_ui, updates_ui, openflux_import_uri
 import wpp_metrics as server_metrics
 import wpp_update as web_updates
 import wpp_components as components
@@ -2211,7 +2211,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.api_auth(): return
             if path==node_api.API_PREFIX+"/status":
                 loc=node_api.load_location(LOCATION_FILE)
-                self.send_json({"ok":True,"api_version":1,"version":"2.4.2","domain":DOMAIN,
+                self.send_json({"ok":True,"api_version":1,"version":"2.4.3","domain":DOMAIN,
                     "location":loc,"capabilities":["vless","hysteria","awg20","awg31","federation"]}); return
             if path==node_api.API_PREFIX+"/profiles":
                 result=[]
@@ -2308,7 +2308,7 @@ class Handler(BaseHTTPRequestHandler):
             profile_id=parse_qs(urlparse(self.path).query).get("id",[""])[0]
             profile=next((item for item in openflux.profile_states() if item.get("id")==profile_id),None)
             if profile is None: self.send_html("Not found",404); return
-            try: self.send_png(qr_png_bytes(str(profile.get("url") or "")))
+            try: self.send_png(qr_png_bytes(openflux_import_uri(profile)))
             except (OSError,subprocess.SubprocessError):
                 self.send_json({'message':'Не удалось сформировать QR OpenFlux. Проверьте qrencode на сервере.'},503)
             return
@@ -2554,7 +2554,11 @@ class Handler(BaseHTTPRequestHandler):
             operation=form.get("operation","")
             try:
                 if operation=="create":
-                    openflux.create_profile(form.get("name",""),form.get("url",""),form.get("platform",""),form.get("transport","yandex"))
+                    openflux.create_profile(
+                        form.get("name",""), form.get("url",""), form.get("platform",""),
+                        form.get("transport","yandex"), form.get("max_server_token",""),
+                        form.get("max_client_token",""), form.get("max_uid","")
+                    )
                 elif operation=="enable": openflux.profile_set_enabled(form.get("id",""),True)
                 elif operation=="disable": openflux.profile_set_enabled(form.get("id",""),False)
                 elif operation=="rotate": openflux.profile_rotate(form.get("id",""))
@@ -2867,7 +2871,7 @@ fi
 echo "[4/6] Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=WEB PANEL PROXY V 2.4.2
+Description=WEB PANEL PROXY V 2.4.3
 After=network-online.target caddy.service tproxy-server.service mtproxy.service web-proxy-panel-firewall.service
 Wants=network-online.target
 Requires=web-proxy-panel-firewall.service
@@ -2971,7 +2975,7 @@ unlock_changes(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 show_info(){
     local d p version
-    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.4.2')"
+    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.4.3')"
     echo
     echo "============================================================"
     echo "                 WEB PANEL PROXY"
@@ -3420,9 +3424,9 @@ fi
 echo
 echo "============================================================"
 if [[ "$UPDATING" == "1" ]]; then
-echo "          WEB PANEL PROXY V 2.4.2 UPDATED"
+echo "          WEB PANEL PROXY V 2.4.3 UPDATED"
 else
-echo "         WEB PANEL PROXY V 2.4.2 IS READY"
+echo "         WEB PANEL PROXY V 2.4.3 IS READY"
 fi
 echo "============================================================"
 echo

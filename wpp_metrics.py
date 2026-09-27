@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 
@@ -30,13 +31,19 @@ def read_state(path=None):
 
 def atomic_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = path.with_suffix('.tmp')
-    with tmp.open('w', encoding='utf-8') as f:
-        json.dump(value, f, ensure_ascii=True, separators=(',', ':'))
-        f.flush()
-        os.fsync(f.fileno())
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(value, f, ensure_ascii=True, separators=(',', ':'))
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 def proc_text(name):

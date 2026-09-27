@@ -1,5 +1,4 @@
 """Admin-triggered, fixed-repository updates run outside the panel's cgroup."""
-import json
 import os
 from pathlib import Path
 import re
@@ -51,6 +50,13 @@ def version_tuple(value):
     return (*map(int, m.group(1, 2, 3)), 0 if m[4] else 1, int(m[4][2:]) if m[4] else 0)
 
 
+def _timestamp(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def newer(tag, current):
     a, b = version_tuple(tag), version_tuple(current)
     return bool(a and b and a > b and re.fullmatch(r'v\d+\.\d+\.\d+', tag))
@@ -64,7 +70,7 @@ def unit_running():
 def get_status():
     data = read_state(STATUS)
     # A killed/rebooted updater cannot remain "running" forever in the UI.
-    if data.get('phase') in ('running', 'queued') and time.time() - data.get('started', 0) > 60:
+    if data.get('phase') in ('running', 'queued') and time.time() - _timestamp(data.get('started')) > 60:
         try:
             if not unit_running(): data.update(phase='interrupted', message='Обновление прервано. Проверьте журнал через WPP/SSH.')
         except (OSError, subprocess.TimeoutExpired): pass
@@ -90,7 +96,7 @@ def check_release():
     with _lock():
         state = get_status()
         if state.get('phase') in ('running', 'queued'): return state
-        if time.time() - state.get('checked', 0) < 60: return state
+        if time.time() - _timestamp(state.get('checked')) < 60: return state
         env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
         try:
             r = subprocess.run(['git', 'ls-remote', '--tags', '--refs', REPO, 'v[0-9]*'], capture_output=True, text=True, timeout=20, env=env)
@@ -113,7 +119,7 @@ def start_update(target=''):
             raise ValueError('Обновление уже выполняется.')
         releases=state.get('releases',[])
         target=str(target or state.get('latest',''))
-        if time.time() - state.get('checked', 0) > 600 or target not in releases:
+        if time.time() - _timestamp(state.get('checked')) > 600 or target not in releases:
             raise ValueError('Сначала обновите список и выберите опубликованный стабильный релиз.')
         if target.lstrip('v') == current_version().lstrip('v'):
             raise ValueError('Эта версия уже установлена.')
@@ -135,7 +141,7 @@ def run_update():
     with _lock(blocking=True):
         state = read_state(STATUS)
         tag = state.get('target', '')
-        if (state.get('phase') != 'queued' or time.time() - state.get('started', 0) > 120 or
+        if (state.get('phase') != 'queued' or time.time() - _timestamp(state.get('started')) > 120 or
                 tag not in state.get('releases',[]) or not version_tuple(tag) or tag.lstrip('v')==current_version().lstrip('v')):
             raise ValueError('Нет подтверждённого релиза для установки.')
         state.update(phase='running', message='Создание резервной копии и обновление. Подождите несколько минут.')

@@ -1,14 +1,50 @@
 #!/usr/bin/env bash
-# WEB PANEL PROXY V 2.4.2 complete removal utility.
+# WEB PANEL PROXY complete removal utility.
 set -Eeuo pipefail
+
+WPP_PROGRESS_TTY=0 WPP_PROGRESS_ROWS=0 WPP_PROGRESS_LAST=-1 WPP_PROGRESS_ACTIVE=0
+wpp_progress_start() {
+  WPP_PROGRESS_ACTIVE=1
+  if [[ -t 1 && "${TERM:-dumb}" != "dumb" ]] && command -v tput >/dev/null 2>&1; then
+    WPP_PROGRESS_ROWS="$(tput lines 2>/dev/null || echo 0)"
+    if (( WPP_PROGRESS_ROWS >= 6 )); then
+      WPP_PROGRESS_TTY=1
+      printf '\033[1;%dr\033[%d;1H' "$((WPP_PROGRESS_ROWS-1))" "$((WPP_PROGRESS_ROWS-1))"
+    fi
+  fi
+  wpp_progress 0 "$1"
+}
+wpp_progress() {
+  local percent="$1" label="$2" width=28 filled empty bar
+  (( percent < 0 )) && percent=0; (( percent > 100 )) && percent=100
+  filled=$((percent*width/100)); empty=$((width-filled))
+  printf -v bar '%*s' "$filled" ''; bar="${bar// /#}"
+  printf -v empty '%*s' "$empty" ''; bar+="${empty// /-}"
+  if (( WPP_PROGRESS_TTY )); then
+    printf '\0337\033[%d;1H\033[2K[%s] %3d%%  %s\0338' "$WPP_PROGRESS_ROWS" "$bar" "$percent" "$label"
+  elif (( percent != WPP_PROGRESS_LAST )); then printf '[%s] %3d%%  %s\n' "$bar" "$percent" "$label"; fi
+  WPP_PROGRESS_LAST="$percent"
+}
+wpp_progress_finish() {
+  local code="$1"
+  (( WPP_PROGRESS_ACTIVE )) || return 0
+  if (( code == 0 )); then wpp_progress 100 "Удаление завершено"; else wpp_progress "$WPP_PROGRESS_LAST" "Удаление прервано"; fi
+  if (( WPP_PROGRESS_TTY )); then
+    printf '\0337\033[%d;1H\033[2K\0338\033[r\033[%d;1H' "$WPP_PROGRESS_ROWS" "$WPP_PROGRESS_ROWS"
+    printf '[############################] %3d%%  %s\n' "$([[ $code == 0 ]] && echo 100 || echo "$WPP_PROGRESS_LAST")" "$([[ $code == 0 ]] && echo 'Удаление завершено' || echo 'Удаление прервано')"
+  fi
+}
+trap 'wpp_progress_finish "$?"' EXIT
 
 [[ ${EUID:-1} -eq 0 ]] || { echo "Run this script as root." >&2; exit 1; }
 command -v flock >/dev/null 2>&1 || { echo "flock is required (package: util-linux)." >&2; exit 1; }
 exec 9>/run/lock/web-panel-proxy.lock
 flock -n 9 || { echo "Another WEB PANEL PROXY install, update or removal is already running." >&2; exit 1; }
 
-echo "WEB PANEL PROXY V 2.4.2 — complete removal"
-echo "Removing all WEB PANEL PROXY V 2.4.2 components..."
+INSTALLED_VERSION="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo unknown)"
+echo "WEB PANEL PROXY V ${INSTALLED_VERSION} — complete removal"
+echo "Removing all WEB PANEL PROXY components..."
+wpp_progress_start "Подготовка удаления"
 
 DOMAIN="$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' /etc/systemd/system/caddy.service.d/tproxy.conf 2>/dev/null | head -n1 || true)"
 CADDY_MARKER="$(cat /etc/web-proxy-panel/caddy-owned 2>/dev/null || true)"
@@ -47,6 +83,7 @@ fi
 [[ -e /etc/web-proxy-panel/awg-route-ufw-owned ]] && AWG_UFW_ROUTES="$(cat /etc/web-proxy-panel/awg-route-ufw-owned 2>/dev/null || true)"
 
 echo "Stopping services..."
+wpp_progress 10 "Остановка служб"
 for unit in \
   web-panel-proxy-web-update.service \
   web-panel-proxy-component-update.service \
@@ -73,6 +110,7 @@ for unit_path in "${USER_UNITS[@]}"; do
 done
 
 # Remove the firewall tables created by the panel and the proxy firewall.
+wpp_progress 30 "Очистка правил firewall"
 nft delete table inet web_proxy_panel 2>/dev/null || true
 nft delete table ip web_proxy_awg 2>/dev/null || true
 nft delete table inet tproxy_backend 2>/dev/null || true
@@ -194,7 +232,8 @@ PY
   [[ "$PRESERVE_CADDY" == 1 ]] && rm -f -- /etc/caddy/Caddyfile.before-web-panel-proxy
 fi
 
-echo "Removing WEB PANEL PROXY V 2.4.2 files..."
+echo "Removing WEB PANEL PROXY files..."
+wpp_progress 55 "Удаление файлов панели"
 if [[ -s /opt/tproxy-panel/wpp_firewall.py ]]; then
   PYTHONPATH=/opt/tproxy-panel python3 -c 'import wpp_firewall; wpp_firewall.purge()' 2>/dev/null || true
 fi
@@ -268,6 +307,7 @@ if [[ "$AWG_OWNED" == 1 ]]; then
 fi
 
 # qrencode is the only Debian package installed exclusively for the panel.
+wpp_progress 75 "Очистка пакетов"
 if command -v apt-get >/dev/null 2>&1; then
   DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 purge -y qrencode 2>/dev/null || true
   if [[ "$MIERU_PACKAGE_OWNED" == 1 ]]; then
@@ -276,6 +316,7 @@ if command -v apt-get >/dev/null 2>&1; then
 fi
 
 if [[ "$REMOVE_CADDY" == 1 ]]; then
+wpp_progress 85 "Очистка Caddy"
   rm -f -- /usr/local/bin/caddy /etc/caddy/Caddyfile /etc/systemd/system/caddy.service.d/tproxy.conf
   rmdir /etc/systemd/system/caddy.service.d 2>/dev/null || true
   rm -f -- /etc/systemd/system/caddy.service
@@ -295,7 +336,7 @@ elif [[ "$PRESERVE_CADDY" == 1 ]]; then
 else
   rm -f -- /etc/systemd/system/caddy.service.d/tproxy.conf
   rmdir /etc/systemd/system/caddy.service.d 2>/dev/null || true
-  echo "Caddy was preserved because it was not marked as installed by WEB PANEL PROXY V 2.4.2."
+  echo "Caddy was preserved because it was not marked as installed by WEB PANEL PROXY."
 fi
 
 id mtproxy >/dev/null 2>&1 && userdel mtproxy 2>/dev/null || true
@@ -306,4 +347,5 @@ id wpp-openflux >/dev/null 2>&1 && userdel wpp-openflux 2>/dev/null || true
 
 systemctl daemon-reload
 systemctl reset-failed 2>/dev/null || true
-echo "WEB PANEL PROXY V 2.4.2 has been removed."
+wpp_progress 100 "Удаление завершено"
+echo "WEB PANEL PROXY V ${INSTALLED_VERSION} has been removed."

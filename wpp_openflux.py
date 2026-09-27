@@ -27,7 +27,7 @@ PROFILES_DIR = CONFIG_DIR / "profiles"
 VERSION = "1.0.0"
 MAX_OPENFLUX_PROFILES = 32
 TRANSPORT = "yandex"
-TRANSPORTS = {"yandex", "mailru"}
+TRANSPORTS = {"yandex", "mailru", "oneme"}
 CODEC = "batched"
 MODE = "l4"
 
@@ -44,7 +44,7 @@ def _codec_for(config):
 def _clean_transport(value):
     value = str(value or TRANSPORT).strip().lower()
     if value not in TRANSPORTS:
-        raise OpenFluxError("Выберите Яндекс Документы или Mail.ru Документы.")
+        raise OpenFluxError("Выберите Яндекс Документы, Mail.ru Документы или MAX.")
     return value
 
 
@@ -104,6 +104,20 @@ def validate_document_url(value, transport=TRANSPORT):
     return value
 
 
+def _clean_max_token(value, label):
+    value = str(value or "").strip()
+    if not value or len(value) > 4096 or any(ord(char) < 33 or ord(char) == 127 for char in value):
+        raise OpenFluxError(f"Укажите корректный {label} MAX.")
+    return value
+
+
+def _clean_max_uid(value):
+    value = str(value or "").strip()
+    if not re.fullmatch(r"[1-9][0-9]{0,18}", value) or int(value) > 9223372036854775807:
+        raise OpenFluxError("Укажите числовой UID серверного аккаунта MAX.")
+    return int(value)
+
+
 def _load():
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -115,14 +129,17 @@ def _load():
 
 
 def _service_active():
-    result = subprocess.run(
-        ["systemctl", "is-active", "--quiet", SERVICE],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=5,
-        check=False,
-    )
-    return result.returncode == 0
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "--quiet", SERVICE],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _identity():
@@ -223,10 +240,10 @@ def _start():
     install_service()
     _run(["systemctl", "restart", SERVICE])
     stable = 0
-    for _ in range(20):
+    for _ in range(40):
         if _service_active():
             stable += 1
-            if stable >= 4:
+            if stable >= 12:
                 return
         else:
             stable = 0
@@ -376,6 +393,7 @@ def _extra_paths(profile_id):
         "state": directory / "config.json",
         "url": directory / "document-url",
         "key": directory / "encryption-key",
+        "max_token": directory / "max-server-token",
         "enabled": directory / "enabled",
         "unit": Path("/etc/systemd/system") / ("web-panel-proxy-openflux-" + profile_id + ".service"),
     }
@@ -400,7 +418,12 @@ def _extra_configs():
             continue
         if isinstance(value, dict) and value.get("id") == entry.name:
             result.append(value)
-    return sorted(result, key=lambda item: (int(item.get("created_at", 0)), item["id"]))
+    def created(item):
+        try:
+            return int(item.get("created_at", 0))
+        except (TypeError, ValueError):
+            return 0
+    return sorted(result, key=lambda item: (created(item), item["id"]))
 
 
 def _write_extra_files(config):
@@ -409,8 +432,16 @@ def _write_extra_files(config):
     paths["dir"].mkdir(parents=True, exist_ok=True)
     os.chown(paths["dir"], 0, gid)
     os.chmod(paths["dir"], 0o750)
-    _atomic(paths["url"], config["url"] + "\n", 0o640, 0, gid)
+    transport = _transport_for(config)
+    _atomic(paths["url"], str(config.get("url", "")) + "\n", 0o640, 0, gid)
     _atomic(paths["key"], config["key"] + "\n", 0o640, 0, gid)
+    if transport == "oneme":
+        _atomic(paths["max_token"], config["max_server_token"] + "\n", 0o640, 0, gid)
+    else:
+        try:
+            paths["max_token"].unlink()
+        except FileNotFoundError:
+            pass
     _atomic(paths["state"], json.dumps(config, ensure_ascii=True, indent=2) + "\n", 0o600)
     if config.get("enabled", True):
         _atomic(paths["enabled"], "enabled\n", 0o600)
@@ -426,6 +457,10 @@ def _extra_unit_text(config):
     encryption = "" if config.get("platform") == "ios" else " --encryption-key-file=" + str(paths["key"])
     codec = _codec_for(config)
     transport = _transport_for(config)
+    if transport == "oneme":
+        transport_arguments = f'--transport=oneme --maxToken "$$(cat {paths["max_token"]})"'
+    else:
+        transport_arguments = f'--transport={transport} --url "$$(cat {paths["url"]})"'
     return f"""[Unit]
 Description=WEB PANEL PROXY OpenFlux profile {config['id']}
 After=network-online.target
@@ -437,7 +472,7 @@ Type=simple
 User={SERVICE_USER}
 Group={SERVICE_USER}
 UMask=0077
-ExecStart=/bin/sh -c 'exec {BIN} --role=exit --mode={MODE} --codec={codec} --transport={transport} --url "$$(cat {paths['url']})"{encryption}'
+ExecStart=/bin/sh -c 'exec {BIN} --role=exit --mode={MODE} --codec={codec} {transport_arguments}{encryption}'
 Restart=on-failure
 RestartSec=4
 TimeoutStopSec=15
@@ -475,9 +510,12 @@ def _install_extra_service(config):
 
 
 def _extra_active(profile_id):
-    return subprocess.run(["systemctl", "is-active", "--quiet", _extra_service(profile_id)],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                          timeout=5, check=False).returncode == 0
+    try:
+        return subprocess.run(["systemctl", "is-active", "--quiet", _extra_service(profile_id)],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=5, check=False).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _start_extra(config):
@@ -486,10 +524,10 @@ def _start_extra(config):
     _run(["systemctl", "enable", service])
     _run(["systemctl", "restart", service])
     stable = 0
-    for _ in range(20):
+    for _ in range(40):
         if _extra_active(config["id"]):
             stable += 1
-            if stable >= 4:
+            if stable >= 12:
                 return
         else:
             stable = 0
@@ -506,6 +544,14 @@ def profile_states():
                      "platform": "ios" if main["ios_compatible"] else "android"})
         result.append(main)
     for config in _extra_configs():
+        try:
+            max_uid = int(config.get("max_uid", 0) or 0)
+        except (TypeError, ValueError):
+            max_uid = 0
+        try:
+            created_at = int(config.get("created_at", 0) or 0)
+        except (TypeError, ValueError):
+            created_at = 0
         result.append({
             "id": config["id"], "name": config.get("name", "OpenFlux"),
             "platform": config.get("platform", "android"), "url": config.get("url", ""),
@@ -513,27 +559,46 @@ def profile_states():
             "enabled": bool(config.get("enabled", True)), "active": _extra_active(config["id"]),
             "encrypted": config.get("platform") != "ios", "transport": _transport_for(config),
             "codec": _codec_for(config), "version": VERSION,
-            "created_at": int(config.get("created_at", 0) or 0),
+            "max_client_token": config.get("max_client_token", ""),
+            "max_uid": max_uid,
+            "created_at": created_at,
         })
     return result
 
 
-def create_profile(name, document_url, platform, transport=TRANSPORT):
+def create_profile(name, document_url, platform, transport=TRANSPORT,
+                   max_server_token="", max_client_token="", max_uid=""):
     if len(_extra_configs()) >= MAX_OPENFLUX_PROFILES:
         raise OpenFluxError("Достигнут лимит профилей OpenFlux.")
     profile_id = secrets.token_hex(8)
     transport = _clean_transport(transport)
-    document_url = validate_document_url(document_url, transport)
     platform = _clean_platform(platform)
-    existing_urls = {item.get("url") for item in _extra_configs()}
-    existing_urls.add(_load().get("url"))
-    if document_url in existing_urls:
-        raise OpenFluxError("Этот документ уже используется другим профилем OpenFlux.")
+    if transport == "oneme":
+        document_url = ""
+        max_server_token = _clean_max_token(max_server_token, "токен серверного аккаунта")
+        max_client_token = _clean_max_token(max_client_token, "токен клиентского аккаунта")
+        max_uid = _clean_max_uid(max_uid)
+        if max_server_token == max_client_token:
+            raise OpenFluxError("Для сервера и клиента нужны разные аккаунты MAX.")
+        for item in _extra_configs():
+            if item.get("transport") == "oneme" and (
+                    item.get("max_server_token") == max_server_token or
+                    int(item.get("max_uid", 0) or 0) == max_uid):
+                raise OpenFluxError("Этот серверный аккаунт MAX уже используется другим профилем.")
+    else:
+        document_url = validate_document_url(document_url, transport)
+        existing_urls = {item.get("url") for item in _extra_configs()}
+        existing_urls.add(_load().get("url"))
+        if document_url in existing_urls:
+            raise OpenFluxError("Этот документ уже используется другим профилем OpenFlux.")
     config = {"id": profile_id, "name": _clean_profile_name(name),
               "url": document_url, "platform": platform,
               "key": secrets.token_urlsafe(32), "enabled": True, "transport": transport,
               "codec": CODEC, "mode": MODE, "version": VERSION,
               "created_at": int(time.time()), "updated_at": int(time.time())}
+    if transport == "oneme":
+        config.update({"max_server_token": max_server_token,
+                       "max_client_token": max_client_token, "max_uid": max_uid})
     _write_extra_files(config)
     try:
         _start_extra(config)
@@ -564,6 +629,7 @@ def profile_set_enabled(profile_id, enabled):
         except Exception:
             config["enabled"] = False
             _write_extra_files(config)
+            _run(["systemctl", "stop", _extra_service(config["id"])], check=False)
             raise
     else:
         _run(["systemctl", "stop", _extra_service(config["id"])], check=False)
@@ -575,11 +641,22 @@ def profile_rotate(profile_id):
     config = next((item for item in _extra_configs() if item["id"] == _extra_id(profile_id)), None)
     if config is None:
         raise OpenFluxError("Профиль OpenFlux не найден.")
+    previous = dict(config)
     config["key"] = secrets.token_urlsafe(32)
     config["enabled"] = True
     config["updated_at"] = int(time.time())
     _write_extra_files(config)
-    _start_extra(config)
+    try:
+        _start_extra(config)
+    except Exception:
+        _run(["systemctl", "stop", _extra_service(config["id"])], check=False)
+        _write_extra_files(previous)
+        try:
+            if previous.get("enabled", True):
+                _start_extra(previous)
+        except Exception:
+            pass
+        raise
 
 
 def delete_profile(profile_id):

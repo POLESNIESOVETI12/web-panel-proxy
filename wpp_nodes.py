@@ -1,6 +1,5 @@
 """Secure WPP node registry, API authentication and federation client."""
 import base64
-import hashlib
 import hmac
 import ipaddress
 import json
@@ -165,28 +164,97 @@ def save_location(path, value):
     return value
 
 
-def detect_location(current=None, timeout=8):
-    """Resolve the VPS public IP location, retaining current data on any failure."""
-    fallback = location(current or {})
+def _location_json(url, timeout):
     request = urllib.request.Request(
-        'https://ipapi.co/json/',
+        url,
         headers={'Accept': 'application/json', 'User-Agent': 'WEB-PANEL-PROXY/2.4'},
     )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = response.read(65537)
+    if len(payload) > 65536:
+        raise ValueError('Location response is too large')
+    value = json.loads(payload.decode('utf-8'))
+    if not isinstance(value, dict):
+        raise ValueError('Location response is not an object')
+    return value
+
+
+def _country_code(value):
+    code = str(value or '').strip().upper()
+    return code if re.fullmatch(r'[A-Z]{2}', code) else ''
+
+
+def _optional_location_text(value):
+    value = str(value or '').strip()
+    if not value or len(value) > 80 or any(ord(char) < 32 for char in value):
+        return ''
+    return value
+
+
+def detect_location(current=None, timeout=8):
+    """Resolve location from the public IPv4 without trusting one GeoIP database."""
+    fallback = location(current or {})
+
+    # api.ipify.org is IPv4-only.  Previously ipapi.co/json could observe IPv6
+    # or a provider proxy and one erroneous GeoIP answer became authoritative.
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = response.read(65537)
-        if len(payload) > 65536:
+        public = _location_json('https://api.ipify.org?format=json', timeout)
+        address = ipaddress.ip_address(str(public.get('ip', '')).strip())
+        if address.version != 4 or not address.is_global:
             return fallback
-        data = json.loads(payload.decode('utf-8'))
-        code = str(data.get('country_code') or data.get('country') or '').upper()
-        city = clean_text(data.get('city'), 'Город')
-        if not re.fullmatch(r'[A-Z]{2}', code):
-            return fallback
-        country = COUNTRY_NAMES.get(code) or clean_text(data.get('country_name'), 'Страна')
-        return location({'country_code': code, 'country_name': country,
-                         'name': CITY_NAMES.get(city, city)})
     except (OSError, ValueError, TypeError, json.JSONDecodeError, urllib.error.URLError):
         return fallback
+
+    ip = str(address)
+    registry_code = ''
+    try:
+        registry = _location_json('https://rdap.org/ip/' + ip, timeout)
+        registry_code = _country_code(registry.get('country'))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError, urllib.error.URLError):
+        pass
+
+    candidates = []
+    lookups = (
+        ('https://ipapi.co/' + ip + '/json/', 'country_code', 'country_name'),
+        ('https://ipwho.is/' + ip, 'country_code', 'country'),
+    )
+    for url, code_key, name_key in lookups:
+        try:
+            data = _location_json(url, timeout)
+            if data.get('success') is False or data.get('error') is True:
+                continue
+            code = _country_code(data.get(code_key) or data.get('country'))
+            if code:
+                candidates.append((code, _optional_location_text(data.get(name_key)),
+                                   _optional_location_text(data.get('city'))))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError, urllib.error.URLError):
+            continue
+
+    counts = {}
+    for code, _country, _city in candidates:
+        counts[code] = counts.get(code, 0) + 1
+
+    # Two agreeing GeoIP providers are accepted.  With only one answer, the
+    # network registry must confirm it.  A 429/error can therefore never turn
+    # a single stale GeoIP result into a wrong country.
+    code = ''
+    if registry_code:
+        if not candidates or any(item[0] == registry_code for item in candidates):
+            code = registry_code
+        else:
+            # Registration and GeoIP disagree: keeping the administrator's
+            # current value is safer than displaying a confidently wrong flag.
+            return fallback
+    else:
+        code = next((item for item, count in counts.items() if count >= 2), '')
+    if not code:
+        return fallback
+
+    matching = [item for item in candidates if item[0] == code]
+    country = COUNTRY_NAMES.get(code) or next((item[1] for item in matching if item[1]), 'Страна')
+    city = next((item[2] for item in matching if item[2]), '')
+    name = CITY_NAMES.get(city, city) if city else country
+    return location({'country_code': code, 'country_name': country, 'name': name})
 
 
 def load_nodes(path):

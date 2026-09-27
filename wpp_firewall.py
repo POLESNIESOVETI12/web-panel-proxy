@@ -97,6 +97,12 @@ def _present(spec, added):
     return re.search(r"(?m)^ufw\s+allow\s+(?:in\s+)?%s/%s(?:\s|$)" % (re.escape(port), proto), added) is not None
 
 
+def _route_present(iface, output, added):
+    pattern = (r"(?m)^ufw\s+route\s+allow\s+in\s+on\s+%s\s+out\s+on\s+%s(?:\s|$)" %
+               (re.escape(iface.lower()), re.escape(output.lower())))
+    return re.search(pattern, added) is not None
+
+
 def _command_ok(result, description):
     if result.returncode:
         detail = (result.stderr or result.stdout or description).strip()[-1200:]
@@ -123,11 +129,16 @@ def reconcile(*, tcp=(), udp=(), routes=()):
                "routes": [list(x) for x in sorted(owned_routes & desired_routes)]})
         return {"enabled": False, "rules": len(desired_rules), "routes": len(desired_routes)}
 
+    added = _existing()
     for spec in sorted(owned_rules - desired_rules):
-        _run("ufw", "--force", "delete", "allow", spec)
+        if _present(spec, added):
+            _command_ok(_run("ufw", "--force", "delete", "allow", spec),
+                        "Could not delete UFW rule " + spec)
         owned_rules.discard(spec)
     for iface, output in sorted(owned_routes - desired_routes):
-        _run("ufw", "--force", "route", "delete", "allow", "in", "on", iface, "out", "on", output)
+        if _route_present(iface, output, added):
+            _command_ok(_run("ufw", "--force", "route", "delete", "allow", "in", "on",
+                             iface, "out", "on", output), "Could not delete UFW route")
         owned_routes.discard((iface, output))
 
     added = _existing()
@@ -138,7 +149,7 @@ def reconcile(*, tcp=(), udp=(), routes=()):
         _command_ok(result, "Could not add UFW rule " + spec)
         owned_rules.add(spec)
     for iface, output in sorted(desired_routes):
-        if (iface, output) in owned_routes:
+        if _route_present(iface, output, added):
             continue
         result = _run("ufw", "route", "allow", "in", "on", iface, "out", "on", output,
                       "comment", COMMENT + " AWG")
