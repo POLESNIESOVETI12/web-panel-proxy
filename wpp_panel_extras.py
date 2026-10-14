@@ -1,104 +1,695 @@
-"""Panel-only HTML helpers. No public subscription request may render admin data."""
-import html
+#!/usr/bin/env python3
+"""Small, root-only OpenFlux exit-node controller used by WPP."""
+
+import json
+import os
+import pwd
+import re
+import secrets
+import shutil
+import subprocess
+import tempfile
 import time
+from pathlib import Path
+from urllib.parse import urlsplit
+
+CONFIG_DIR = Path("/etc/web-proxy-panel/openflux")
+STATE_FILE = CONFIG_DIR / "config.json"
+URL_FILE = CONFIG_DIR / "document-url"
+KEY_FILE = CONFIG_DIR / "encryption-key"
+ENABLED_FILE = CONFIG_DIR / "enabled"
+BIN = Path("/opt/web-panel-proxy/openflux/openflux")
+UNIT = Path("/etc/systemd/system/web-panel-proxy-openflux.service")
+SERVICE = "web-panel-proxy-openflux.service"
+SERVICE_USER = "wpp-openflux"
+LEGACY_IOS_DROPIN = Path("/etc/systemd/system/web-panel-proxy-openflux.service.d/ios.conf")
+PROFILES_DIR = CONFIG_DIR / "profiles"
+VERSION = "1.0.0"
+MAX_OPENFLUX_PROFILES = 32
+TRANSPORT = "yandex"
+TRANSPORTS = {"yandex", "mailru", "oneme"}
+CODEC = "batched"
+MODE = "l4"
 
 
-def esc(value):
-    return html.escape(str(value), quote=True)
+class OpenFluxError(RuntimeError):
+    pass
 
 
-def stamp(value):
-    return time.strftime('%d.%m.%Y %H:%M UTC', time.gmtime(value)) if value else '—'
+def _codec_for(config):
+    """Use the codec built into the current iOS and Android clients."""
+    return CODEC
 
 
-def subscription_ui(subs, path, domain, csrf, traffic, human_bytes):
-    path, token = esc(path), esc(csrf)
-
-    def hidden(sub, op):
-        return (f'<input type="hidden" name="csrf" value="{token}">'
-                f'<input type="hidden" name="id" value="{esc(sub.get("id", ""))}">'
-                f'<input type="hidden" name="operation" value="{op}">')
-
-    def checks(sub):
-        return ''.join(f'<label class="check"><input type="checkbox" name="{p}" value="1" '
-                       f'{"checked" if p in sub.get("protocols", ["vless", "hysteria"]) else ""}> {title}</label>'
-                       for p, title in [('vless', 'VLESS XHTTP'), ('hysteria', 'Hysteria2')])
-
-    cards = []
-    for sub in subs:
-        sid = esc(sub['id'])
-        url = 'https://' + domain + '/wpp-sub/' + sub['token']
-        active = sum(not d.get('revoked') for d in sub['devices'])
-        limit = sub['max_devices']
-        total = sum(int(traffic.get(uid, {}).get('up', 0)) + int(traffic.get(uid, {}).get('down', 0))
-                    for uid in sub.get('profile_ids', []))
-        devices = []
-        for d in sub['devices']:
-            revoked = d.get('revoked', False)
-            devices.append(f'''<div class="device"><div><b>{esc(d['name'])}</b>
-<small>{'Отозвано' if revoked else 'Разрешено'} · ID {esc(d['id'])}<br>Обновление подписки: {stamp(d.get('last_seen'))}</small></div>
-<form method="post" action="{path}/subscription-action">{hidden(sub, 'allow' if revoked else 'revoke')}
-<input type="hidden" name="device_id" value="{esc(d['id'])}"><button class="btn {'danger' if not revoked else ''}">{'Разрешить регистрацию' if revoked else 'Отозвать устройство'}</button></form></div>''')
-        cards.append(f'''<article class="card subscription-card"><div class="sub-title"><h3>{esc(sub['name'])}</h3><span class="status {'on' if sub['enabled'] else 'off'}">{'Включена' if sub['enabled'] else 'Отключена'}</span></div>
-<p class="muted">{'HWID: '+str(active)+' / '+str(limit) if limit else 'Без лимита HWID · общий ключ'} · Трафик: {human_bytes(total)}</p>
-<label>Единая ссылка подписки</label><input class="sub-url" value="{esc(url)}" readonly aria-label="Ссылка подписки {esc(sub['name'])}">
-<div class="actions"><button type="button" class="btn primary copy-sub" data-link="{esc(url)}">Скопировать</button><button type="button" class="btn show-sub-qr" data-src="{path}/subscription-qr?id={sid}">QR подписки</button></div>
-<details><summary>Настройки и устройства</summary><form method="post" action="{path}/subscription-action">{hidden(sub,'update')}
-<label>Имя</label><input name="name" value="{esc(sub['name'])}" maxlength="80" required>
-<label>Максимум устройств (HWID), 0 — без привязки</label><input type="number" name="max_devices" min="0" max="20" value="{limit}" required>
-<div class="checks">{checks(sub)}</div><button class="btn primary">Сохранить настройки</button></form>
-<p class="muted">При переходе между 0 и HWID-лимитом старые ключи отзываются. «Обновление подписки» не означает, что устройство сейчас онлайн.</p>
-<div class="devices">{''.join(devices) or '<p class="muted">Устройства появятся после импорта подписки в клиент.</p>'}</div>
-<div class="actions"><form method="post" action="{path}/subscription-action">{hidden(sub,'toggle')}<button class="btn">{'Отключить подписку' if sub['enabled'] else 'Включить подписку'}</button></form>
-<form method="post" action="{path}/subscription-action" data-confirm="Сменить ссылку и отозвать ключи всех устройств?">{hidden(sub,'rotate')}<button class="btn danger">Сменить ссылку и сбросить устройства</button></form>
-<form method="post" action="{path}/subscription-action" data-confirm="Удалить подписку и отозвать все её ключи?">{hidden(sub,'delete')}<button class="btn danger">Удалить</button></form></div></details></article>''')
-    return f'''<style>
-.sub-title,.device{{display:flex;align-items:center;justify-content:space-between;gap:16px}}.sub-title h3{{margin:0}}.actions,.checks{{display:flex;flex-wrap:wrap;gap:10px;margin:12px 0}}.check{{display:flex;gap:8px;align-items:center}}.check input{{width:auto;margin:0}}.device{{padding:14px 0;border-top:1px solid #ffffff12}}.device small{{display:block;color:#aab4c9;line-height:1.6}}.device form{{flex-shrink:0}}summary{{cursor:pointer;padding:16px 0;color:#c5baff}}.subscription-card{{margin-bottom:16px}}.sub-url{{font-size:12px;min-width:0}}.sub-qr{{max-width:260px;width:100%;background:#fff;padding:12px;border-radius:12px}}@media(max-width:600px){{.device{{align-items:flex-start;flex-direction:column}}}}
-</style><div class="topbar"><div><h1>Подписки</h1><p>Одна ссылка: VLESS XHTTP + Hysteria2</p></div></div>
-<div class="card"><p>Лимит учитывает HWID, переданный клиентом (например, Happ), а не IP и не число соединений. Клиенты без HWID при включённом лимите не получат конфигурацию. Для каждого устройства создаются отдельные ключи.</p>
-<p class="muted">HWID можно подделать, а полученный ключ — скопировать. Это контроль регистрации и отзыва, не гарантированная аппаратная привязка. WEB Proxy остаётся отдельной Telegram-ссылкой. Первая регистрация и отзыв устройства кратковременно перезапускают Xray.</p></div>
-<div class="card"><h3>Новая подписка</h3><form method="post" action="{path}/subscription-action">{hidden({},'create')}
-<label>Имя пользователя</label><input name="name" maxlength="80" placeholder="Например, Александр" required>
-<label>Максимум устройств (HWID), 0 — без привязки</label><input type="number" name="max_devices" value="2" min="0" max="20" required>
-<div class="checks">{checks({})}</div><button class="btn primary">Создать подписку</button></form></div>
-{''.join(cards) or '<div class="card muted">Подписок пока нет. Старые отдельные подключения сохранены во вкладке «Пользователи».</div>'}
-<dialog id="subQrDialog" style="border:0;border-radius:20px;padding:24px"><img id="subQrImg" class="sub-qr" alt="QR подписки"><p><button class="btn" id="closeSubQr">Закрыть</button></p></dialog>
-<script>
-document.querySelectorAll('.copy-sub').forEach(b=>b.addEventListener('click',async()=>{{try{{await navigator.clipboard.writeText(b.dataset.link);b.textContent='Скопировано ✓'}}catch(e){{b.closest('article').querySelector('.sub-url').select();document.execCommand('copy');b.textContent='Скопировано ✓'}}}}));
-document.querySelectorAll('.show-sub-qr').forEach(b=>b.addEventListener('click',()=>{{document.getElementById('subQrImg').src=b.dataset.src;document.getElementById('subQrDialog').showModal()}}));
-document.getElementById('closeSubQr').addEventListener('click',()=>document.getElementById('subQrDialog').close());
-document.querySelectorAll('form[data-confirm]').forEach(f=>f.addEventListener('submit',e=>{{if(!confirm(f.dataset.confirm))e.preventDefault()}}));
-</script>'''
+def _clean_transport(value):
+    value = str(value or TRANSPORT).strip().lower()
+    if value not in TRANSPORTS:
+        raise OpenFluxError("Выберите Яндекс Документы, Mail.ru Документы или MAX.")
+    return value
 
 
-def editor_ui(source, path, csrf, presets, has_draft):
-    buttons = ''.join(f'<form method="post" action="{esc(path)}/draft-preset" class="preset-card">'
-                      f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-                      f'<input type="hidden" name="preset" value="{esc(p["id"])}">'
-                      f'<b>{esc(p["name"])}</b><p class="muted">{esc(p["description"])}</p>'
-                      '<button class="btn">Открыть в черновике</button></form>' for p in presets)
-    return f'''<style>.editor-actions{{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}}.preview-wrap{{overflow:auto;padding:12px;background:#090d18;border-radius:16px}}#landingPreview{{display:block;width:100%;height:660px;max-width:100%;border:0;margin:0 auto;background:white}}#landingPreview.phone{{width:390px;height:720px}}#htmlSource{{width:100%;font:12px/1.6 ui-monospace,monospace}}#previewStatus{{min-height:24px;color:#bdcce9}}</style>
-<div class="card"><h3>Пресеты заглушек</h3><p class="muted">Пресет открывается в черновике. Рабочий сайт изменится только после публикации. Текущий черновик будет заменён.</p><div class="preset-grid">{buttons}</div></div>
-<div class="card"><h3>HTML главной страницы · {'черновик' if has_draft else 'опубликованный исходник'}</h3>
-<p class="muted">Предпросмотр изолирован от панели. Внешние ресурсы, формы и сетевые запросы заблокированы; стили и скрипты должны быть внутри HTML. В живом сайте ограничения могут отличаться — после публикации проверьте страницу.</p>
-<form id="editorForm" method="post" action="{esc(path)}/site-html"><input type="hidden" name="csrf" value="{esc(csrf)}">
-<textarea id="htmlSource" name="html" rows="20" spellcheck="false" required>{esc(source)}</textarea>
-<div class="editor-actions"><button class="btn" formaction="{esc(path)}/save-draft">Сохранить черновик</button><button class="btn" type="button" id="previewHtml">Предпросмотр</button><button class="btn primary" id="publishHtml">Опубликовать на сайте</button></div></form>
-<form method="post" action="{esc(path)}/discard-draft"><input type="hidden" name="csrf" value="{esc(csrf)}"><button class="btn" onclick="return confirm('Удалить черновик и вернуться к опубликованному исходнику?')">Удалить черновик</button></form>
-<div class="editor-actions"><button type="button" class="btn" id="previewDesktop">Компьютер</button><button type="button" class="btn" id="previewPhone">Телефон</button></div>
-<p id="previewStatus">Нажмите «Предпросмотр», чтобы увидеть текущий код без публикации.</p><div class="preview-wrap"><iframe id="landingPreview" title="Изолированный предпросмотр заглушки" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe></div></div>
-<script>
-const ef=document.getElementById('editorForm'),pf=document.getElementById('landingPreview'),ps=document.getElementById('previewStatus');
-document.getElementById('previewHtml').addEventListener('click',async()=>{{ps.textContent='Подготовка…';try{{const body=new URLSearchParams(new FormData(ef));const r=await fetch('{esc(path)}/preview-html',{{method:'POST',body}});const d=await r.json();if(!r.ok)throw new Error(d.message||'Ошибка предпросмотра');pf.srcdoc=d.document;ps.textContent='Предпросмотр обновлён. Рабочий сайт не изменён.'}}catch(e){{ps.textContent=e.message}}}});
-document.getElementById('previewPhone').addEventListener('click',()=>pf.classList.add('phone'));
-document.getElementById('previewDesktop').addEventListener('click',()=>pf.classList.remove('phone'));
-ef.addEventListener('submit',e=>{{if(e.submitter&&e.submitter.id==='publishHtml'&&!confirm('Опубликовать текущий HTML на основном сайте?'))e.preventDefault()}});
-</script>'''
+def _transport_for(config):
+    value = str((config or {}).get("transport", TRANSPORT)).lower()
+    return value if value in TRANSPORTS else TRANSPORT
 
 
-def preview_document(source, externalize):
-    # Preview the exact document without rewriting tags or JSON-LD. Network
-    # access stays disabled inside the sandbox, while inline CSS and JavaScript
-    # behave as they will on the published static site.
-    csp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
-    return '<meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="' + csp + '">' + source
+def _run(args, *, check=True, timeout=20):
+    try:
+        return subprocess.run(args, text=True, capture_output=True, timeout=timeout, check=check)
+    except (OSError, subprocess.SubprocessError) as exc:
+        detail = getattr(exc, "stderr", "") or getattr(exc, "stdout", "") or str(exc)
+        raise OpenFluxError(detail.strip()[-1200:] or "OpenFlux command failed") from exc
+
+
+def _atomic(path, value, mode, uid=0, gid=0):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.chown(temporary, uid, gid)
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def validate_document_url(value, transport=TRANSPORT):
+    transport = _clean_transport(transport)
+    value = str(value or "").strip()
+    if not value or len(value) > 2048 or any(ord(char) < 32 for char in value):
+        raise OpenFluxError("Укажите корректную ссылку на документ Яндекса.")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise OpenFluxError("Ссылка на документ имеет неверный формат.") from exc
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if transport == "mailru":
+        allowed = host == "cloud.mail.ru" and bool(re.fullmatch(r"/public/[^/]+/[^/]+/?", parsed.path))
+        provider = "Mail.ru"
+    else:
+        allowed = host in {"yandex.ru", "yandex.com"} or host.endswith(".yandex.ru") or host.endswith(".yandex.com")
+        provider = "Яндекса"
+    if parsed.scheme != "https" or not allowed or port not in (None, 443):
+        raise OpenFluxError(f"Укажите публичную HTTPS-ссылку на документ {provider}.")
+    if parsed.username or parsed.password or parsed.fragment or not parsed.path or parsed.path == "/":
+        raise OpenFluxError("Используйте публичную ссылку на конкретный документ без логина и фрагмента.")
+    return value
+
+
+def _clean_max_token(value, label):
+    value = str(value or "").strip()
+    if not value or len(value) > 4096 or any(ord(char) < 33 or ord(char) == 127 for char in value):
+        raise OpenFluxError(f"Укажите корректный {label} MAX.")
+    return value
+
+
+def _clean_max_uid(value):
+    value = str(value or "").strip()
+    if not re.fullmatch(r"[1-9][0-9]{0,18}", value) or int(value) > 9223372036854775807:
+        raise OpenFluxError("Укажите числовой UID серверного аккаунта MAX.")
+    return int(value)
+
+
+def _load():
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        raise OpenFluxError("Конфигурация OpenFlux повреждена.") from exc
+    return data if isinstance(data, dict) else {}
+
+
+def _service_active():
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "--quiet", SERVICE],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _identity():
+    try:
+        account = pwd.getpwnam(SERVICE_USER)
+    except KeyError as exc:
+        raise OpenFluxError("Системный пользователь OpenFlux не создан. Повторите обновление WPP.") from exc
+    return account.pw_uid, account.pw_gid
+
+
+def _write_private_files(config):
+    uid, gid = _identity()
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    os.chown(CONFIG_DIR, 0, gid)
+    os.chmod(CONFIG_DIR, 0o750)
+    _atomic(URL_FILE, config["url"] + "\n", 0o640, 0, gid)
+    _atomic(KEY_FILE, config["key"] + "\n", 0o640, 0, gid)
+    _atomic(STATE_FILE, json.dumps(config, ensure_ascii=True, indent=2) + "\n", 0o600)
+    if config.get("enabled", True):
+        _atomic(ENABLED_FILE, "enabled\n", 0o600)
+    else:
+        try:
+            ENABLED_FILE.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _unit_text(config=None):
+    config = config if isinstance(config, dict) else _load()
+    encryption_argument = "" if config.get("ios_compatible", False) else f" --encryption-key-file={KEY_FILE}"
+    codec = _codec_for(config)
+    transport = _transport_for(config)
+    return f"""[Unit]
+Description=WEB PANEL PROXY OpenFlux exit node
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists={ENABLED_FILE}
+
+[Service]
+Type=simple
+User={SERVICE_USER}
+Group={SERVICE_USER}
+UMask=0077
+ExecStart=/bin/sh -c 'exec {BIN} --role=exit --mode={MODE} --codec={codec} --transport={transport} --url "$$(cat {URL_FILE})"{encryption_argument}'
+Restart=on-failure
+RestartSec=4
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def install_service():
+    if not BIN.is_file() or not os.access(BIN, os.X_OK):
+        raise OpenFluxError("Бинарник OpenFlux не установлен. Повторите обновление WPP.")
+    config = _load()
+    try:
+        legacy_dropin_text = LEGACY_IOS_DROPIN.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        legacy_dropin_text = ""
+    if legacy_dropin_text and "--encryption-key-file" not in legacy_dropin_text:
+        config["ios_compatible"] = True
+        if config.get("url") and config.get("key"):
+            _write_private_files(config)
+    expected = _unit_text(config)
+    try:
+        current = UNIT.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        current = ""
+    legacy_dropin_removed = False
+    try:
+        LEGACY_IOS_DROPIN.unlink()
+        legacy_dropin_removed = True
+    except FileNotFoundError:
+        pass
+    if current != expected:
+        _atomic(UNIT, expected, 0o644)
+        legacy_dropin_removed = True
+    if legacy_dropin_removed:
+        _run(["systemctl", "daemon-reload"])
+
+
+def _start():
+    install_service()
+    _run(["systemctl", "restart", SERVICE])
+    stable = 0
+    for _ in range(40):
+        if _service_active():
+            stable += 1
+            if stable >= 12:
+                return
+        else:
+            stable = 0
+        time.sleep(0.25)
+    journal = _run(["journalctl", "-u", SERVICE, "-n", "30", "--no-pager"], check=False).stdout
+    raise OpenFluxError("OpenFlux не запустился. " + journal.strip()[-900:])
+
+
+def configure(document_url, ios_compatible=False, transport=TRANSPORT):
+    transport = _clean_transport(transport)
+    url = validate_document_url(document_url, transport)
+    previous = _load()
+    config = {
+        "enabled": True,
+        "url": url,
+        "key": previous.get("key") if isinstance(previous.get("key"), str) and len(previous["key"]) >= 24 else secrets.token_urlsafe(32),
+        "transport": transport,
+        "codec": CODEC,
+        "mode": MODE,
+        "ios_compatible": bool(ios_compatible),
+        "version": VERSION,
+        "updated_at": int(time.time()),
+    }
+    _write_private_files(config)
+    try:
+        _start()
+    except Exception:
+        if previous.get("url") and previous.get("key"):
+            _write_private_files(previous)
+            try:
+                _start()
+            except Exception:
+                pass
+        else:
+            subprocess.run(["systemctl", "stop", SERVICE], check=False, timeout=15)
+        raise
+    return state()
+
+
+def set_enabled(enabled):
+    config = _load()
+    if not config.get("url") or not config.get("key"):
+        raise OpenFluxError("Сначала сохраните ссылку на документ.")
+    config["enabled"] = bool(enabled)
+    config["updated_at"] = int(time.time())
+    _write_private_files(config)
+    if enabled:
+        try:
+            _start()
+        except Exception:
+            config["enabled"] = False
+            _write_private_files(config)
+            subprocess.run(["systemctl", "stop", SERVICE], check=False, timeout=15)
+            raise
+    else:
+        _run(["systemctl", "stop", SERVICE], check=False)
+    return state()
+
+
+def rotate_key():
+    config = _load()
+    if not config.get("url"):
+        raise OpenFluxError("Сначала сохраните ссылку на документ.")
+    previous = dict(config)
+    config["key"] = secrets.token_urlsafe(32)
+    config["enabled"] = True
+    config["updated_at"] = int(time.time())
+    _write_private_files(config)
+    try:
+        _start()
+    except Exception:
+        _write_private_files(previous)
+        if previous.get("enabled", True):
+            try:
+                _start()
+            except Exception:
+                pass
+        raise
+    return state()
+
+
+def restore_if_configured():
+    config = _load()
+    if not config.get("url") or not config.get("key"):
+        restored = False
+    else:
+        _write_private_files(config)
+        install_service()
+        if config.get("enabled", True):
+            _start()
+        else:
+            _run(["systemctl", "stop", SERVICE], check=False)
+        restored = True
+    for profile in _extra_configs():
+        _write_extra_files(profile)
+        _install_extra_service(profile)
+        if profile.get("enabled", True):
+            _start_extra(profile)
+        else:
+            _run(["systemctl", "stop", _extra_service(profile["id"])], check=False)
+    return restored or bool(_extra_configs())
+
+
+def state():
+    config = _load()
+    configured = bool(config.get("url") and config.get("key"))
+    return {
+        "configured": configured,
+        "enabled": bool(config.get("enabled", True)) if configured else False,
+        "active": _service_active() if configured else False,
+        "url": config.get("url", "") if configured else "",
+        "key": config.get("key", "") if configured else "",
+        "transport": _transport_for(config),
+        "codec": _codec_for(config),
+        "mode": MODE,
+        "ios_compatible": bool(config.get("ios_compatible", False)),
+        "encrypted": not bool(config.get("ios_compatible", False)),
+        "version": VERSION,
+    }
+
+
+def _clean_profile_name(value):
+    value = str(value or "").strip()
+    if not value or len(value) > 80 or any(ord(char) < 32 for char in value):
+        raise OpenFluxError("Укажите имя профиля длиной от 1 до 80 символов.")
+    return value
+
+
+def _clean_platform(value):
+    value = str(value or "").lower()
+    if value not in ("ios", "android"):
+        raise OpenFluxError("Выберите iOS или Android.")
+    return value
+
+
+def _extra_id(value):
+    value = str(value or "")
+    if not re.fullmatch(r"[a-f0-9]{16}", value):
+        raise OpenFluxError("Профиль OpenFlux не найден.")
+    return value
+
+
+def _extra_paths(profile_id):
+    directory = PROFILES_DIR / _extra_id(profile_id)
+    return {
+        "dir": directory,
+        "state": directory / "config.json",
+        "url": directory / "document-url",
+        "key": directory / "encryption-key",
+        "max_token": directory / "max-server-token",
+        "enabled": directory / "enabled",
+        "unit": Path("/etc/systemd/system") / ("web-panel-proxy-openflux-" + profile_id + ".service"),
+    }
+
+
+def _extra_service(profile_id):
+    return "web-panel-proxy-openflux-" + _extra_id(profile_id) + ".service"
+
+
+def _extra_configs():
+    result = []
+    try:
+        entries = list(PROFILES_DIR.iterdir())
+    except FileNotFoundError:
+        return result
+    for entry in entries:
+        if not entry.is_dir() or not re.fullmatch(r"[a-f0-9]{16}", entry.name):
+            continue
+        try:
+            value = json.loads((entry / "config.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(value, dict) and value.get("id") == entry.name:
+            result.append(value)
+    def created(item):
+        try:
+            return int(item.get("created_at", 0))
+        except (TypeError, ValueError):
+            return 0
+    return sorted(result, key=lambda item: (created(item), item["id"]))
+
+
+def _write_extra_files(config):
+    paths = _extra_paths(config["id"])
+    _, gid = _identity()
+    paths["dir"].mkdir(parents=True, exist_ok=True)
+    os.chown(paths["dir"], 0, gid)
+    os.chmod(paths["dir"], 0o750)
+    transport = _transport_for(config)
+    _atomic(paths["url"], str(config.get("url", "")) + "\n", 0o640, 0, gid)
+    _atomic(paths["key"], config["key"] + "\n", 0o640, 0, gid)
+    if transport == "oneme":
+        _atomic(paths["max_token"], config["max_server_token"] + "\n", 0o640, 0, gid)
+    else:
+        try:
+            paths["max_token"].unlink()
+        except FileNotFoundError:
+            pass
+    _atomic(paths["state"], json.dumps(config, ensure_ascii=True, indent=2) + "\n", 0o600)
+    if config.get("enabled", True):
+        _atomic(paths["enabled"], "enabled\n", 0o600)
+    else:
+        try:
+            paths["enabled"].unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _extra_unit_text(config):
+    paths = _extra_paths(config["id"])
+    encryption = "" if config.get("platform") == "ios" else " --encryption-key-file=" + str(paths["key"])
+    codec = _codec_for(config)
+    transport = _transport_for(config)
+    if transport == "oneme":
+        max_uid = _clean_max_uid(config.get("max_uid", ""))
+        transport_arguments = (
+            f'--transport=oneme --maxToken "$$(cat {paths["max_token"]})" '
+            f'--maxUid={max_uid}'
+        )
+    else:
+        transport_arguments = f'--transport={transport} --url "$$(cat {paths["url"]})"'
+    return f"""[Unit]
+Description=WEB PANEL PROXY OpenFlux profile {config['id']}
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists={paths['enabled']}
+
+[Service]
+Type=simple
+User={SERVICE_USER}
+Group={SERVICE_USER}
+UMask=0077
+ExecStart=/bin/sh -c 'exec {BIN} --role=exit --mode={MODE} --codec={codec} {transport_arguments}{encryption}'
+Restart=on-failure
+RestartSec=4
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def _install_extra_service(config):
+    if not BIN.is_file() or not os.access(BIN, os.X_OK):
+        raise OpenFluxError("Бинарник OpenFlux не установлен. Повторите обновление WPP.")
+    paths = _extra_paths(config["id"])
+    expected = _extra_unit_text(config)
+    try:
+        current = paths["unit"].read_text(encoding="utf-8")
+    except FileNotFoundError:
+        current = ""
+    if current != expected:
+        _atomic(paths["unit"], expected, 0o644)
+        _run(["systemctl", "daemon-reload"])
+
+
+def _extra_active(profile_id):
+    try:
+        return subprocess.run(["systemctl", "is-active", "--quiet", _extra_service(profile_id)],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=5, check=False).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _start_extra(config):
+    _install_extra_service(config)
+    service = _extra_service(config["id"])
+    _run(["systemctl", "enable", service])
+    _run(["systemctl", "restart", service])
+    stable = 0
+    for _ in range(40):
+        if _extra_active(config["id"]):
+            stable += 1
+            if stable >= 12:
+                return
+        else:
+            stable = 0
+        time.sleep(0.25)
+    journal = _run(["journalctl", "-u", service, "-n", "30", "--no-pager"], check=False).stdout
+    raise OpenFluxError("Профиль OpenFlux не запустился. " + journal.strip()[-900:])
+
+
+def profile_states():
+    result = []
+    main = state()
+    if main["configured"]:
+        main.update({"id": "main", "name": _load().get("name", "OpenFlux"),
+                     "platform": "ios" if main["ios_compatible"] else "android"})
+        result.append(main)
+    for config in _extra_configs():
+        try:
+            max_uid = int(config.get("max_uid", 0) or 0)
+        except (TypeError, ValueError):
+            max_uid = 0
+        try:
+            created_at = int(config.get("created_at", 0) or 0)
+        except (TypeError, ValueError):
+            created_at = 0
+        result.append({
+            "id": config["id"], "name": config.get("name", "OpenFlux"),
+            "platform": config.get("platform", "android"), "url": config.get("url", ""),
+            "key": config.get("key", ""), "configured": True,
+            "enabled": bool(config.get("enabled", True)), "active": _extra_active(config["id"]),
+            "encrypted": config.get("platform") != "ios", "transport": _transport_for(config),
+            "codec": _codec_for(config), "version": VERSION,
+            "max_client_token": config.get("max_client_token", ""),
+            "max_uid": max_uid,
+            "created_at": created_at,
+        })
+    return result
+
+
+def create_profile(name, document_url, platform, transport=TRANSPORT,
+                   max_server_token="", max_client_token="", max_uid=""):
+    if len(_extra_configs()) >= MAX_OPENFLUX_PROFILES:
+        raise OpenFluxError("Достигнут лимит профилей OpenFlux.")
+    profile_id = secrets.token_hex(8)
+    transport = _clean_transport(transport)
+    platform = _clean_platform(platform)
+    if transport == "oneme":
+        document_url = ""
+        max_server_token = _clean_max_token(max_server_token, "токен серверного аккаунта")
+        max_client_token = _clean_max_token(max_client_token, "токен клиентского аккаунта")
+        max_uid = _clean_max_uid(max_uid)
+        if max_server_token == max_client_token:
+            raise OpenFluxError("Для сервера и клиента нужны разные аккаунты MAX.")
+        for item in _extra_configs():
+            try:
+                item_max_uid = int(item.get("max_uid", 0) or 0)
+            except (TypeError, ValueError):
+                item_max_uid = 0
+            if item.get("transport") == "oneme" and (
+                    item.get("max_server_token") == max_server_token or
+                    item_max_uid == max_uid):
+                raise OpenFluxError("Этот серверный аккаунт MAX уже используется другим профилем.")
+    else:
+        document_url = validate_document_url(document_url, transport)
+        existing_urls = {item.get("url") for item in _extra_configs()}
+        existing_urls.add(_load().get("url"))
+        if document_url in existing_urls:
+            raise OpenFluxError("Этот документ уже используется другим профилем OpenFlux.")
+    config = {"id": profile_id, "name": _clean_profile_name(name),
+              "url": document_url, "platform": platform,
+              "key": secrets.token_urlsafe(32), "enabled": True, "transport": transport,
+              "codec": CODEC, "mode": MODE, "version": VERSION,
+              "created_at": int(time.time()), "updated_at": int(time.time())}
+    if transport == "oneme":
+        config.update({"max_server_token": max_server_token,
+                       "max_client_token": max_client_token, "max_uid": max_uid})
+    _write_extra_files(config)
+    try:
+        _start_extra(config)
+    except Exception:
+        _run(["systemctl", "disable", "--now", _extra_service(profile_id)], check=False)
+        shutil.rmtree(_extra_paths(profile_id)["dir"], ignore_errors=True)
+        try:
+            _extra_paths(profile_id)["unit"].unlink()
+        except FileNotFoundError:
+            pass
+        _run(["systemctl", "daemon-reload"], check=False)
+        raise
+    return config
+
+
+def profile_set_enabled(profile_id, enabled):
+    if profile_id == "main":
+        return set_enabled(enabled)
+    config = next((item for item in _extra_configs() if item["id"] == _extra_id(profile_id)), None)
+    if config is None:
+        raise OpenFluxError("Профиль OpenFlux не найден.")
+    config["enabled"] = bool(enabled)
+    config["updated_at"] = int(time.time())
+    _write_extra_files(config)
+    if enabled:
+        try:
+            _start_extra(config)
+        except Exception:
+            config["enabled"] = False
+            _write_extra_files(config)
+            _run(["systemctl", "stop", _extra_service(config["id"])], check=False)
+            raise
+    else:
+        _run(["systemctl", "stop", _extra_service(config["id"])], check=False)
+
+
+def profile_rotate(profile_id):
+    if profile_id == "main":
+        return rotate_key()
+    config = next((item for item in _extra_configs() if item["id"] == _extra_id(profile_id)), None)
+    if config is None:
+        raise OpenFluxError("Профиль OpenFlux не найден.")
+    previous = dict(config)
+    config["key"] = secrets.token_urlsafe(32)
+    config["enabled"] = True
+    config["updated_at"] = int(time.time())
+    _write_extra_files(config)
+    try:
+        _start_extra(config)
+    except Exception:
+        _run(["systemctl", "stop", _extra_service(config["id"])], check=False)
+        _write_extra_files(previous)
+        try:
+            if previous.get("enabled", True):
+                _start_extra(previous)
+        except Exception:
+            pass
+        raise
+
+
+def delete_profile(profile_id):
+    if profile_id == "main":
+        config = _load()
+        if not config.get("url"):
+            raise OpenFluxError("Профиль OpenFlux не найден.")
+        _run(["systemctl", "disable", "--now", SERVICE], check=False)
+        for path in (STATE_FILE, URL_FILE, KEY_FILE, ENABLED_FILE):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        # Keep the unit template installed so a new main profile can be
+        # created later without reinstalling the panel.
+        install_service()
+        return
+    profile_id = _extra_id(profile_id)
+    paths = _extra_paths(profile_id)
+    if not paths["state"].exists():
+        raise OpenFluxError("Профиль OpenFlux не найден.")
+    _run(["systemctl", "disable", "--now", _extra_service(profile_id)], check=False)
+    try:
+        paths["unit"].unlink()
+    except FileNotFoundError:
+        pass
+    shutil.rmtree(paths["dir"], ignore_errors=True)
+    _run(["systemctl", "daemon-reload"], check=False)

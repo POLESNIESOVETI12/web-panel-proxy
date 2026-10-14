@@ -1,56 +1,41 @@
-"""Secure WPP node registry, API authentication and federation client."""
-import base64
-import hmac
-import ipaddress
+"""Independent VPS sampler; proxy counters are read without running Xray/nft."""
 import json
 import os
+from pathlib import Path
 import re
-import secrets
-import socket
+import shutil
+import subprocess
+import sys
 import tempfile
-import urllib.error
-import urllib.parse
-import urllib.request
+import time
+import traceback
 
-API_PREFIX = '/wpp-api/v1'
-CONNECTION_TOKEN_PREFIX = 'wppnode1_'
-MAX_NODES = 16
-MAX_RESPONSE = 1024 * 1024
-
-COUNTRY_NAMES = {
-    'FI': 'Финляндия', 'DE': 'Германия', 'NL': 'Нидерланды', 'FR': 'Франция',
-    'GB': 'Великобритания', 'US': 'США', 'CA': 'Канада', 'SE': 'Швеция',
-    'NO': 'Норвегия', 'DK': 'Дания', 'PL': 'Польша', 'CZ': 'Чехия',
-    'AT': 'Австрия', 'CH': 'Швейцария', 'ES': 'Испания', 'IT': 'Италия',
-    'RO': 'Румыния', 'BG': 'Болгария', 'TR': 'Турция', 'KZ': 'Казахстан',
-    'RU': 'Россия', 'UA': 'Украина', 'JP': 'Япония', 'SG': 'Сингапур',
-    'HK': 'Гонконг', 'AE': 'ОАЭ', 'LT': 'Литва', 'LV': 'Латвия',
-    'EE': 'Эстония', 'IS': 'Исландия', 'IE': 'Ирландия', 'BE': 'Бельгия',
-}
-
-CITY_NAMES = {
-    'Helsinki': 'Хельсинки', 'Frankfurt am Main': 'Франкфурт',
-    'Frankfurt': 'Франкфурт', 'Amsterdam': 'Амстердам', 'Stockholm': 'Стокгольм',
-    'Warsaw': 'Варшава', 'Paris': 'Париж', 'London': 'Лондон',
-    'Vienna': 'Вена', 'Prague': 'Прага', 'Bucharest': 'Бухарест',
-    'Tallinn': 'Таллин', 'Riga': 'Рига', 'Vilnius': 'Вильнюс',
-    'New York': 'Нью-Йорк', 'Los Angeles': 'Лос-Анджелес',
-}
+STATE = Path('/var/lib/tproxy-panel/metrics.json')
+TRAFFIC = Path('/var/lib/tproxy-panel/traffic.json')
+ERROR = Path('/var/lib/tproxy-panel/metrics-error.json')
+PROC = Path('/proc')
+SERVICES = {'xray': 'web-panel-proxy-xray.service', 'panel': 'tproxy-panel.service',
+            'caddy': 'caddy.service', 'relay': 'tproxy-server.service'}
+OPENFLUX_PROFILES = Path('/etc/web-proxy-panel/openflux/profiles')
 
 
-class NodeError(ValueError):
-    pass
+def read_state(path=None):
+    path = STATE if path is None else path
+    try:
+        value = json.loads(path.read_text(encoding='utf-8'))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
 def atomic_json(path, value):
-    directory = os.path.dirname(path)
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix='.wpp-nodes-', dir=directory)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=str(path.parent))
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-            json.dump(value, stream, ensure_ascii=True, indent=2)
-            stream.flush()
-            os.fsync(stream.fileno())
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(value, f, ensure_ascii=True, separators=(',', ':'))
+            f.flush()
+            os.fsync(f.fileno())
         os.chmod(temporary, 0o600)
         os.replace(temporary, path)
     finally:
@@ -60,332 +45,151 @@ def atomic_json(path, value):
             pass
 
 
-def ensure_api_key(path):
+def proc_text(name):
     try:
-        with open(path, encoding='ascii') as stream:
-            value = stream.read().strip()
-    except FileNotFoundError:
-        value = ''
-    if not re.fullmatch(r'[A-Za-z0-9_-]{43}', value):
-        value = secrets.token_urlsafe(32)
-        directory = os.path.dirname(path)
-        os.makedirs(directory, mode=0o700, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, 'w', encoding='ascii') as stream:
-            stream.write(value + '\n')
-        os.chmod(path, 0o600)
-    return value
-
-
-def make_connection_token(domain, key):
-    domain = str(domain or '').strip().lower()
-    url = normalize_url(domain if '://' in domain else 'https://' + domain)
-    if not re.fullmatch(r'[A-Za-z0-9_-]{43}', str(key or '')):
-        raise NodeError('Некорректный ключ API ноды.')
-    packed = json.dumps({'url': url, 'key': key}, ensure_ascii=True,
-                        separators=(',', ':')).encode('utf-8')
-    return CONNECTION_TOKEN_PREFIX + base64.urlsafe_b64encode(packed).decode('ascii').rstrip('=')
-
-
-def parse_connection_token(value):
-    value = str(value or '').strip()
-    if not value.startswith(CONNECTION_TOKEN_PREFIX):
-        raise NodeError('Вставьте полный Node API token из устанавливаемой ноды.')
-    encoded = value[len(CONNECTION_TOKEN_PREFIX):]
-    if not re.fullmatch(r'[A-Za-z0-9_-]{32,512}', encoded):
-        raise NodeError('Некорректный Node API token.')
-    try:
-        raw = base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4))
-        data = json.loads(raw.decode('utf-8'))
-    except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
-        raise NodeError('Некорректный Node API token.') from exc
-    if not isinstance(data, dict) or not re.fullmatch(r'[A-Za-z0-9_-]{43}', str(data.get('key', ''))):
-        raise NodeError('Некорректный Node API token.')
-    return {'url': normalize_url(data.get('url')), 'token': str(data['key'])}
-
-
-def bearer_valid(header, key):
-    prefix = 'Bearer '
-    if not isinstance(header, str) or not header.startswith(prefix):
-        return False
-    candidate = header[len(prefix):].strip()
-    if candidate.startswith(CONNECTION_TOKEN_PREFIX):
-        try:
-            candidate = parse_connection_token(candidate)['token']
-        except NodeError:
-            return False
-    return hmac.compare_digest(candidate, key)
-
-
-def clean_text(value, label, maximum=80):
-    value = str(value or '').strip()
-    if not value or len(value) > maximum or any(ord(char) < 32 for char in value):
-        raise NodeError('%s: от 1 до %d символов.' % (label, maximum))
-    return value
-
-
-def flag(code):
-    code = str(code or '').strip().upper()
-    if not re.fullmatch(r'[A-Z]{2}', code):
-        raise NodeError('Код страны должен состоять из двух латинских букв, например DE.')
-    return ''.join(chr(127397 + ord(char)) for char in code)
-
-
-def location(value):
-    value = value if isinstance(value, dict) else {}
-    code = str(value.get('country_code', 'UN')).upper()
-    if code == 'UN':
-        return {'country_code': 'UN', 'country_name': 'Сервер', 'name': clean_text(value.get('name', 'Основная локация'), 'Локация')}
-    flag(code)
-    return {'country_code': code, 'country_name': clean_text(value.get('country_name'), 'Страна'),
-            'name': clean_text(value.get('name'), 'Локация')}
-
-
-def location_prefix(value):
-    value = location(value)
-    icon = '🌐' if value['country_code'] == 'UN' else flag(value['country_code'])
-    parts = [icon, value['country_name']]
-    if value['name'] and value['name'].casefold() != value['country_name'].casefold():
-        parts.append(value['name'])
-    return ' '.join(parts[:2]) + (' · ' + parts[2] if len(parts) > 2 else '')
-
-
-def load_location(path):
-    try:
-        with open(path, encoding='utf-8') as stream:
-            return location(json.load(stream))
-    except (FileNotFoundError, ValueError, TypeError, json.JSONDecodeError):
-        return location({})
-
-
-def save_location(path, value):
-    value = location(value)
-    atomic_json(path, value)
-    return value
-
-
-def _location_json(url, timeout):
-    request = urllib.request.Request(
-        url,
-        headers={'Accept': 'application/json', 'User-Agent': 'WEB-PANEL-PROXY/2.4'},
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        payload = response.read(65537)
-    if len(payload) > 65536:
-        raise ValueError('Location response is too large')
-    value = json.loads(payload.decode('utf-8'))
-    if not isinstance(value, dict):
-        raise ValueError('Location response is not an object')
-    return value
-
-
-def _country_code(value):
-    code = str(value or '').strip().upper()
-    return code if re.fullmatch(r'[A-Z]{2}', code) else ''
-
-
-def _optional_location_text(value):
-    value = str(value or '').strip()
-    if not value or len(value) > 80 or any(ord(char) < 32 for char in value):
+        return (PROC / name).read_text(encoding='ascii').strip()
+    except OSError:
         return ''
-    return value
 
 
-def detect_location(current=None, timeout=8):
-    """Resolve location from the public IPv4 without trusting one GeoIP database."""
-    fallback = location(current or {})
+def _service_fields(unit):
+    run = subprocess.run(['systemctl', 'show', unit, '--no-pager',
+        '-p', 'ActiveState', '-p', 'MemoryCurrent', '-p', 'TasksCurrent',
+        '-p', 'ExecMainStartTimestampMonotonic'], capture_output=True, text=True, timeout=3,
+        env={**os.environ, 'LC_ALL':'C', 'SYSTEMD_COLORS':'0'})
+    fields = dict(line.split('=', 1) for line in run.stdout.splitlines() if '=' in line)
+    numeric = lambda key: int(fields[key]) if fields.get(key, '').isdigit() and int(fields[key]) < 2**63 else None
+    return {'state': fields.get('ActiveState', 'unknown'), 'memory': numeric('MemoryCurrent'),
+            'tasks': numeric('TasksCurrent'), 'start_us': numeric('ExecMainStartTimestampMonotonic')}
 
-    # api.ipify.org is IPv4-only.  Previously ipapi.co/json could observe IPv6
-    # or a provider proxy and one erroneous GeoIP answer became authoritative.
+
+def _openflux_snapshot():
+    units = ['web-panel-proxy-openflux.service']
     try:
-        public = _location_json('https://api.ipify.org?format=json', timeout)
-        address = ipaddress.ip_address(str(public.get('ip', '')).strip())
-        if address.version != 4 or not address.is_global:
-            return fallback
-    except (OSError, ValueError, TypeError, json.JSONDecodeError, urllib.error.URLError):
-        return fallback
+        profile_ids = sorted(entry.name for entry in OPENFLUX_PROFILES.iterdir()
+                             if entry.is_dir() and re.fullmatch(r'[0-9a-f]{16}', entry.name))
+    except OSError:
+        profile_ids = []
+    units.extend('web-panel-proxy-openflux-' + profile_id + '.service' for profile_id in profile_ids)
+    states = [_service_fields(unit) for unit in units]
+    active = [value for value in states if value.get('state') == 'active']
+    selected = active or states
+    numbers = lambda key: [value[key] for value in selected if value.get(key) is not None]
+    starts = numbers('start_us')
+    memories = numbers('memory')
+    tasks = numbers('tasks')
+    return {'state': 'active' if active else ('inactive' if states else 'unknown'),
+            'memory': sum(memories) if memories else None,
+            'tasks': sum(tasks) if tasks else None,
+            'start_us': min(starts) if starts else None,
+            'active_profiles': len(active), 'profiles': len(units)}
 
-    ip = str(address)
-    registry_code = ''
-    try:
-        registry = _location_json('https://rdap.org/ip/' + ip, timeout)
-        registry_code = _country_code(registry.get('country'))
-    except (OSError, ValueError, TypeError, json.JSONDecodeError, urllib.error.URLError):
-        pass
 
-    candidates = []
-    lookups = (
-        ('https://ipapi.co/' + ip + '/json/', 'country_code', 'country_name'),
-        ('https://ipwho.is/' + ip, 'country_code', 'country'),
-    )
-    for url, code_key, name_key in lookups:
+def service_snapshot():
+    result = {}
+    for name, unit in SERVICES.items():
         try:
-            data = _location_json(url, timeout)
-            if data.get('success') is False or data.get('error') is True:
-                continue
-            code = _country_code(data.get(code_key) or data.get('country'))
-            if code:
-                candidates.append((code, _optional_location_text(data.get(name_key)),
-                                   _optional_location_text(data.get('city'))))
-        except (OSError, ValueError, TypeError, json.JSONDecodeError, urllib.error.URLError):
-            continue
-
-    counts = {}
-    for code, _country, _city in candidates:
-        counts[code] = counts.get(code, 0) + 1
-
-    # Two agreeing GeoIP providers are accepted.  With only one answer, the
-    # network registry must confirm it.  A 429/error can therefore never turn
-    # a single stale GeoIP result into a wrong country.
-    code = ''
-    if registry_code:
-        if not candidates or any(item[0] == registry_code for item in candidates):
-            code = registry_code
-        else:
-            # Registration and GeoIP disagree: keeping the administrator's
-            # current value is safer than displaying a confidently wrong flag.
-            return fallback
-    else:
-        code = next((item for item, count in counts.items() if count >= 2), '')
-    if not code:
-        return fallback
-
-    matching = [item for item in candidates if item[0] == code]
-    country = COUNTRY_NAMES.get(code) or next((item[1] for item in matching if item[1]), 'Страна')
-    city = next((item[2] for item in matching if item[2]), '')
-    name = CITY_NAMES.get(city, city) if city else country
-    return location({'country_code': code, 'country_name': country, 'name': name})
-
-
-def load_nodes(path):
+            result[name] = _service_fields(unit)
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            result[name] = {'state': 'unknown'}
     try:
-        with open(path, encoding='utf-8') as stream:
-            value = json.load(stream)
-    except FileNotFoundError:
-        return []
-    if not isinstance(value, list):
-        raise NodeError('Реестр нод повреждён.')
-    return value
+        result['openflux'] = _openflux_snapshot()
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        result['openflux'] = {'state': 'unknown'}
+    return result
 
 
-def save_nodes(path, nodes):
-    atomic_json(path, nodes)
+def make_sample(traffic, previous, now=None):
+    now = int(time.time()) if now is None else now
+    mem = {}
+    for line in proc_text('meminfo').splitlines():
+        parts = line.split()
+        if len(parts) > 1 and parts[1].isdigit(): mem[parts[0].rstrip(':')] = int(parts[1]) * 1024
+    cpu = proc_text('stat').splitlines()
+    raw = [int(x) for x in cpu[0].split()[1:9]] if cpu and cpu[0].startswith('cpu ') else []
+    total = sum(raw) if raw else 0
+    idle = sum(raw[3:5]) if raw else 0  # idle + iowait, excluding guest double-counting
+    before = previous.get('cpu_ticks', [0, 0])
+    delta = total - before[0]
+    boot = proc_text('sys/kernel/random/boot_id')
+    same_boot = bool(boot) and boot == previous.get('boot_id')
+    percent = max(0, min(100, 100 * (1 - (idle - before[1]) / delta))) if same_boot and delta > 0 else None
+    up = sum(max(0, int(v.get('up', 0))) for v in traffic.values() if isinstance(v, dict))
+    down = sum(max(0, int(v.get('down', 0))) for v in traffic.values() if isinstance(v, dict))
+    dt = now - previous.get('time', now)
+    # Gaps/reboots/resets are not interpolated into fabricated measurements.
+    observed = max((v.get('updated_at',0) for v in traffic.values() if isinstance(v,dict)), default=0)
+    traffic_fresh = 0 <= now-observed <= 90 and observed > 0
+    old_observed = previous.get('traffic_time',0)
+    traffic_dt = observed-old_observed
+    rates_valid = (same_boot and traffic_fresh and old_observed > 0 and 0 < traffic_dt <= 120
+                   and 10 <= dt <= 120 and up >= previous.get('up',up) and down >= previous.get('down',down))
+    try: disk = shutil.disk_usage('/')
+    except OSError: disk = None
+    try: uptime = float(proc_text('uptime').split()[0])
+    except (ValueError, IndexError): uptime = None
+    try: load = [float(x) for x in proc_text('loadavg').split()[:3]]
+    except ValueError: load = []
+    return {'time': now, 'boot_id': boot, 'cpu_ticks': [total, idle], 'cpu': percent,
+            'cores': os.cpu_count() or 1, 'ram_total': mem.get('MemTotal'),
+            'ram_used': max(0, mem['MemTotal'] - mem.get('MemAvailable', mem.get('MemFree', 0))) if 'MemTotal' in mem else None,
+            'swap_total': mem.get('SwapTotal'), 'swap_used': max(0, mem.get('SwapTotal', 0) - mem.get('SwapFree', 0)),
+            'disk_total': disk.total if disk else None, 'disk_used': disk.used if disk else None,
+            'uptime': uptime, 'load': load, 'up': up, 'down': down,
+            'traffic_time': observed, 'traffic_fresh': traffic_fresh,
+            'up_rate': (up - previous['up']) / traffic_dt if rates_valid else None,
+            'down_rate': (down - previous['down']) / traffic_dt if rates_valid else None,
+            'services': service_snapshot()}
 
 
-def public_node(node):
-    return {key: value for key, value in node.items() if key != 'token'}
+def sample_metrics(traffic, force=False):
+    import fcntl
+    STATE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (STATE.parent / 'metrics.lock').open('a') as lock:
+        os.chmod(lock.name, 0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        data = read_state()
+        now = int(time.time())
+        if not force and 0 <= now - data.get('latest', {}).get('time', 0) < 25: return
+        previous = data.get('latest', {})
+        point = make_sample(traffic, previous, now)
+        # First install: obtain a real CPU delta, not an invented zero.
+        if point.get('cpu') is None and point.get('cpu_ticks',[0])[0] > 0:
+            ticks = point['cpu_ticks']
+            time.sleep(0.15)
+            raw = proc_text('stat').splitlines()
+            values = [int(x) for x in raw[0].split()[1:9]] if raw and raw[0].startswith('cpu ') else []
+            delta = sum(values)-ticks[0]
+            if delta > 0: point['cpu'] = max(0,min(100,100*(1-(sum(values[3:5])-ticks[1])/delta)))
+        history = [h for h in data.get('history', []) if now - 86400 <= h.get('time', 0) < now]
+        history.append({k: point[k] for k in ('time', 'up_rate', 'down_rate', 'cpu')})
+        # Ten-second sampling keeps a full day plus one point.
+        atomic_json(STATE, {'latest': point, 'history': history[-8641:]})
 
 
-def normalize_url(value):
+def collect_once():
     try:
-        parsed = urllib.parse.urlsplit(str(value or '').strip())
-    except ValueError as exc:
-        raise NodeError('Некорректный URL ноды.') from exc
-    if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or
-            parsed.query or parsed.fragment or parsed.path not in ('', '/')):
-        raise NodeError('URL ноды должен иметь вид https://node.example.com без пути, логина и параметров.')
-    hostname = parsed.hostname.lower()
-    if (len(hostname) > 253 or hostname.endswith('.') or
-            any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', part)
-                for part in hostname.split('.'))):
-        raise NodeError('Укажите корректное публичное доменное имя ноды.')
-    try:
-        ipaddress.ip_address(parsed.hostname)
-    except ValueError:
-        pass
-    else:
-        raise NodeError('Для ноды используйте доменное имя с действующим HTTPS-сертификатом.')
-    if '.' not in parsed.hostname or parsed.hostname.lower() == 'localhost':
-        raise NodeError('Укажите публичное доменное имя ноды.')
-    try:
-        port = parsed.port
-    except ValueError as exc:
-        raise NodeError('Некорректный HTTPS-порт ноды.') from exc
-    if port not in (None, 443):
-        raise NodeError('API ноды доступен только через стандартный HTTPS-порт 443.')
-    return 'https://' + hostname
+        sample_metrics(read_state(TRAFFIC), force=True)
+        value = read_state().get('latest',{})
+        if not value.get('ram_total') or not value.get('cpu_ticks',[0])[0]:
+            raise RuntimeError('Required Linux /proc metrics are unavailable')
+        if ERROR.exists(): ERROR.unlink()
+    except Exception as exc:
+        # No secrets or raw command output in the HTTP response.
+        atomic_json(ERROR, {'time':int(time.time()),'kind':type(exc).__name__})
+        raise
 
 
-def resolve_public(hostname):
-    try:
-        addresses = {item[4][0] for item in socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)}
-    except OSError as exc:
-        raise NodeError('Не удалось определить IP-адрес ноды.') from exc
-    if not addresses or any(not ipaddress.ip_address(value).is_global for value in addresses):
-        raise NodeError('Домен ноды должен указывать только на публичные IP-адреса.')
+def dashboard_data(hours=1):
+    data = read_state()
+    cutoff = int(time.time()) - hours * 3600
+    return {'latest': data.get('latest', {}), 'history': [p for p in data.get('history', []) if p.get('time', 0) >= cutoff],
+            'collector_error': read_state(ERROR)}
 
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
-        return None
-
-
-def request(node, method, path, payload=None, timeout=8):
-    base = normalize_url(node.get('url'))
-    parsed = urllib.parse.urlsplit(base)
-    resolve_public(parsed.hostname)
-    body = None if payload is None else json.dumps(payload, ensure_ascii=True).encode()
-    req = urllib.request.Request(base + path, data=body, method=method,
-        headers={'Authorization': 'Bearer ' + str(node.get('token', '')), 'Accept': 'application/json',
-                 'Content-Type': 'application/json', 'User-Agent': 'WPP-Controller/2.2'})
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-    try:
-        with opener.open(req, timeout=timeout) as response:
-            raw = response.read(MAX_RESPONSE + 1)
-            if len(raw) > MAX_RESPONSE:
-                raise NodeError('Ответ ноды слишком большой.')
-            value = json.loads(raw.decode('utf-8'))
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
-        raise NodeError('Нода не отвечает или отклонила API-токен.') from exc
-    if not isinstance(value, dict) or not value.get('ok'):
-        raise NodeError(str(value.get('message', 'Некорректный ответ ноды.')) if isinstance(value, dict) else 'Некорректный ответ ноды.')
-    return value
-
-
-def add_node(path, request_data):
-    nodes = load_nodes(path)
-    if len(nodes) >= MAX_NODES:
-        raise NodeError('Достигнут лимит из %d нод.' % MAX_NODES)
-    bundled = str(request_data.get('connection_token', '')).strip()
-    if bundled:
-        details = parse_connection_token(bundled)
-        url, token = details['url'], details['token']
-    else:
-        # Backward compatibility for controllers configured before bundled tokens.
-        url = normalize_url(request_data.get('url'))
-        token = str(request_data.get('token', '')).strip()
-    if not re.fullmatch(r'[A-Za-z0-9_-]{43}', token):
-        raise NodeError('Некорректный API-токен ноды.')
-    if any(node.get('url') == url for node in nodes):
-        raise NodeError('Эта нода уже добавлена.')
-    candidate = {'url': url, 'token': token}
-    status = request(candidate, 'GET', API_PREFIX + '/status')
-    reported_url = normalize_url('https://' + str(status.get('domain', '')).strip().lower())
-    if reported_url != url:
-        raise NodeError('Домен в токене не совпадает с доменом, который сообщила нода.')
-    loc = location(status.get('location'))
-    node = {'id': secrets.token_hex(8), 'url': url, 'token': token, **loc, 'enabled': True}
-    node['version'] = str(status.get('version', ''))[:32]
-    nodes.append(node)
-    save_nodes(path, nodes)
-    return public_node(node)
-
-
-def sync_profile(node, external_id, name, protocols):
-    if not re.fullmatch(r'[a-f0-9]{32,64}', external_id):
-        raise NodeError('Некорректный идентификатор федеративного профиля.')
-    return request(node, 'POST', API_PREFIX + '/federation/sync', {
-        'external_id': external_id, 'name': clean_text(name, 'Имя профиля'),
-        'protocols': list(protocols),
-    }, timeout=20)
-
-
-def delete_profile(node, external_id):
-    if not re.fullmatch(r'[a-f0-9]{32,64}', external_id):
-        raise NodeError('Некорректный идентификатор федеративного профиля.')
-    return request(node, 'POST', API_PREFIX + '/federation/delete', {'external_id': external_id}, timeout=20)
-
-
-def purge_profiles(node):
-    """Remove profiles issued through the federation API on one managed node."""
-    return request(node, 'POST', API_PREFIX + '/federation/purge', {}, timeout=30)
+if __name__ == '__main__':
+    if sys.argv[1:] != ['collect']: raise SystemExit('Usage: wpp_metrics.py collect')
+    try: collect_once()
+    except Exception:
+        traceback.print_exc()
+        raise SystemExit(1)

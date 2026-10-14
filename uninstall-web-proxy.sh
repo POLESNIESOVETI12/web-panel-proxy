@@ -1,351 +1,88 @@
 #!/usr/bin/env bash
-# WEB PANEL PROXY complete removal utility.
+# Updates only the relay binary that serves public-site files.
 set -Eeuo pipefail
+umask 077
 
-WPP_PROGRESS_TTY=0 WPP_PROGRESS_ROWS=0 WPP_PROGRESS_LAST=-1 WPP_PROGRESS_ACTIVE=0
-wpp_progress_start() {
-  WPP_PROGRESS_ACTIVE=1
-  if [[ -t 1 && "${TERM:-dumb}" != "dumb" ]] && command -v tput >/dev/null 2>&1; then
-    WPP_PROGRESS_ROWS="$(tput lines 2>/dev/null || echo 0)"
-    if (( WPP_PROGRESS_ROWS >= 6 )); then
-      WPP_PROGRESS_TTY=1
-      printf '\033[1;%dr\033[%d;1H' "$((WPP_PROGRESS_ROWS-1))" "$((WPP_PROGRESS_ROWS-1))"
-    fi
-  fi
-  wpp_progress 0 "$1"
-}
-wpp_progress() {
-  local percent="$1" label="$2" width=28 filled empty bar
-  (( percent < 0 )) && percent=0; (( percent > 100 )) && percent=100
-  filled=$((percent*width/100)); empty=$((width-filled))
-  printf -v bar '%*s' "$filled" ''; bar="${bar// /#}"
-  printf -v empty '%*s' "$empty" ''; bar+="${empty// /-}"
-  if (( WPP_PROGRESS_TTY )); then
-    printf '\0337\033[%d;1H\033[2K[%s] %3d%%  %s\0338' "$WPP_PROGRESS_ROWS" "$bar" "$percent" "$label"
-  elif (( percent != WPP_PROGRESS_LAST )); then printf '[%s] %3d%%  %s\n' "$bar" "$percent" "$label"; fi
-  WPP_PROGRESS_LAST="$percent"
-}
-wpp_progress_finish() {
-  local code="$1"
-  (( WPP_PROGRESS_ACTIVE )) || return 0
-  if (( code == 0 )); then wpp_progress 100 "Удаление завершено"; else wpp_progress "$WPP_PROGRESS_LAST" "Удаление прервано"; fi
-  if (( WPP_PROGRESS_TTY )); then
-    printf '\0337\033[%d;1H\033[2K\0338\033[r\033[%d;1H' "$WPP_PROGRESS_ROWS" "$WPP_PROGRESS_ROWS"
-    printf '[############################] %3d%%  %s\n' "$([[ $code == 0 ]] && echo 100 || echo "$WPP_PROGRESS_LAST")" "$([[ $code == 0 ]] && echo 'Удаление завершено' || echo 'Удаление прервано')"
-  fi
-}
-trap 'wpp_progress_finish "$?"' EXIT
+die() { echo "ERROR: $*" >&2; exit 1; }
+[[ ${EUID} -eq 0 ]] || die "Run as root."
+TPROXY_REF="52a5feb7fac38f68da5afef9cedd9b3bfc8473ca"
 
-[[ ${EUID:-1} -eq 0 ]] || { echo "Run this script as root." >&2; exit 1; }
-command -v flock >/dev/null 2>&1 || { echo "flock is required (package: util-linux)." >&2; exit 1; }
-exec 9>/run/lock/web-panel-proxy.lock
-flock -n 9 || { echo "Another WEB PANEL PROXY install, update or removal is already running." >&2; exit 1; }
-
-INSTALLED_VERSION="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo unknown)"
-echo "WEB PANEL PROXY V ${INSTALLED_VERSION} — complete removal"
-echo "Removing all WEB PANEL PROXY components..."
-wpp_progress_start "Подготовка удаления"
-
-DOMAIN="$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' /etc/systemd/system/caddy.service.d/tproxy.conf 2>/dev/null | head -n1 || true)"
-CADDY_MARKER="$(cat /etc/web-proxy-panel/caddy-owned 2>/dev/null || true)"
-CADDY_OWNED=0
-CADDY_SHARED=0
-XRAY_USER_OWNED=0
-XRAY_GROUP_OWNED=0
-HYSTERIA_UFW_OWNED=0
-HYSTERIA_UFW_PORTS=""
-MTPROTO_UFW_PORTS=""
-AWG_UFW_PORTS=""
-AWG_UFW_ROUTES=""
-AWG_OWNED=0
-MIERU_UFW_OWNED=0
-MIERU_PACKAGE_OWNED=0
-NAIVE_CADDY_OWNED=0
-[[ "$CADDY_MARKER" == "WEB_PANEL_PROXY_V2_CADDY_OWNER" ]] && CADDY_OWNED=1
-[[ "$CADDY_MARKER" == "WEB_PANEL_PROXY_V2_CADDY_SHARED" ]] && CADDY_SHARED=1
-[[ -e /etc/web-proxy-panel/xray-user-owned ]] && XRAY_USER_OWNED=1
-[[ -e /etc/web-proxy-panel/xray-group-owned ]] && XRAY_GROUP_OWNED=1
-[[ -e /etc/web-proxy-panel/mieru-ufw-owned ]] && MIERU_UFW_OWNED=1
-[[ -e /etc/web-proxy-panel/mita-package-owned ]] && MIERU_PACKAGE_OWNED=1
-[[ -e /etc/web-proxy-panel/naive-caddy-owned ]] && NAIVE_CADDY_OWNED=1
-[[ -e /etc/web-proxy-panel/awg-owned ]] && AWG_OWNED=1
-if [[ -e /etc/web-proxy-panel/hysteria-ufw-owned ]]; then
-  HYSTERIA_UFW_OWNED=1
-  HYSTERIA_UFW_PORTS="$(grep -Eo '[0-9]{1,5}' /etc/web-proxy-panel/hysteria-ufw-owned 2>/dev/null | sort -nu | tr '\n' ' ' || true)"
-  [[ -n "$HYSTERIA_UFW_PORTS" ]] || HYSTERIA_UFW_PORTS="8443"
-fi
-if [[ -e /etc/web-proxy-panel/mtproto-ufw-owned ]]; then
-  MTPROTO_UFW_PORTS="$(grep -Eo '[0-9]{1,5}' /etc/web-proxy-panel/mtproto-ufw-owned 2>/dev/null | sort -nu | tr '\n' ' ' || true)"
-fi
-if [[ -e /etc/web-proxy-panel/awg-ufw-owned ]]; then
-  AWG_UFW_PORTS="$(grep -Eo '[0-9]{1,5}' /etc/web-proxy-panel/awg-ufw-owned 2>/dev/null | sort -nu | tr '\n' ' ' || true)"
-fi
-[[ -e /etc/web-proxy-panel/awg-route-ufw-owned ]] && AWG_UFW_ROUTES="$(cat /etc/web-proxy-panel/awg-route-ufw-owned 2>/dev/null || true)"
-
-echo "Stopping services..."
-wpp_progress 10 "Остановка служб"
-for unit in \
-  web-panel-proxy-web-update.service \
-  web-panel-proxy-component-update.service \
-  web-panel-proxy-metrics.timer web-panel-proxy-metrics.service \
-  tproxy-panel.service web-proxy-panel.service web-proxy-panel-mtproxy.service \
-  web-proxy-panel-firewall.service web-proxy-panel-traffic.timer web-proxy-panel-traffic.service web-panel-proxy-xray.service \
-  web-panel-proxy-sync-tls.timer web-panel-proxy-sync-tls.service \
-  tproxy-firewall.service refresh-mtproxy-config.timer refresh-mtproxy-config.service \
-  tproxy-server.service mtproxy.service
-do
-  systemctl disable --now "$unit" 2>/dev/null || true
-done
-for unit in $(systemctl list-units --all 'web-panel-proxy-awg@*.service' --no-legend 2>/dev/null | awk '{print $1}'); do
-  systemctl disable --now "$unit" 2>/dev/null || true
-done
-mita stop >/dev/null 2>&1 || true
-
-shopt -s nullglob
-USER_UNITS=(/etc/systemd/system/web-proxy-user-*.service)
-for unit_path in "${USER_UNITS[@]}"; do
-  unit="$(basename "$unit_path")"
-  systemctl disable --now "$unit" 2>/dev/null || true
-  rm -f -- "$unit_path"
-done
-
-# Remove the firewall tables created by the panel and the proxy firewall.
-wpp_progress 30 "Очистка правил firewall"
-nft delete table inet web_proxy_panel 2>/dev/null || true
-nft delete table ip web_proxy_awg 2>/dev/null || true
-nft delete table inet tproxy_backend 2>/dev/null || true
-if [[ "$HYSTERIA_UFW_OWNED" == 1 ]] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-  for port in $HYSTERIA_UFW_PORTS; do
-    [[ "$port" =~ ^[0-9]+$ ]] || continue
-    (( port >= 1 && port <= 65535 )) || continue
-    ufw --force delete allow "$port/udp" >/dev/null 2>&1 || true
-    ufw --force delete allow "$port/udp" >/dev/null 2>&1 || true
-  done
-fi
-if [[ -n "$AWG_UFW_PORTS" ]] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-  for port in $AWG_UFW_PORTS; do ufw --force delete allow "$port/udp" >/dev/null 2>&1 || true; done
-fi
-if [[ -n "$AWG_UFW_ROUTES" ]] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-  while read -r awg_if awg_out; do
-    [[ "$awg_if" =~ ^[A-Za-z0-9_.:-]+$ && "$awg_out" =~ ^[A-Za-z0-9_.:-]+$ ]] || continue
-    ufw --force route delete allow in on "$awg_if" out on "$awg_out" >/dev/null 2>&1 || true
-  done <<< "$AWG_UFW_ROUTES"
-fi
-if [[ -n "$MTPROTO_UFW_PORTS" ]] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-  for port in $MTPROTO_UFW_PORTS; do
-    [[ "$port" =~ ^[0-9]+$ ]] || continue
-    (( port >= 1 && port <= 65535 )) || continue
-    ufw --force delete allow "$port/tcp" >/dev/null 2>&1 || true
-  done
-fi
-if [[ "$MIERU_UFW_OWNED" == 1 ]] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-  ufw --force delete allow 8965/tcp >/dev/null 2>&1 || true
-fi
-
-# Remove Caddy only when this release installed it and its configuration still
-# contains only the project site. If another site was added later, remove just
-# the project's top-level site block and preserve the shared Caddy deployment.
-REMOVE_CADDY=0
-PRESERVE_CADDY=0
-if [[ "$((CADDY_OWNED + CADDY_SHARED))" -gt 0 && -n "$DOMAIN" && -f /etc/caddy/Caddyfile ]]; then
-  CADDY_TMP="$(mktemp /tmp/web-panel-proxy-Caddyfile.XXXXXX)"
-  set +e
-  python3 - /etc/caddy/Caddyfile "$CADDY_TMP" "$DOMAIN" <<'PY'
-import re,sys
-source,target,domain=sys.argv[1:]
-text=open(source,encoding="utf-8").read()
-text=re.sub(r"\n?[ \t]*# WPP NAIVE GLOBAL BEGIN\n.*?\n[ \t]*# WPP NAIVE GLOBAL END\n?","\n",text,flags=re.S)
-text=re.sub(r"\n?[ \t]*# WPP NAIVE BEGIN\n.*?\n[ \t]*# WPP NAIVE END\n?","\n",text,flags=re.S)
-text=re.sub(r"(?m)^\s*:443,\s*"+re.escape(domain)+r"\s*\{\s*$",domain+" {",text,count=1)
-lines=text.splitlines(keepends=True)
-start=None
-pattern=re.compile(r"^\s*"+re.escape(domain)+r"\s*\{\s*$")
-for i,line in enumerate(lines):
-    if pattern.match(line):
-        start=i
-        break
-if start is None:
-    raise SystemExit(2)
-depth=0
-end=None
-for i in range(start,len(lines)):
-    depth+=lines[i].count("{")-lines[i].count("}")
-    if depth==0:
-        end=i
-        break
-if end is None:
-    raise SystemExit(3)
-remaining=lines[:start]+lines[end+1:]
-while remaining and not remaining[0].strip(): remaining.pop(0)
-while remaining and not remaining[-1].strip(): remaining.pop()
-meaningful=[x for x in remaining if x.strip() and not x.lstrip().startswith("#")]
-if not meaningful:
-    open(target,"w",encoding="utf-8").write("")
-    raise SystemExit(10)
-open(target,"w",encoding="utf-8").writelines(remaining)
-
-# A project-owned canonical Caddyfile also contains one global options block
-# (`{ ... }`). It is not another website. Report status 10 when that block and
-# comments/blank lines are all that remain. Shared Caddy is still preserved by
-# the shell branch below, together with this global block.
-depth=0
-outside=[]
-for line in remaining:
-    stripped=line.strip()
-    if not stripped or stripped.startswith("#"):
-        continue
-    if depth == 0 and stripped == "{":
-        depth=1
-        continue
-    if depth > 0:
-        depth+=line.count("{")-line.count("}")
-        continue
-    outside.append(stripped)
-if depth != 0:
-    raise SystemExit(3)
-if not outside:
-    raise SystemExit(10)
+relay_context() {
+    DOMAIN="$(python3 -c 'import json; print(json.load(open("/etc/tproxy-server/config.json"))["public_hostname"])' 2>/dev/null || true)"
+    CSS_PATH="$(python3 - <<'PY' 2>/dev/null || true
+import re
+from pathlib import Path
+try:
+    source=Path('/srv/tproxy-site/index.html').read_text(encoding='utf-8')
+    match=re.search(r'href=["\'](/panel-site(?:-[a-f0-9]{12})?\.css)["\']',source,re.I)
+    if match:
+        print(match.group(1))
+    else:
+        candidates=sorted(Path('/srv/tproxy-site').glob('*.css'))
+        print('/'+candidates[0].name if candidates else '')
+except Exception:
+    pass
 PY
-  PARSE_STATUS=$?
-  set -e
-  if [[ "$PARSE_STATUS" == 10 ]]; then
-    if [[ "$CADDY_OWNED" == 1 ]]; then
-      REMOVE_CADDY=1
-      systemctl disable --now caddy.service 2>/dev/null || true
-    else
-      install -o root -g caddy -m 0640 "$CADDY_TMP" /etc/caddy/Caddyfile
-      PRESERVE_CADDY=1
-    fi
-  elif [[ "$PARSE_STATUS" == 0 ]]; then
-    if caddy validate --config "$CADDY_TMP" --adapter caddyfile >/dev/null 2>&1; then
-      install -o root -g caddy -m 0640 "$CADDY_TMP" /etc/caddy/Caddyfile
-      PRESERVE_CADDY=1
-    else
-      PRESERVE_CADDY=1
-      echo "WARNING: the remaining Caddy configuration did not validate; the original file was preserved."
-    fi
-  else
-    PRESERVE_CADDY=1
-    echo "WARNING: the project Caddy block could not be removed automatically; Caddy was preserved."
-  fi
-  rm -f -- "$CADDY_TMP"
-  [[ "$PRESERVE_CADDY" == 1 ]] && rm -f -- /etc/caddy/Caddyfile.before-web-panel-proxy
+)"
+}
+
+# A previous interrupted update may already have installed and verified this
+# pinned relay. Do not download, rebuild or restart it again when all public
+# checks pass; the panel/protocol update can then continue offline from GitHub.
+relay_context
+if systemctl is-active --quiet tproxy-server.service &&
+   [[ -n "$DOMAIN" && -n "$CSS_PATH" ]] &&
+   [[ "$(curl -fsS --max-time 3 http://127.0.0.1:8081/healthz 2>/dev/null || true)" == "ok" ]] &&
+   [[ "$(curl -fsS --max-time 3 http://127.0.0.1:8081/readyz 2>/dev/null || true)" == "ready" ]] &&
+   curl -kfsSI --max-time 12 "https://${DOMAIN}${CSS_PATH}" 2>/dev/null | grep -qi '^content-type: text/css'; then
+    echo "Relay and public CSS are already healthy; relay rebuild skipped."
+    exit 0
 fi
 
-echo "Removing WEB PANEL PROXY files..."
-wpp_progress 55 "Удаление файлов панели"
-if [[ -s /opt/tproxy-panel/wpp_firewall.py ]]; then
-  PYTHONPATH=/opt/tproxy-panel python3 -c 'import wpp_firewall; wpp_firewall.purge()' 2>/dev/null || true
+command -v git >/dev/null 2>&1 || die "Git is required. Install it with: apt install -y git"
+git_clean() {
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_ASKPASS=/bin/false \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_COUNT=0 \
+        git -c credential.helper= "$@"
+}
+
+WORK="$(mktemp -d /tmp/tproxy-relay-update.XXXXXX)"
+cleanup() { rm -rf "$WORK"; }
+trap cleanup EXIT
+
+echo "Downloading current relay source..."
+mkdir -p "$WORK/source"
+git_clean -c init.defaultBranch=main -C "$WORK/source" init -q
+git_clean -C "$WORK/source" remote add origin https://github.com/telegramdesktop/tproxy-server.git
+git_clean -C "$WORK/source" fetch --no-tags --depth 1 origin "$TPROXY_REF"
+git_clean -C "$WORK/source" checkout --detach --force FETCH_HEAD
+[[ "$(git_clean -C "$WORK/source" rev-parse HEAD)" == "$TPROXY_REF" ]] ||
+    die "Pinned relay source verification failed."
+
+[[ -x "$WORK/source/deploy/update-relay.sh" ]] ||
+    die "The upstream transactional relay updater is missing."
+
+echo "Testing, building and installing the relay transactionally..."
+# The official updater runs Go tests, validates the candidate against the
+# installed configuration, keeps the previous binary and rolls back when
+# either healthz or readyz regresses.
+# The upstream permission test creates a deliberately readable 0444 fixture
+# with os.WriteFile. Inheriting our 077 mask silently turns it into 0400 and
+# makes the negative permission test fail. Scope the conventional test/build
+# mask to this child only. WORK and upstream mktemp directories stay private;
+# production files are installed with explicit modes by the upstream updater.
+(
+    umask 022
+    bash "$WORK/source/deploy/update-relay.sh"
+)
+
+relay_context
+echo "Testing public CSS through the relay..."
+if [[ -n "$CSS_PATH" ]]; then
+    curl -kfsSI --max-time 12 "https://${DOMAIN}${CSS_PATH}" | grep -qi '^content-type: text/css' ||
+        die "Relay still does not serve the current CSS file."
 fi
-systemctl disable --now web-panel-proxy-openflux.service 2>/dev/null || true
-for unit in /etc/systemd/system/web-panel-proxy-openflux-*.service; do
-  [[ -e "$unit" ]] || continue
-  systemctl disable --now "$(basename "$unit")" 2>/dev/null || true
-  rm -f -- "$unit"
-done
-rm -f -- \
-  /etc/systemd/system/web-panel-proxy-web-update.service \
-  /etc/systemd/system/web-panel-proxy-component-update.service \
-  /etc/systemd/system/web-panel-proxy-metrics.service \
-  /etc/systemd/system/web-panel-proxy-metrics.timer \
-  /etc/systemd/system/tproxy-panel.service \
-  /etc/systemd/system/web-proxy-panel.service \
-  /etc/systemd/system/web-proxy-panel-mtproxy.service \
-  /etc/systemd/system/web-proxy-panel-firewall.service \
-  /etc/systemd/system/web-proxy-panel-traffic.service \
-  /etc/systemd/system/web-proxy-panel-traffic.timer \
-  /etc/systemd/system/web-panel-proxy-xray.service \
-  /etc/systemd/system/web-panel-proxy-openflux.service \
-  /etc/systemd/system/web-panel-proxy-awg@.service \
-  /etc/systemd/system/web-panel-proxy-sync-tls.service \
-  /etc/systemd/system/web-panel-proxy-sync-tls.timer \
-  /etc/systemd/system/tproxy-firewall.service \
-  /etc/systemd/system/tproxy-server.service \
-  /etc/systemd/system/mtproxy.service \
-  /etc/systemd/system/refresh-mtproxy-config.timer \
-  /etc/systemd/system/refresh-mtproxy-config.service \
-  /usr/local/bin/tproxy-server \
-  /usr/local/bin/tproxy-server.previous \
-  /usr/local/bin/tproxy-server.next \
-  /usr/local/sbin/web-proxy-panelctl \
-  /usr/local/sbin/web-proxy-panel-user-firewall \
-  /usr/local/sbin/web-panel-proxy-sync-tls \
-  /usr/local/sbin/web-panel-proxy-awg-run \
-  /usr/local/sbin/web-panel-proxy-awg-up \
-  /usr/local/sbin/web-panel-proxy-awg-down \
-  /usr/local/sbin/web-panel-proxy-update \
-  /usr/local/sbin/WPP \
-  /usr/local/sbin/wpp \
-  /usr/local/sbin/web-proxy-public-mtproxy \
-  /usr/local/sbin/web-proxy-panel-mtproxy \
-  /usr/local/sbin/web-panel-proxy-uninstall \
-  /usr/local/sbin/refresh-mtproxy-config \
-  /usr/local/libexec/web-proxy-user-backend.py
-
-rm -rf -- \
-  /var/lib/web-panel-proxy-update \
-  /var/lib/web-panel-proxy-components \
-  /etc/systemd/system/mtproxy.service.d \
-  /etc/tproxy-server \
-  /etc/mtproxy \
-  /etc/web-proxy-panel \
-  /etc/web-panel-proxy-xray \
-  /etc/tproxy-panel \
-  /opt/MTProxy \
-  /opt/go1.26.5 \
-  /opt/tproxy-panel \
-  /opt/web-panel-proxy \
-  /opt/tproxy-site \
-  /srv/tproxy-site \
-  /var/lib/tproxy-panel \
-  /var/lib/web-panel-proxy-xray \
-  /root/tproxy-server
-
-rm -f -- /etc/sysctl.d/90-web-panel-proxy-awg.conf
-if [[ "$AWG_OWNED" == 1 ]]; then
-  rm -f -- /usr/local/bin/amneziawg-go /usr/local/bin/awg /usr/local/bin/awg-quick
-fi
-
-# qrencode is the only Debian package installed exclusively for the panel.
-wpp_progress 75 "Очистка пакетов"
-if command -v apt-get >/dev/null 2>&1; then
-  DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 purge -y qrencode 2>/dev/null || true
-  if [[ "$MIERU_PACKAGE_OWNED" == 1 ]]; then
-    DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 purge -y mita 2>/dev/null || true
-  fi
-fi
-
-if [[ "$REMOVE_CADDY" == 1 ]]; then
-wpp_progress 85 "Очистка Caddy"
-  rm -f -- /usr/local/bin/caddy /etc/caddy/Caddyfile /etc/systemd/system/caddy.service.d/tproxy.conf
-  rmdir /etc/systemd/system/caddy.service.d 2>/dev/null || true
-  rm -f -- /etc/systemd/system/caddy.service
-  rm -rf -- /etc/caddy /var/lib/caddy
-  id caddy >/dev/null 2>&1 && userdel caddy 2>/dev/null || true
-  echo "WEB PROXY Caddy configuration removed."
-elif [[ "$PRESERVE_CADDY" == 1 ]]; then
-  rm -f -- /etc/systemd/system/caddy.service.d/tproxy.conf
-  rmdir /etc/systemd/system/caddy.service.d 2>/dev/null || true
-  systemctl daemon-reload
-  if command -v caddy >/dev/null 2>&1 && caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
-    systemctl restart caddy.service 2>/dev/null || true
-    echo "Other Caddy sites were preserved; only the WEB PANEL PROXY site block was removed."
-  else
-    echo "WARNING: preserved Caddy configuration requires manual validation."
-  fi
-else
-  rm -f -- /etc/systemd/system/caddy.service.d/tproxy.conf
-  rmdir /etc/systemd/system/caddy.service.d 2>/dev/null || true
-  echo "Caddy was preserved because it was not marked as installed by WEB PANEL PROXY."
-fi
-
-id mtproxy >/dev/null 2>&1 && userdel mtproxy 2>/dev/null || true
-id tproxy >/dev/null 2>&1 && userdel tproxy 2>/dev/null || true
-id wpp-openflux >/dev/null 2>&1 && userdel wpp-openflux 2>/dev/null || true
-[[ "$XRAY_USER_OWNED" == 1 ]] && id xray >/dev/null 2>&1 && userdel xray 2>/dev/null || true
-[[ "$XRAY_GROUP_OWNED" == 1 ]] && getent group xray >/dev/null 2>&1 && groupdel xray 2>/dev/null || true
-
-systemctl daemon-reload
-systemctl reset-failed 2>/dev/null || true
-wpp_progress 100 "Удаление завершено"
-echo "WEB PANEL PROXY V ${INSTALLED_VERSION} has been removed."
+echo "Relay update completed successfully."
