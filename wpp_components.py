@@ -1,304 +1,263 @@
-"""Bounded diagnostics for stored WPP VLESS CDN profiles."""
-import http.client
+#!/usr/bin/env python3
+"""Transactional Xray/OpenFlux version manager for the local WPP server."""
+
+from contextlib import contextmanager
 import os
 import re
-import socket
-import ssl
+import shutil
+import subprocess
 import tempfile
 import time
-from datetime import datetime, timezone
-from urllib.parse import quote
-import wpp_cdn
+from pathlib import Path
 
-HOST_RE = re.compile(r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
-PROVIDER_PORTS = {"beget": 10002, "selectel": 10003, "yandex": 10001, "vk": 10001, "custom": 10001}
+from wpp_metrics import atomic_json, read_state
 
-
-def _managed_routes(xray_path):
-    if not wpp_cdn.valid_path_root(xray_path):
-        raise ValueError("Некорректный локальный путь XHTTP.")
-    direct_path = wpp_cdn.endpoint_path(xray_path, "direct")
-    cdn_path = wpp_cdn.endpoint_path(xray_path, "cdn")
-    beget_path = wpp_cdn.endpoint_path(xray_path, "beget")
-    selectel_path = wpp_cdn.endpoint_path(xray_path, "selectel")
-    return (
-        '    @web_panel_cdn_probe path /__wpp_cdn_probe\n'
-        '    handle @web_panel_cdn_probe {\n'
-        '        header X-WPP-CDN-Probe "ok"\n'
-        '        header Cache-Control "no-store, no-cache, must-revalidate"\n'
-        '        header CDN-Cache-Control "no-store"\n'
-        '        header Pragma "no-cache"\n'
-        '        respond `{"ok":true,"service":"wpp-cdn-doctor"}` 200\n'
-        '    }\n\n'
-        '    # WPP XRAY ROUTES BEGIN\n'
-        f'    @web_panel_vless_direct path {direct_path} {direct_path}/*\n'
-        '    handle @web_panel_vless_direct {\n'
-        '        reverse_proxy 127.0.0.1:10000 {\n'
-        '            transport http {\n'
-        '                versions h2c\n'
-        '            }\n'
-        '            flush_interval -1\n'
-        '        }\n'
-        '    }\n\n'
-        f'    @web_panel_vless_cdn path {cdn_path} {cdn_path}/*\n'
-        '    handle @web_panel_vless_cdn {\n'
-        '        reverse_proxy 127.0.0.1:10001 {\n'
-        '            transport http {\n'
-        '                versions h2c\n'
-        '            }\n'
-        '            flush_interval -1\n'
-        '        }\n'
-        '    }\n\n'
-        f'    @web_panel_vless_beget path {beget_path} {beget_path}/*\n'
-        '    handle @web_panel_vless_beget {\n'
-        '        header Cache-Control "no-store, no-cache"\n'
-        '        header CDN-Cache-Control "no-store"\n'
-        '        header X-Accel-Buffering "no"\n'
-        '        reverse_proxy 127.0.0.1:10002 {\n'
-        '            transport http {\n'
-        '                versions h2c\n'
-        '            }\n'
-        '            flush_interval -1\n'
-        '        }\n'
-        '    }\n\n'
-        f'    @web_panel_vless_selectel path {selectel_path} {selectel_path}/*\n'
-        '    handle @web_panel_vless_selectel {\n'
-        '        header Cache-Control "no-store, no-cache"\n'
-        '        header CDN-Cache-Control "no-store"\n'
-        '        header X-Accel-Buffering "no"\n'
-        '        header Accept-Ranges "none"\n'
-        '        reverse_proxy 127.0.0.1:10003 {\n'
-        '            transport http {\n'
-        '                versions h2c\n'
-        '            }\n'
-        '            flush_interval -1\n'
-        '        }\n'
-        '    }\n'
-        '    # WPP XRAY ROUTES END\n\n'
-    )
+ROOT = Path("/var/lib/web-panel-proxy-components")
+STATUS = ROOT / "status.json"
+ACTION_LOCK = ROOT / "action.lock"
+UNIT = "web-panel-proxy-component-update.service"
+OPENFLUX_PROFILES = Path("/etc/web-proxy-panel/openflux/profiles")
+SPECS = {
+    "xray": {
+        "repo": "https://github.com/XTLS/Xray-core.git",
+        "asset": "https://github.com/XTLS/Xray-core/releases/download/{tag}/Xray-linux-64.zip",
+        "binary": Path("/opt/web-panel-proxy/xray/xray"),
+        "service": "web-panel-proxy-xray.service",
+    },
+    "openflux": {
+        "repo": "https://github.com/damnurmum/OpenFlux-Android.git",
+        "asset": "https://github.com/damnurmum/OpenFlux-Android/releases/download/{tag}/openflux-linux-amd64",
+        "binary": Path("/opt/web-panel-proxy/openflux/openflux"),
+        "service": "web-panel-proxy-openflux.service",
+    },
+}
 
 
-def repair_caddy_text(text, xray_path):
-    """Return an idempotently repaired Caddyfile without changing external CDN settings."""
-    value = str(text or "")
-    value = re.sub(
-        r'(?ms)^[ \t]*@web_panel_cdn_probe[ \t]+path[ \t]+/__wpp_cdn_probe[ \t]*\n'
-        r'[ \t]*handle[ \t]+@web_panel_cdn_probe[ \t]*\{[ \t]*\n'
-        r'.*?^[ \t]*\}[ \t]*\n?',
-        '', value,
-    )
-    value = re.sub(
-        r'\n?\s*# WPP XRAY ROUTES BEGIN\n.*?\n\s*# WPP XRAY ROUTES END\n?',
-        '\n', value, flags=re.S,
-    )
-    relay = re.search(r'(?m)^[ \t]*reverse_proxy 127\.0\.0\.1:8080[ \t]*\{', value)
-    if not relay:
-        raise ValueError("В Caddyfile не найден локальный маршрут WPP.")
-    prefix = value[:relay.start()].rstrip() + "\n\n"
-    return prefix + _managed_routes(xray_path) + value[relay.start():]
+def _run(args, **kwargs):
+    return subprocess.run(args, text=True, capture_output=True, timeout=kwargs.pop("timeout", 30), check=False, **kwargs)
 
 
-def _atomic_write(path, content, source_stat=None):
-    directory = os.path.dirname(path) or "."
-    fd, temporary = tempfile.mkstemp(prefix=".wpp-caddy-", dir=directory, text=True)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        if source_stat is not None:
-            os.chmod(temporary, source_stat.st_mode & 0o7777)
-            try:
-                os.chown(temporary, source_stat.st_uid, source_stat.st_gid)
-            except (AttributeError, PermissionError):
-                pass
-        os.replace(temporary, path)
-    finally:
+def _version_tuple(value):
+    numbers = re.findall(r"\d+", str(value))
+    return tuple(int(x) for x in numbers[:4])
+
+
+def _current(component):
+    binary = SPECS[component]["binary"]
+    if not binary.is_file():
+        return "не установлен"
+    commands = [[str(binary), "version"], [str(binary), "--version"], [str(binary), "-version"]]
+    for command in commands:
         try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+            result = _run(command, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        value = (result.stdout + " " + result.stderr).strip().splitlines()
+        if value:
+            match = re.search(r"v?(\d+(?:\.\d+){1,3})", " ".join(value[:2]))
+            if match:
+                return match.group(1)
+    return "установлен"
 
 
-def repair_caddyfile(path, xray_path):
-    """Repair only WPP-owned probe/XHTTP routes and return the previous contents."""
-    source_stat = os.stat(path)
-    with open(path, encoding="utf-8") as stream:
-        original = stream.read()
-    repaired = repair_caddy_text(original, xray_path)
-    if repaired != original:
-        _atomic_write(path, repaired, source_stat)
-    return original, repaired != original
-
-
-def restore_caddyfile(path, original):
-    source_stat = os.stat(path)
-    _atomic_write(path, original, source_stat)
-
-
-def _result(key, label, level, detail, fix=""):
-    return {"key": key, "label": label, "level": level, "detail": detail, "fix": fix}
-
-
-def _host(value):
-    value = str(value or "").strip().lower().rstrip(".")
-    if not HOST_RE.fullmatch(value):
-        raise ValueError("Некорректный домен CDN в сохранённом профиле.")
-    return value
-
-
-def _resolve(host):
-    values = []
-    for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM):
-        address = item[4][0]
-        if address not in values:
-            values.append(address)
-    return values[:6]
-
-
-def _tls(host, timeout):
-    context = ssl.create_default_context()
-    with socket.create_connection((host, 443), timeout=timeout) as raw:
-        with context.wrap_socket(raw, server_hostname=host) as secure:
-            cert = secure.getpeercert()
-            protocol = secure.version() or "TLS"
-    expires = cert.get("notAfter", "")
-    days = None
-    if expires:
-        expiry = datetime.strptime(expires, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
-        days = int((expiry - datetime.now(timezone.utc)).total_seconds() // 86400)
-    return protocol, days
-
-
-def _request(host, method, path, timeout):
-    started = time.monotonic()
-    connection = http.client.HTTPSConnection(host, 443, timeout=timeout, context=ssl.create_default_context())
-    headers = {
-        "User-Agent": "WPP-CDN-Doctor/1.0",
-        "Accept": "application/json",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-    }
-    body = b"" if method in {"POST", "DELETE"} else None
+@contextmanager
+def _action_lock():
+    import fcntl
+    ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock = ACTION_LOCK.open("a")
+    os.chmod(lock.name, 0o600)
     try:
-        connection.request(method, path, body=body, headers=headers)
-        response = connection.getresponse()
-        payload = response.read(4096)
-        result_headers = {key.lower(): value for key, value in response.getheaders()}
-        return response.status, result_headers, payload, int((time.monotonic() - started) * 1000)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        yield
     finally:
-        connection.close()
+        lock.close()
 
 
-def _local_port(port, timeout):
-    with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
-        return True
-
-
-def run(profile, origin_domain, xray_path, timeout=7):
-    """Return a user-facing report without accepting arbitrary probe targets."""
-    provider = str(profile.get("provider", "custom")).strip().lower()
-    cdn_host = _host(profile.get("public_host"))
-    origin_host = _host(origin_domain)
-    variant = "beget" if provider == "beget" else ("selectel" if provider == "selectel" else "cdn")
-    method = "DELETE" if provider == "selectel" else "GET"
-    expected_path = wpp_cdn.endpoint_path(xray_path, variant)
-    results = []
-
+def _unit_running():
     try:
-        addresses = _resolve(cdn_host)
-        results.append(_result("dns", "DNS домена CDN", "pass", ", ".join(addresses) if addresses else "Адрес найден"))
-    except (OSError, socket.gaierror) as exc:
-        results.append(_result("dns", "DNS домена CDN", "fail", "Домен не разрешается: " + str(exc), "Проверьте домен CDN и дождитесь завершения его активации."))
+        result = _run(["systemctl", "show", UNIT, "-p", "ActiveState", "--value"], timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.stdout.strip() in ("active", "activating", "reloading")
 
+
+def _tags(component):
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    result = _run(["git", "ls-remote", "--tags", "--refs", SPECS[component]["repo"], "v[0-9]*"],
+                  timeout=25, env=env)
+    if result.returncode:
+        raise ValueError("GitHub недоступен. Повторите позже.")
+    tags = set(re.findall(r"refs/tags/(v\d+(?:\.\d+){1,3})\s*$", result.stdout, re.M))
+    return sorted(tags, key=_version_tuple, reverse=True)[:30]
+
+
+def _catalog(force=False):
+    state = read_state(STATUS)
+    cached = state.get("catalog", {})
+    if state.get("phase") in ("queued", "running"):
+        return {"current": {name: _current(name) for name in SPECS}, "catalog": cached,
+                "phase": state.get("phase"), "message": state.get("message", "")}
+    if force or time.time() - int(state.get("checked", 0)) > 300 or not cached:
+        cached = {name: _tags(name) for name in SPECS}
+        state.update(catalog=cached, checked=int(time.time()), phase="checked",
+                     message="Версии компонентов загружены.")
+        atomic_json(STATUS, state)
+    return {"current": {name: _current(name) for name in SPECS}, "catalog": cached,
+            "phase": state.get("phase", "idle"), "message": state.get("message", "")}
+
+
+def catalog(force=False):
+    with _action_lock():
+        return _catalog(force)
+
+
+def status():
+    state = read_state(STATUS)
     try:
-        protocol, days = _tls(cdn_host, timeout)
-        if days is not None and days < 1:
-            results.append(_result("tls", "HTTPS-сертификат CDN", "fail", "Сертификат истёк.", "Выпустите или привяжите сертификат в CDN."))
-        elif days is not None and days < 14:
-            results.append(_result("tls", "HTTPS-сертификат CDN", "warn", f"{protocol}, осталось {days} дн.", "Проверьте автоматическое продление сертификата."))
-        else:
-            detail = protocol + (f", действует ещё {days} дн." if days is not None else "")
-            results.append(_result("tls", "HTTPS-сертификат CDN", "pass", detail))
-    except (OSError, ssl.SSLError, ValueError) as exc:
-        results.append(_result("tls", "HTTPS-сертификат CDN", "fail", str(exc), "Проверьте сертификат и HTTPS в настройках CDN."))
+        started = int(state.get("started", 0) or 0)
+    except (TypeError, ValueError):
+        started = 0
+    if (state.get("phase") in ("queued", "running") and started and
+            time.time() - started > 60 and not _unit_running()):
+        state.update(phase="failed", finished=int(time.time()),
+                     message="Операция была прервана. Повторите её или проверьте журнал службы.")
+        atomic_json(STATUS, state)
+    state["current"] = {name: _current(name) for name in SPECS}
+    return state
 
-    probe_path = "/__wpp_cdn_probe?doctor=" + quote(str(time.time_ns()))
-    origin_ok = False
-    try:
-        status, headers, payload, latency = _request(origin_host, "GET", probe_path, timeout)
-        origin_ok = status == 200 and headers.get("x-wpp-cdn-probe") == "ok"
-        if origin_ok:
-            results.append(_result("origin", "Источник WPP", "pass", f"HTTP {status}, {latency} мс"))
-        else:
-            results.append(_result("origin", "Источник WPP", "fail", f"HTTP {status}, контрольный заголовок не получен.", "Обновите WPP и проверьте основной домен на порту 443."))
-    except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
-        results.append(_result("origin", "Источник WPP", "fail", str(exc), "Проверьте DNS основного домена, порт 443 и службу Caddy."))
 
-    cdn_headers = {}
-    try:
-        status, cdn_headers, payload, latency = _request(cdn_host, "GET", probe_path, timeout)
-        signature = cdn_headers.get("x-wpp-cdn-probe") == "ok"
-        if status == 200 and signature:
-            results.append(_result("edge", "Маршрут через CDN", "pass", f"HTTP {status}, {latency} мс"))
-        elif status == 403 and provider == "selectel":
-            reason = cdn_headers.get("x-reason-code", "не указан")
-            results.append(_result(
-                "edge", "Маршрут через CDN", "warn",
-                f"Служебный путь вернул HTTP 403, код CDN: {reason}.",
-                "Для Selectel это допустимо при ограничении путей ресурса и не означает, что XHTTP не работает.",
-            ))
-        elif status == 403:
-            reason = cdn_headers.get("x-reason-code", "не указан")
-            results.append(_result("edge", "Маршрут через CDN", "fail", f"HTTP 403, код CDN: {reason}.", "Дождитесь ACTIVE; проверьте баланс, ограничения и Hostname источника."))
-        elif status in (502, 503, 504):
-            results.append(_result("edge", "Маршрут через CDN", "fail", f"HTTP {status}: CDN не получает корректный ответ источника.", "Укажите источник HTTPS, порт 443 и Hostname основного домена WPP."))
-        else:
-            results.append(_result("edge", "Маршрут через CDN", "fail", f"HTTP {status}, подпись WPP не получена.", "Проверьте источник и передачу заголовка Host в CDN."))
-    except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
-        results.append(_result("edge", "Маршрут через CDN", "fail", str(exc), "Проверьте статус CDN и доступность публичного домена."))
+def start(component, tag):
+    if component not in SPECS or not re.fullmatch(r"v\d+(?:\.\d+){1,3}", str(tag)):
+        raise ValueError("Некорректный компонент или версия.")
+    with _action_lock():
+        state = status()
+        if state.get("phase") in ("queued", "running") or _unit_running():
+            raise ValueError("Другая операция с компонентами уже выполняется.")
+        info = _catalog()
+        if tag not in info["catalog"].get(component, []):
+            raise ValueError("Эта версия отсутствует среди опубликованных релизов GitHub.")
+        state = read_state(STATUS)
+        state.update(phase="queued", component=component, target=tag, started=int(time.time()),
+                     message=f"Подготовка {component} {tag}…")
+        atomic_json(STATUS, state)
+        result = _run(["systemctl", "start", "--no-block", UNIT], timeout=10)
+        if result.returncode:
+            state.update(phase="failed", message="Не удалось запустить обновление компонента.")
+            atomic_json(STATUS, state)
+            raise ValueError(state["message"])
+        return state
 
-    try:
-        status, headers, payload, latency = _request(cdn_host, method, probe_path, timeout)
-        if status == 200 and headers.get("x-wpp-cdn-probe") == "ok":
-            results.append(_result("method", f"Метод {method}", "pass", f"Разрешён, {latency} мс"))
-        elif status in (403, 405) and provider == "selectel":
-            results.append(_result(
-                "method", f"Проверка метода {method}", "warn",
-                f"Пустой диагностический запрос получил HTTP {status}.",
-                "Selectel может отклонять запрос без XHTTP-сеанса; если клиент передаёт трафик, менять настройки не требуется.",
-            ))
-        elif status in (403, 405):
-            results.append(_result("method", f"Метод {method}", "fail", f"CDN вернул HTTP {status}.", f"Разрешите метод {method} в настройках CDN."))
-        else:
-            results.append(_result("method", f"Метод {method}", "warn", f"Получен HTTP {status}.", "Проверьте разрешённые HTTP-методы CDN."))
-    except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
-        results.append(_result("method", f"Метод {method}", "fail", str(exc), f"Проверьте поддержку метода {method} у CDN."))
 
-    cache = cdn_headers.get("x-cdn-edge-cache", cdn_headers.get("x-cache", ""))
-    if "HIT" in cache.upper():
-        results.append(_result("cache", "Кеширование CDN", "warn", "Уникальный диагностический запрос получен из кеша: " + cache, "Отключите кеширование и очистите кеш CDN-ресурса."))
+def _download(url, destination):
+    result = _run(["curl", "-fL", "--retry", "3", "--retry-all-errors", "--connect-timeout", "20",
+                   "--max-time", "300", "-o", str(destination), url], timeout=360)
+    if result.returncode or not destination.is_file() or destination.stat().st_size < 100000:
+        raise RuntimeError("Не удалось скачать выбранный релиз с GitHub.")
+
+
+def _active_openflux_units():
+    result = _run(["systemctl", "list-units", "--type=service", "--state=active", "--no-legend",
+                   "web-panel-proxy-openflux*.service"])
+    return [line.split()[0] for line in result.stdout.splitlines()
+            if line.split() and re.fullmatch(r"web-panel-proxy-openflux(?:-[a-f0-9]{16})?\.service", line.split()[0])]
+
+
+def _max_profiles_configured():
+    """Return True when replacing OpenFlux must preserve the MAX transport."""
+    if not OPENFLUX_PROFILES.is_dir():
+        return False
+    for config_path in OPENFLUX_PROFILES.glob("*/config.json"):
+        try:
+            import json
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(config, dict) and config.get("transport") == "oneme":
+            return True
+    return False
+
+
+def _install(component, tag, directory):
+    spec = SPECS[component]
+    binary = spec["binary"]
+    candidate = directory / "candidate"
+    download = directory / "download"
+    _download(spec["asset"].format(tag=tag), download)
+    if component == "xray":
+        result = subprocess.run(["unzip", "-q", str(download), "xray", "-d", str(directory)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, check=False)
+        if result.returncode:
+            raise RuntimeError("Не удалось распаковать Xray.")
+        (directory / "xray").replace(candidate)
     else:
-        results.append(_result("cache", "Кеширование CDN", "pass", cache or "Признаков кеширования диагностического запроса нет."))
-
-    port = PROVIDER_PORTS.get(provider, 10001)
+        download.replace(candidate)
+    os.chmod(candidate, 0o755)
+    if _run(["readelf", "-h", str(candidate)], timeout=10).returncode:
+        raise RuntimeError("Загруженный файл не является исполняемым Linux-бинарником.")
+    if component == "xray":
+        test = _run([str(candidate), "run", "-test", "-config", "/etc/web-panel-proxy-xray/config.json"], timeout=20)
+        if test.returncode:
+            raise RuntimeError("Выбранная версия Xray не принимает текущую конфигурацию.")
+        active = [spec["service"]] if _run(["systemctl", "is-active", "--quiet", spec["service"]]).returncode == 0 else []
+    else:
+        test = _run([str(candidate), "--help"], timeout=10)
+        if test.returncode not in (0, 1, 2):
+            raise RuntimeError("Выбранный бинарник OpenFlux не запускается.")
+        help_text = (test.stdout + "\n" + test.stderr).lower()
+        if _max_profiles_configured() and not all(marker in help_text for marker in ("maxtoken", "maxuid", "oneme")):
+            raise RuntimeError(
+                "Выбранная версия OpenFlux не поддерживает MAX. "
+                "Удалите MAX-профили или выберите более новый релиз."
+            )
+        active = _active_openflux_units()
+    backup = directory / "previous"
+    shutil.copy2(binary, backup)
     try:
-        _local_port(port, min(timeout, 3))
-        results.append(_result("xray", "Локальный Xray inbound", "pass", f"127.0.0.1:{port} принимает соединения"))
-    except OSError as exc:
-        results.append(_result("xray", "Локальный Xray inbound", "fail", str(exc), "Перезапустите Xray через обновление WPP и проверьте журнал службы."))
+        for service in active:
+            _run(["systemctl", "stop", service], timeout=30)
+        shutil.copy2(candidate, binary)
+        os.chmod(binary, 0o755)
+        for service in active:
+            result = _run(["systemctl", "restart", service], timeout=40)
+            if result.returncode or _run(["systemctl", "is-active", "--quiet", service], timeout=10).returncode:
+                raise RuntimeError("Служба не запустилась с выбранной версией.")
+    except Exception:
+        shutil.copy2(backup, binary)
+        os.chmod(binary, 0o755)
+        for service in active:
+            _run(["systemctl", "restart", service], timeout=40)
+        raise
 
-    results.append(_result("path", "Путь XHTTP", "pass", expected_path))
-    failed = sum(item["level"] == "fail" for item in results)
-    warned = sum(item["level"] == "warn" for item in results)
-    return {
-        "ok": failed == 0,
-        "provider": provider,
-        "cdn_host": cdn_host,
-        "origin_host": origin_host,
-        "method": method,
-        "path": expected_path,
-        "failed": failed,
-        "warned": warned,
-        "results": results,
-    }
+
+def run():
+    import fcntl
+    lock_path = Path("/run/lock/web-panel-proxy.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = lock_path.open("a")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        state = read_state(STATUS)
+        state.update(phase="failed", message="Установка или другое обновление уже выполняется.")
+        atomic_json(STATUS, state)
+        return
+    state = read_state(STATUS)
+    component, tag = state.get("component"), state.get("target")
+    if state.get("phase") != "queued" or component not in SPECS:
+        raise SystemExit("No queued component update")
+    state.update(phase="running", message=f"Устанавливается {component} {tag}. Создана резервная копия.")
+    atomic_json(STATUS, state)
+    try:
+        with tempfile.TemporaryDirectory(prefix="wpp-component-") as directory:
+            _install(component, tag, Path(directory))
+        state.update(phase="done", message=f"{component} {tag} установлен. Проверка службы пройдена.")
+    except Exception as exc:
+        state.update(phase="failed", message="Изменение отменено: " + str(exc)[:600])
+    state["finished"] = int(time.time())
+    atomic_json(STATUS, state)
+
+
+if __name__ == "__main__":
+    if os.sys.argv[1:] != ["run"]:
+        raise SystemExit("Usage: wpp_components.py run")
+    run()

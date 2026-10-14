@@ -1,456 +1,360 @@
-#!/usr/bin/env bash
-# Safe in-place updater for WEB PANEL PROXY V 2.5.0.
-set -Eeuo pipefail
-umask 077
+#!/usr/bin/env python3
+"""Retired AmneziaWG compatibility helpers for WEB PANEL PROXY.
 
-WPP_PROGRESS_TTY=0 WPP_PROGRESS_ROWS=0 WPP_PROGRESS_LAST=-1 WPP_PROGRESS_ACTIVE=0
-wpp_progress_start() {
-    WPP_PROGRESS_ACTIVE=1
-    if [[ -t 1 && "${TERM:-dumb}" != "dumb" ]] && command -v tput >/dev/null 2>&1; then
-        WPP_PROGRESS_ROWS="$(tput lines 2>/dev/null || echo 0)"
-        if (( WPP_PROGRESS_ROWS >= 6 )); then
-            WPP_PROGRESS_TTY=1
-            printf '\033[1;%dr\033[%d;1H' "$((WPP_PROGRESS_ROWS-1))" "$((WPP_PROGRESS_ROWS-1))"
-        fi
-    fi
-    wpp_progress 0 "$1"
-}
-wpp_progress() {
-    local percent="$1" label="$2" width=28 filled empty bar
-    (( percent < 0 )) && percent=0; (( percent > 100 )) && percent=100
-    filled=$((percent*width/100)); empty=$((width-filled))
-    printf -v bar '%*s' "$filled" ''; bar="${bar// /#}"
-    printf -v empty '%*s' "$empty" ''; bar+="${empty// /-}"
-    if (( WPP_PROGRESS_TTY )); then
-        printf '\0337\033[%d;1H\033[2K[%s] %3d%%  %s\0338' "$WPP_PROGRESS_ROWS" "$bar" "$percent" "$label"
-    elif (( percent != WPP_PROGRESS_LAST )); then printf '[%s] %3d%%  %s\n' "$bar" "$percent" "$label"; fi
-    WPP_PROGRESS_LAST="$percent"
-}
-wpp_progress_finish() {
-    local code="$1"
-    (( WPP_PROGRESS_ACTIVE )) || return 0
-    if (( code == 0 )); then wpp_progress 100 "Обновление завершено"; else wpp_progress "$WPP_PROGRESS_LAST" "Обновление прервано"; fi
-    if (( WPP_PROGRESS_TTY )); then
-        printf '\0337\033[%d;1H\033[2K\0338\033[r\033[%d;1H' "$WPP_PROGRESS_ROWS" "$WPP_PROGRESS_ROWS"
-        printf '[############################] %3d%%  %s\n' "$([[ $code == 0 ]] && echo 100 || echo "$WPP_PROGRESS_LAST")" "$([[ $code == 0 ]] && echo 'Обновление завершено' || echo 'Обновление прервано')"
-    fi
-}
+Every WPP profile owns a userspace interface, UDP port, address block, key set
+and obfuscation fingerprint.  Keeping device-level AWG parameters per profile
+avoids the shared-fingerprint limitation of a conventional multi-peer server.
+"""
 
-# Use the fixed public repository without interactive credentials or local
-# Git URL substitutions.
-export GIT_TERMINAL_PROMPT=0
-export GIT_CONFIG_NOSYSTEM=1
-export GIT_CONFIG_GLOBAL=/dev/null
+import ipaddress
+import json
+import os
+import re
+import secrets
+import subprocess
+import tempfile
 
-REPOSITORY="https://github.com/POLESNIESOVETI12/web-panel-proxy.git"
-REQUESTED_REF="${WEB_PANEL_PROXY_REF:-}"
-RELEASE_REF="$REQUESTED_REF"
-LOCAL_SOURCE=""
-if [[ "${1:-}" == "--local" ]]; then
-    LOCAL_SOURCE="$(cd "$(dirname "$0")" && pwd)"
-    RELEASE_REF="v2.5.0"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py; do
-        [[ -s "$LOCAL_SOURCE/$file" ]] || { echo "Incomplete local archive: $file is missing." >&2; exit 1; }
-    done
-    [[ -s "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" || -s "$LOCAL_SOURCE/OpenFlux-linux-amd64" ]] || {
-        echo "Incomplete local archive: OpenFlux-linux-amd64 is missing." >&2; exit 1;
+AWG = "/usr/local/bin/awg"
+CONFIG_DIR = "/etc/web-proxy-panel/awg"
+SERVICE_TEMPLATE = "web-panel-proxy-awg@{}.service"
+# AWG 3.1 can add IPv6/UDP + WireGuard transport framing, S4 padding and up to
+# 64 bytes of content padding. 1100 keeps the complete outer datagram below the
+# IPv6 minimum path MTU (1280) even in the worst generated profile. AWG 2.0 has
+# no 3.1 content padding and can retain the less conservative value.
+AWG20_MTU = 1280
+AWG31_MTU = 1100
+PORT_FIRST = 52000
+PORT_LAST = 52999
+# AWG is intentionally unavailable.  Keeping the module importable lets an
+# update read old users.json files without starting services or destroying
+# stored client records.  An empty protocol set makes sync() retire remaining
+# generated units/configs and prevents all new AWG operations.
+PROTOCOLS = ()
+PROFILE_SCHEMA = 2
+
+
+def _mtu(user):
+    return AWG31_MTU if user.get("protocol") == "awg31" else AWG20_MTU
+
+
+def _run(*args, input_text=None, check=True, timeout=30):
+    proc = subprocess.run(args, input=input_text, text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, timeout=timeout)
+    if check and proc.returncode:
+        raise RuntimeError((proc.stderr or proc.stdout or "AWG command failed").strip())
+    return proc
+
+
+def _key(command="genkey"):
+    value = _run(AWG, command).stdout.strip()
+    if len(value) != 44:
+        raise RuntimeError("AWG generated an invalid key")
+    return value
+
+
+def _public(private_key):
+    value = _run(AWG, "pubkey", input_text=private_key + "\n").stdout.strip()
+    if len(value) != 44:
+        raise RuntimeError("AWG generated an invalid public key")
+    return value
+
+
+def _interface(uid):
+    if not re.fullmatch(r"[a-f0-9]{16}", str(uid)):
+        raise RuntimeError("Invalid AWG profile id")
+    return "wa" + str(uid)[:11]  # Linux IFNAMSIZ: at most 15 bytes.
+
+
+def _occupied_udp_ports():
+    proc = _run("ss", "-Hlun", check=False, timeout=10)
+    return {int(m.group(1)) for m in re.finditer(r"[:.](\d{1,5})\s", proc.stdout or "")}
+
+
+def _allocate_port(users):
+    used = {int(u.get("backend_port", 0)) for u in users if u.get("protocol") in PROTOCOLS}
+    occupied = _occupied_udp_ports()
+    for port in range(PORT_FIRST, PORT_LAST + 1):
+        if port not in used and port not in occupied:
+            return port
+    raise RuntimeError("No free UDP port is available for AWG")
+
+
+def _allocate_network(users):
+    used = {str(u.get("awg_network", "")) for u in users if u.get("protocol") in PROTOCOLS}
+    # One /30 per profile: .1 server and .2 client. This intentionally has no
+    # dependency on the profile protocol, so AWG 2.0 and 3.1 cannot collide.
+    for second in range(80, 84):
+        for third in range(1, 255):
+            network = "10.%d.%d.0/30" % (second, third)
+            if network not in used:
+                return network
+    raise RuntimeError("No free AWG address block is available")
+
+
+def _parameters(protocol):
+    rng = secrets.SystemRandom()
+    # Match the constraints used by 3x-ui 3.8.5's GenerateObfuscation31.
+    # Each fixed H value gets its own band: H ranges must never overlap and
+    # values 1-4 are the recognisable vanilla WireGuard message types.
+    h_low = 5
+    h_band = (2147483647 - h_low + 1) // 4
+    headers = [rng.randint(h_low + i * h_band,
+                           h_low + (i + 1) * h_band - 1) for i in range(4)]
+    jmin = rng.randint(40, 89)
+    s1 = rng.randint(15, 150)
+    s2 = rng.randint(15, 150)
+    while s1 + 56 == s2:
+        s2 = rng.randint(15, 150)
+    values = {
+        "Jc": rng.randint(3, 6),
+        "Jmin": jmin,
+        "Jmax": jmin + rng.randint(50, 250),
+        "S1": s1,
+        "S2": s2,
+        "S3": rng.randint(12, 55),
+        "S4": rng.randint(12, 27),
+        "H1": headers[0], "H2": headers[1],
+        "H3": headers[2], "H4": headers[3],
     }
-    [[ -s "$LOCAL_SOURCE/wpp-panel/flags.tar.gz" ]] || {
-        echo "Incomplete local archive: wpp-panel/flags.tar.gz is missing." >&2; exit 1;
+    if protocol == "awg31":
+        cp_low = rng.randint(8, 24)
+        rekey_low = rng.randint(100, 120)
+        rekey_high = rekey_low + rng.randint(10, 40)
+        reject_low = rekey_high + rng.randint(30, 60)
+        timeout_low = rng.randint(3, 6)
+        keepalive_low = rng.randint(8, 12)
+        attempts_low = rng.randint(15, 25)
+        values.update({
+            "I1": "<r %d>" % rng.randint(32, 256),
+            "HeaderProtectionKey": _key(),
+            "ContentPaddingAddition": "%d-%d" % (cp_low, cp_low + rng.randint(8, 40)),
+            "RekeyAfterTime": "%d-%d" % (rekey_low, rekey_high),
+            "RekeyTimeout": "%d-%d" % (timeout_low, timeout_low + rng.randint(1, 4)),
+            "RejectAfterTime": "%d-%d" % (reject_low, reject_low + rng.randint(30, 90)),
+            "KeepaliveTimeout": "%d-%d" % (keepalive_low, keepalive_low + rng.randint(2, 8)),
+            "MaxHandshakeAttempts": "%d-%d" % (attempts_low, attempts_low + rng.randint(5, 25)),
+            "RandomTrailers": "on",
+            "DisableCookies": "on",
+        })
+    return values
+
+
+def new_user(protocol, users, uid):
+    if protocol not in PROTOCOLS:
+        raise RuntimeError("Unsupported AWG protocol")
+    network = ipaddress.ip_network(_allocate_network(users))
+    client_private = _key()
+    server_private = _key()
+    existing_fingerprints = {
+        json.dumps(u.get("awg_parameters", {}), sort_keys=True)
+        for u in users if u.get("protocol") in PROTOCOLS
     }
-elif [[ $# != 0 ]]; then
-    echo "Usage: bash update.sh [--local]" >&2; exit 1
-fi
-SERVICE="/etc/systemd/system/tproxy-panel.service"
-LEGACY_SERVICE="/etc/systemd/system/web-proxy-panel.service"
-DATA_FILE="/var/lib/tproxy-panel/data.json"
-PRIMARY_SECRET="/etc/web-proxy-panel/primary-secret"
+    parameters = _parameters(protocol)
+    while json.dumps(parameters, sort_keys=True) in existing_fingerprints:
+        parameters = _parameters(protocol)
+    return {
+        "secret": client_private,
+        "public_key": _public(client_private),
+        "preshared_key": _key("genpsk"),
+        "server_private_key": server_private,
+        "server_public_key": _public(server_private),
+        "backend_port": _allocate_port(users),
+        "awg_network": str(network),
+        "address": str(list(network.hosts())[1]) + "/32",
+        "server_address": str(list(network.hosts())[0]) + "/30",
+        "awg_interface": _interface(uid),
+        "awg_parameters": parameters,
+        "awg_schema": PROFILE_SCHEMA,
+    }
 
-die() { echo "ERROR: $*" >&2; exit 1; }
-[[ ${EUID} -eq 0 ]] || die "Run as root: sudo -i"
-command -v flock >/dev/null 2>&1 || die "flock is required (package: util-linux)."
-exec 9>/run/lock/web-panel-proxy.lock
-flock -n 9 || die "Another WEB PANEL PROXY install, update or removal is already running."
 
-echo "============================================================"
-echo "     WEB PANEL PROXY V 2.5.0 — SAFE UPDATE"
-echo "============================================================"
-echo "Users, administrator password, panel URL and site HTML will be retained."
-wpp_progress_start "Проверка установленной версии"
+def upgrade_users(users):
+    """Migrate the withdrawn shared-interface preview to independent profiles."""
+    required = ("secret", "public_key", "preshared_key", "server_private_key",
+                "server_public_key", "backend_port", "awg_network", "address",
+                "server_address", "awg_interface", "awg_parameters")
+    changed = False
+    for user in users:
+        if user.get("protocol") not in PROTOCOLS:
+            continue
+        complete = all(user.get(key) for key in required)
+        try:
+            valid_port = PORT_FIRST <= int(user.get("backend_port", 0)) <= PORT_LAST
+            valid_interface = user.get("awg_interface") == _interface(user.get("id", ""))
+        except (TypeError, ValueError, RuntimeError):
+            valid_port = valid_interface = False
+        if complete and valid_port and valid_interface:
+            if user.get("awg_schema") != PROFILE_SCHEMA:
+                other = {json.dumps(u.get("awg_parameters", {}), sort_keys=True)
+                         for u in users if u is not user and u.get("protocol") in PROTOCOLS}
+                parameters = _parameters(user["protocol"])
+                while json.dumps(parameters, sort_keys=True) in other:
+                    parameters = _parameters(user["protocol"])
+                user["awg_parameters"] = parameters
+                user["awg_schema"] = PROFILE_SCHEMA
+                changed = True
+            continue
+        fresh = new_user(user["protocol"], users, user["id"])
+        for key in list(user):
+            if key.startswith("awg_") or key in ("secret", "public_key", "preshared_key",
+                    "server_private_key", "server_public_key", "backend_port", "address", "server_address"):
+                user.pop(key, None)
+        user.update(fresh)
+        changed = True
+    return changed
 
-MIGRATING_LEGACY=0
-PANEL_PATH=""
-LEGACY_SECRET=""
 
-if [[ -s "$DATA_FILE" ]] &&
-   { [[ -f "$SERVICE" ]] || [[ -f "$LEGACY_SERVICE" ]]; }; then
-    echo "Current control panel detected; account and data will be preserved."
-else
-    for legacy_item in /etc/tproxy-server/config.json /etc/tproxy-server/profiles.json /etc/mtproxy /opt/MTProxy /etc/systemd/system/mtproxy.service /etc/systemd/system/tproxy-server.service; do
-        if [[ -e "$legacy_item" ]]; then
-            MIGRATING_LEGACY=1
-            break
-        fi
-    done
-    [[ "$MIGRATING_LEGACY" == 1 ]] || die "No supported WEB Proxy installation was found."
-    echo "First-generation WEB Proxy detected (without a control panel)."
-    echo "The updater will add the panel and ask for a new administrator login and password."
-fi
+def _parameter_lines(parameters):
+    order = ("Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4",
+             "I1", "I2", "I3", "I4", "I5",
+             "HeaderProtectionKey", "ContentPaddingAddition", "RekeyAfterTime", "RekeyTimeout",
+             "RejectAfterTime", "KeepaliveTimeout", "MaxHandshakeAttempts", "RandomTrailers",
+             "DisableCookies")
+    return ["%s = %s" % (key, parameters[key]) for key in order if key in parameters]
 
-# Some early builds used this service name. Copying it only supplies the
-# existing secret panel address; install-panel.sh replaces the definition.
-if [[ "$MIGRATING_LEGACY" != 1 && ! -f "$SERVICE" && -f "$LEGACY_SERVICE" ]]; then
-    cp -a "$LEGACY_SERVICE" "$SERVICE"
-fi
-if [[ "$MIGRATING_LEGACY" != 1 ]]; then
-    [[ -f "$SERVICE" ]] || die "Panel service file was not found."
-    PANEL_PATH="$(sed -n 's/^Environment=WEBPROXY_PANEL_PATH=//p' "$SERVICE" | head -n1 || true)"
-    [[ "$PANEL_PATH" =~ ^/panel-[a-z0-9-]{3,64}$ ]] || die "Could not read the existing panel address."
-fi
 
-if [[ "$MIGRATING_LEGACY" == 1 ]]; then
-    LEGACY_SECRET="$(cat "$PRIMARY_SECRET" 2>/dev/null || true)"
-    if ! [[ "$LEGACY_SECRET" =~ ^([0-9a-f]{32}|dd[0-9a-f]{32})$ ]] && [[ -s /etc/tproxy-server/profiles.json ]]; then
-        LEGACY_SECRET="$(sed -n 's/.*"secret"[[:space:]]*:[[:space:]]*"\([0-9a-f]*\)".*/\1/p' /etc/tproxy-server/profiles.json | head -n1)"
-    fi
-    if ! [[ "$LEGACY_SECRET" =~ ^([0-9a-f]{32}|dd[0-9a-f]{32})$ ]] && [[ -s /etc/mtproxy/mtproxy.env ]]; then
-        LEGACY_SECRET="$(sed -n 's/^MTPROXY_SECRET=//p' /etc/mtproxy/mtproxy.env | head -n1)"
-    fi
-    if ! [[ "$LEGACY_SECRET" =~ ^([0-9a-f]{32}|dd[0-9a-f]{32})$ ]]; then
-        # The first public installer stored the Secret only in ExecStart=-S.
-        LEGACY_SECRET="$(systemctl cat mtproxy.service 2>/dev/null |
-            sed -n 's/.*[[:space:]]-S[[:space:]]\([0-9a-f]*\).*/\1/p' | head -n1 || true)"
-    fi
-    [[ "$LEGACY_SECRET" =~ ^([0-9a-f]{32}|dd[0-9a-f]{32})$ ]] ||
-        die "Could not recover the primary Secret from the first-generation installation."
-else
-    [[ -s "$PRIMARY_SECRET" ]] || die "Primary Secret is missing from the existing panel installation."
-fi
+def _server_config(user):
+    client_ip = str(ipaddress.ip_interface(user["address"]).ip) + "/32"
+    lines = ["[Interface]", "PrivateKey = " + user["server_private_key"],
+             "ListenPort = " + str(int(user["backend_port"]))]
+    lines.extend(_parameter_lines(user["awg_parameters"]))
+    lines.extend(["", "[Peer]", "PublicKey = " + user["public_key"],
+                  "PresharedKey = " + user["preshared_key"], "AllowedIPs = " + client_ip, ""])
+    return "\n".join(lines)
 
-STAMP="$(date +%Y%m%d-%H%M%S)"
-# Pause the HTTP writer before taking a snapshot of subscription slots/keys.
-# Proxy services keep running. Recover the panel if snapshot/download fails.
-PANEL_WAS_RUNNING=0
-if systemctl is-active --quiet tproxy-panel.service; then
-    PANEL_WAS_RUNNING=1
-    systemctl stop tproxy-panel.service
-fi
-early_finish() { local code=$?; if [[ "$PANEL_WAS_RUNNING" == 1 ]]; then systemctl start tproxy-panel.service || true; fi; wpp_progress_finish "$code"; }
-trap early_finish EXIT
-BACKUP="/root/web-panel-proxy-update-backup-${STAMP}"
-install -d -m 0700 "$BACKUP"
-BACKUP_ITEMS=()
-for item in /opt/tproxy-panel /opt/web-panel-proxy /opt/MTProxy /usr/local/bin/caddy /usr/local/bin/tproxy-server /usr/local/bin/amneziawg-go /usr/local/bin/awg /usr/local/bin/awg-quick /usr/local/sbin/web-proxy-panelctl /usr/local/sbin/web-proxy-panel-user-firewall /usr/local/sbin/web-panel-proxy-sync-tls /usr/local/sbin/web-panel-proxy-awg-run /usr/local/sbin/web-panel-proxy-awg-up /usr/local/sbin/web-panel-proxy-awg-down /usr/local/sbin/web-panel-proxy-update /usr/local/sbin/web-panel-proxy-uninstall /usr/local/sbin/WPP /usr/local/sbin/wpp /etc/systemd/system/tproxy-panel.service /etc/systemd/system/web-proxy-panel-firewall.service /etc/systemd/system/web-proxy-panel-traffic.service /etc/systemd/system/web-proxy-panel-traffic.timer /etc/systemd/system/web-panel-proxy-xray.service /etc/systemd/system/web-panel-proxy-openflux.service /etc/systemd/system/web-panel-proxy-awg@.service /etc/systemd/system/web-panel-proxy-sync-tls.service /etc/systemd/system/web-panel-proxy-sync-tls.timer /etc/systemd/system/web-panel-proxy-component-update.service /etc/systemd/system/tproxy-server.service /etc/systemd/system/mtproxy.service /etc/systemd/system/caddy.service.d/tproxy.conf /etc/caddy/Caddyfile /etc/tproxy-server /etc/mtproxy /etc/mita /etc/web-panel-proxy-xray /etc/sysctl.d/90-web-panel-proxy-awg.conf /var/lib/web-panel-proxy-xray /var/lib/web-panel-proxy-components /var/lib/tproxy-panel /etc/web-proxy-panel /srv/tproxy-site; do
-    [[ -e "$item" ]] && BACKUP_ITEMS+=("$item")
-    [[ -e "$item" ]] && cp -a --parents "$item" "$BACKUP"
-done
-shopt -s nullglob
-for item in /etc/systemd/system/web-proxy-user-*.service /etc/systemd/system/web-panel-proxy-web-update.service /etc/systemd/system/web-panel-proxy-auto-update.service /etc/systemd/system/web-panel-proxy-auto-update.timer /etc/systemd/system/web-panel-proxy-metrics.service /etc/systemd/system/web-panel-proxy-metrics.timer; do
-    [[ -e "$item" ]] || continue
-    BACKUP_ITEMS+=("$item")
-    cp -a --parents "$item" "$BACKUP"
-done
-shopt -u nullglob
-tar --numeric-owner -cpf "$BACKUP/state.tar" "${BACKUP_ITEMS[@]}"
-echo "Backup created: $BACKUP"
-wpp_progress 15 "Резервная копия создана"
 
-HAD_FIREWALL_SERVICE=0
-[[ -e /etc/systemd/system/web-proxy-panel-firewall.service ]] && HAD_FIREWALL_SERVICE=1
-HAD_TRAFFIC_TIMER=0
-[[ -e /etc/systemd/system/web-proxy-panel-traffic.timer ]] && HAD_TRAFFIC_TIMER=1
-HAD_METRICS_TIMER=0
-[[ -e /etc/systemd/system/web-panel-proxy-metrics.timer ]] && HAD_METRICS_TIMER=1
-HAD_PANEL_DATA=0
-HAD_PANEL_SERVICE=0
-HAD_PRIMARY_SECRET=0
-HAD_CADDY_DROPIN=0
-HAD_PANEL_STATE_DIR=0
-HAD_XRAY_STATE=0
-HAD_XRAY_USER=0
-HAD_XRAY_GROUP=0
-HAD_OPENFLUX_UNIT=0
-HAD_OPENFLUX_USER=0
-HAD_AWG=0
-HAD_WPP_MENU=0
-HAD_WEB_UPDATE_UNIT=0
-[[ -e /etc/systemd/system/web-panel-proxy-web-update.service ]] && HAD_WEB_UPDATE_UNIT=1
-HAD_AUTO_UPDATE_UNITS=0
-[[ -e /etc/systemd/system/web-panel-proxy-auto-update.service && -e /etc/systemd/system/web-panel-proxy-auto-update.timer ]] && HAD_AUTO_UPDATE_UNITS=1
-HAD_COMPONENT_UPDATE_UNIT=0
-[[ -e /etc/systemd/system/web-panel-proxy-component-update.service ]] && HAD_COMPONENT_UPDATE_UNIT=1
-[[ -e "$DATA_FILE" ]] && HAD_PANEL_DATA=1
-[[ -e "$SERVICE" ]] && HAD_PANEL_SERVICE=1
-[[ -e "$PRIMARY_SECRET" ]] && HAD_PRIMARY_SECRET=1
-[[ -e /etc/systemd/system/caddy.service.d/tproxy.conf ]] && HAD_CADDY_DROPIN=1
-[[ -d /etc/web-proxy-panel ]] && HAD_PANEL_STATE_DIR=1
-{ [[ -e /opt/web-panel-proxy ]] || [[ -e /etc/web-panel-proxy-xray ]] || [[ -e /etc/systemd/system/web-panel-proxy-xray.service ]]; } && HAD_XRAY_STATE=1
-id xray >/dev/null 2>&1 && HAD_XRAY_USER=1
-getent group xray >/dev/null 2>&1 && HAD_XRAY_GROUP=1
-[[ -e /etc/systemd/system/web-panel-proxy-openflux.service ]] && HAD_OPENFLUX_UNIT=1
-id wpp-openflux >/dev/null 2>&1 && HAD_OPENFLUX_USER=1
-[[ -e /etc/systemd/system/web-panel-proxy-awg@.service || -x /usr/local/bin/amneziawg-go ]] && HAD_AWG=1
-[[ -e /usr/local/sbin/WPP ]] && HAD_WPP_MENU=1
-UPDATE_COMMITTED=0
-rollback_update() {
-    local code="$1"
-    [[ "$UPDATE_COMMITTED" == 1 || "$code" == 0 ]] && return 0
-    echo "Update failed; restoring the previous working state..." >&2
-    systemctl stop tproxy-panel.service web-proxy-panel-firewall.service web-proxy-panel-traffic.timer web-proxy-panel-traffic.service web-panel-proxy-metrics.timer web-panel-proxy-metrics.service web-panel-proxy-xray.service web-panel-proxy-openflux.service web-panel-proxy-sync-tls.timer web-panel-proxy-auto-update.timer web-panel-proxy-auto-update.service 2>/dev/null || true
-    for unit in $(systemctl list-units --all 'web-panel-proxy-awg@*.service' --no-legend 2>/dev/null | awk '{print $1}'); do systemctl stop "$unit" 2>/dev/null || true; done
-    tar --numeric-owner -xpf "$BACKUP/state.tar" -C / 2>/dev/null || true
-    if [[ "$HAD_FIREWALL_SERVICE" == 0 ]]; then
-        rm -f /etc/systemd/system/web-proxy-panel-firewall.service
-        rm -f /usr/local/sbin/web-proxy-panel-user-firewall
-    fi
-    if [[ "$HAD_TRAFFIC_TIMER" == 0 ]]; then
-        rm -f /etc/systemd/system/web-proxy-panel-traffic.service /etc/systemd/system/web-proxy-panel-traffic.timer
-    fi
-    if [[ "$HAD_METRICS_TIMER" == 0 ]]; then
-        systemctl disable web-panel-proxy-metrics.timer 2>/dev/null || true
-        rm -f /etc/systemd/system/web-panel-proxy-metrics.service /etc/systemd/system/web-panel-proxy-metrics.timer
-    fi
-    if [[ "$HAD_WPP_MENU" == 0 ]]; then
-        rm -f /usr/local/sbin/WPP /usr/local/sbin/wpp /usr/local/sbin/web-panel-proxy-update
-    fi
-    if [[ "$HAD_WEB_UPDATE_UNIT" == 0 ]]; then
-        rm -f /etc/systemd/system/web-panel-proxy-web-update.service
-    fi
-    if [[ "$HAD_AUTO_UPDATE_UNITS" == 0 ]]; then
-        systemctl disable web-panel-proxy-auto-update.timer 2>/dev/null || true
-        rm -f /etc/systemd/system/web-panel-proxy-auto-update.service /etc/systemd/system/web-panel-proxy-auto-update.timer
-    fi
-    if [[ "$HAD_COMPONENT_UPDATE_UNIT" == 0 ]]; then
-        rm -f /etc/systemd/system/web-panel-proxy-component-update.service
-        rm -rf /var/lib/web-panel-proxy-components
-    fi
-    if [[ "$HAD_PANEL_SERVICE" == 0 ]]; then
-        rm -f "$SERVICE"
-        rm -rf /opt/tproxy-panel
-    fi
-    if [[ "$HAD_PANEL_DATA" == 0 ]]; then
-        rm -rf /var/lib/tproxy-panel
-    fi
-    if [[ "$HAD_PRIMARY_SECRET" == 0 ]]; then
-        rm -f "$PRIMARY_SECRET"
-    fi
-    if [[ "$HAD_PANEL_STATE_DIR" == 0 ]]; then
-        rm -rf /etc/web-proxy-panel
-    fi
-    if [[ "$HAD_CADDY_DROPIN" == 0 ]]; then
-        rm -f /etc/systemd/system/caddy.service.d/tproxy.conf
-    fi
-    if [[ "$HAD_XRAY_STATE" == 0 ]]; then
-        rm -rf /opt/web-panel-proxy /etc/web-panel-proxy-xray /var/lib/web-panel-proxy-xray
-        rm -f /etc/web-proxy-panel/xray-path /etc/web-proxy-panel/xray-user-owned /etc/web-proxy-panel/xray-group-owned \
-            /etc/web-proxy-panel/hysteria-ufw-owned
-        rm -f /usr/local/sbin/web-panel-proxy-sync-tls \
-            /etc/systemd/system/web-panel-proxy-xray.service \
-            /etc/systemd/system/web-panel-proxy-sync-tls.service \
-            /etc/systemd/system/web-panel-proxy-sync-tls.timer
-    fi
-    if [[ "$HAD_XRAY_USER" == 0 ]]; then
-        userdel xray 2>/dev/null || true
-    fi
-    if [[ "$HAD_XRAY_GROUP" == 0 ]]; then
-        groupdel xray 2>/dev/null || true
-    fi
-    if [[ "$HAD_OPENFLUX_UNIT" == 0 ]]; then
-        systemctl disable --now web-panel-proxy-openflux.service 2>/dev/null || true
-        rm -f /etc/systemd/system/web-panel-proxy-openflux.service
-        rm -rf /opt/web-panel-proxy/openflux
-    fi
-    if [[ "$HAD_OPENFLUX_USER" == 0 ]]; then
-        userdel wpp-openflux 2>/dev/null || true
-    fi
-    if [[ "$HAD_AWG" == 0 ]]; then
-        rm -f /usr/local/bin/amneziawg-go /usr/local/bin/awg /usr/local/bin/awg-quick \
-            /usr/local/sbin/web-panel-proxy-awg-run /usr/local/sbin/web-panel-proxy-awg-up /usr/local/sbin/web-panel-proxy-awg-down \
-            /etc/systemd/system/web-panel-proxy-awg@.service /etc/sysctl.d/90-web-panel-proxy-awg.conf
-        rm -f /etc/systemd/system/multi-user.target.wants/web-panel-proxy-awg@*.service
-        nft delete table ip web_proxy_awg 2>/dev/null || true
-    fi
-    systemctl daemon-reload
-    systemctl restart mtproxy.service tproxy-server.service caddy.service tproxy-panel.service 2>/dev/null || true
-    [[ -e /etc/web-proxy-panel/openflux/enabled ]] && systemctl restart web-panel-proxy-openflux.service 2>/dev/null || true
-    [[ "$HAD_FIREWALL_SERVICE" == 1 ]] && systemctl restart web-proxy-panel-firewall.service 2>/dev/null || true
-    [[ "$HAD_XRAY_STATE" == 1 ]] && systemctl restart web-panel-proxy-xray.service 2>/dev/null || true
-    if [[ "$HAD_AWG" == 1 ]]; then
-        for unit in $(systemctl list-unit-files 'web-panel-proxy-awg@*.service' --no-legend 2>/dev/null | awk '$2=="enabled" {print $1}'); do
-            systemctl restart "$unit" 2>/dev/null || true
-        done
-    fi
-    [[ "$HAD_TRAFFIC_TIMER" == 1 ]] && systemctl restart web-proxy-panel-traffic.timer 2>/dev/null || true
-    [[ "$HAD_METRICS_TIMER" == 1 ]] && systemctl restart web-panel-proxy-metrics.timer 2>/dev/null || true
-    [[ "$HAD_AUTO_UPDATE_UNITS" == 1 ]] && systemctl enable --now web-panel-proxy-auto-update.timer 2>/dev/null || true
-    echo "Previous files restored from: $BACKUP" >&2
-}
+def _atomic_text(path, value):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    old = None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            old = handle.read()
+    except FileNotFoundError:
+        pass
+    if old == value:
+        return False
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(value); handle.flush(); os.fsync(handle.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return True
 
-if ! command -v git >/dev/null 2>&1; then
-    echo "Installing Git (required to download the update)..."
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get -o DPkg::Lock::Timeout=600 update
-    apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends git
-fi
 
-if [[ -z "$LOCAL_SOURCE" ]]; then
-if [[ -z "$RELEASE_REF" ]]; then
-    echo "Checking the latest published WEB PANEL PROXY version..."
-    RELEASE_REF="$(git ls-remote --tags --refs "$REPOSITORY" 'v[0-9]*' |
-        awk -F/ '{print $3}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
-fi
-[[ "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] ||
-    die "Could not determine a valid published release tag."
-echo "Selected release: $RELEASE_REF"
-CURRENT_VERSION="$(cat /etc/web-proxy-panel/version 2>/dev/null || true)"
-if [[ -z "$REQUESTED_REF" && "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.+~-][A-Za-z0-9.+~-]+)?$ ]] &&
-   dpkg --compare-versions "$CURRENT_VERSION" ge "${RELEASE_REF#v}"; then
-    echo "WEB PANEL PROXY ${CURRENT_VERSION} is already the latest published stable version."
-    exit 0
-fi
-fi
+def _validate_user(user):
+    protocol = user.get("protocol")
+    if protocol not in PROTOCOLS:
+        raise RuntimeError("Unsupported AWG protocol")
+    if not re.fullmatch(r"[a-f0-9]{16}", str(user.get("id", ""))):
+        raise RuntimeError("Invalid AWG profile id")
+    for key in ("secret", "public_key", "preshared_key", "server_private_key", "server_public_key",
+                "address", "server_address", "awg_network", "awg_interface", "awg_parameters"):
+        if not user.get(key):
+            raise RuntimeError("AWG profile is incomplete: " + key)
+    if user["awg_interface"] != _interface(user["id"]):
+        raise RuntimeError("Invalid AWG interface name")
+    if user.get("awg_schema") != PROFILE_SCHEMA:
+        raise RuntimeError("Outdated AWG profile schema")
+    port = int(user.get("backend_port", 0))
+    if not PORT_FIRST <= port <= PORT_LAST:
+        raise RuntimeError("Invalid AWG UDP port")
+    parameters = user["awg_parameters"]
+    try:
+        if not 3 <= int(parameters["Jc"]) <= 6:
+            raise ValueError
+        if not 40 <= int(parameters["Jmin"]) <= int(parameters["Jmax"]) <= 339:
+            raise ValueError
+        if not 12 <= int(parameters["S3"]) <= 55 or not 12 <= int(parameters["S4"]) <= 27:
+            raise ValueError
+        if int(parameters["S1"]) + 56 == int(parameters["S2"]):
+            raise ValueError
+        if len({int(parameters[k]) for k in ("H1", "H2", "H3", "H4")}) != 4:
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        raise RuntimeError("Invalid AWG obfuscation parameters")
+    if protocol == "awg31":
+        if parameters.get("RandomTrailers") != "on" or parameters.get("DisableCookies") != "on":
+            raise RuntimeError("Incomplete AWG 3.1 protection settings")
+        if not str(parameters.get("I1", "")).startswith("<r "):
+            raise RuntimeError("Invalid AWG 3.1 signature packet")
 
-TEMP_DIR="$(mktemp -d /tmp/web-panel-proxy-update.XXXXXX)"
-finish() {
-    local code=$?
-    trap - EXIT
-    rollback_update "$code"
-    rm -rf "$TEMP_DIR"
-    wpp_progress_finish "$code"
-    exit "$code"
-}
-trap finish EXIT
 
-echo "Downloading WEB PANEL PROXY files..."
-wpp_progress 25 "Получение файлов обновления"
-if [[ -n "$LOCAL_SOURCE" ]]; then
-    install -d -m 0700 "$TEMP_DIR/source"
-    install -d -m 0700 "$TEMP_DIR/source/assets"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py; do
-        cp -a "$LOCAL_SOURCE/$file" "$TEMP_DIR/source/$file"
-    done
-    if [[ -s "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" ]]; then
-        cp -a "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" "$TEMP_DIR/source/assets/OpenFlux-linux-amd64"
-    else
-        cp -a "$LOCAL_SOURCE/OpenFlux-linux-amd64" "$TEMP_DIR/source/assets/OpenFlux-linux-amd64"
-    fi
-    install -d -m 0700 "$TEMP_DIR/source/wpp-panel"
-    cp -a "$LOCAL_SOURCE/wpp-panel/flags.tar.gz" "$TEMP_DIR/source/wpp-panel/flags.tar.gz"
-else
-git clone --depth 1 --branch "$RELEASE_REF" "$REPOSITORY" "$TEMP_DIR/source"
-fi
-[[ -f "$TEMP_DIR/source/install-panel.sh" ]] || die "Update package is incomplete."
-chmod 0700 "$TEMP_DIR/source/install-panel.sh"
-wpp_progress 40 "Файлы обновления подготовлены"
+def service_for(user):
+    return SERVICE_TEMPLATE.format(user.get("id", "")) if user.get("protocol") in PROTOCOLS else ""
 
-if [[ "$MIGRATING_LEGACY" == 1 ]]; then
-    DOMAIN="$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' /etc/systemd/system/caddy.service.d/tproxy.conf 2>/dev/null | head -n1 || true)"
-    if ! [[ "$DOMAIN" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] && [[ -s /etc/tproxy-server/config.json ]]; then
-        DOMAIN="$(sed -n 's/.*"public_hostname"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /etc/tproxy-server/config.json | head -n1)"
-    fi
-    if ! [[ "$DOMAIN" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] && [[ -s /etc/caddy/Caddyfile ]]; then
-        DOMAIN="$(sed -n 's/^[[:space:]]*\([a-z0-9][a-z0-9.-]*\)[[:space:]]*{[[:space:]]*$/\1/p' /etc/caddy/Caddyfile |
-            grep -vE '^(http|https|localhost)$' | head -n1 || true)"
-    fi
-    [[ "$DOMAIN" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ && "$DOMAIN" == *.* ]] ||
-        die "Could not recover the domain from the first-generation installation."
 
-    ACME_EMAIL="$(sed -n 's/^Environment=ACME_EMAIL=//p' /etc/systemd/system/caddy.service.d/tproxy.conf 2>/dev/null | head -n1 || true)"
-    if ! [[ "$ACME_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
-        while true; do
-            read -r -p "ACME email for the existing domain: " ACME_EMAIL
-            [[ "$ACME_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] && break
-            echo "Invalid email."
-        done
-    fi
+def sync(users):
+    if not PROTOCOLS:
+        # Feature retired: installation cleanup stops/removes the units.  Do
+        # not erase old configuration files here; they are rollback data.
+        return
+    os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
+    selected = {u["id"]: u for u in users if u.get("protocol") in PROTOCOLS and u.get("enabled", True)}
+    changed = set()
+    for uid, user in selected.items():
+        _validate_user(user)
+        config = os.path.join(CONFIG_DIR, uid + ".conf")
+        meta = os.path.join(CONFIG_DIR, uid + ".json")
+        changed_config = _atomic_text(config, _server_config(user))
+        changed_meta = _atomic_text(meta, json.dumps({"interface": user["awg_interface"],
+            "address": user["server_address"], "mtu": _mtu(user)}, sort_keys=True) + "\n")
+        if changed_config or changed_meta:
+            changed.add(uid)
+    for name in os.listdir(CONFIG_DIR):
+        match = re.fullmatch(r"([a-f0-9]{16})\.(?:conf|json)", name)
+        if not match or match.group(1) in selected:
+            continue
+        uid = match.group(1)
+        _run("systemctl", "disable", "--now", SERVICE_TEMPLATE.format(uid), check=False)
+        for suffix in (".conf", ".json"):
+            try: os.unlink(os.path.join(CONFIG_DIR, uid + suffix))
+            except FileNotFoundError: pass
+    _run("systemctl", "daemon-reload", check=True)
+    for uid, user in selected.items():
+        unit = SERVICE_TEMPLATE.format(uid)
+        active = _run("systemctl", "is-active", "--quiet", unit, check=False).returncode == 0
+        _run("systemctl", "enable", unit, check=True)
+        _run("systemctl", "restart" if uid in changed or not active else "start", unit, check=True)
+        if _run("systemctl", "is-active", "--quiet", unit, check=False).returncode:
+            status = _run("systemctl", "status", unit, "--no-pager", "--full", check=False)
+            raise RuntimeError("AWG profile failed: " + (status.stdout or status.stderr)[-2500:])
+        _run(AWG, "show", user["awg_interface"], check=True)
+        link = _run("/usr/sbin/ip", "-o", "link", "show", "dev", user["awg_interface"], check=True)
+        if not re.search(r"\bmtu\s+%d\b" % _mtu(user), link.stdout or ""):
+            raise RuntimeError("AWG interface started with an unsafe MTU")
 
-    install -d -m 0700 /etc/web-proxy-panel
-    printf '%s\n' "$LEGACY_SECRET" > "$PRIMARY_SECRET"
-    chmod 0600 "$PRIMARY_SECRET"
-    if [[ ! -s /etc/web-proxy-panel/mtproto-host ]]; then
-        MTPROTO_HOST="$(curl -4fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
-        printf '%s\n' "${MTPROTO_HOST:-$DOMAIN}" > /etc/web-proxy-panel/mtproto-host
-        chmod 0600 /etc/web-proxy-panel/mtproto-host
-    fi
-    if [[ ! -s /etc/web-proxy-panel/caddy-owned ]]; then
-        printf '%s\n' 'WEB_PANEL_PROXY_V2_CADDY_SHARED' > /etc/web-proxy-panel/caddy-owned
-        chmod 0600 /etc/web-proxy-panel/caddy-owned
-    fi
-    install -d -m 0755 /etc/systemd/system/caddy.service.d
-    cat > /etc/systemd/system/caddy.service.d/tproxy.conf <<EOF
-[Service]
-Environment=TPROXY_HOSTNAME=$DOMAIN
-Environment=TPROXY_SITE_ROOT=/srv/tproxy-site
-Environment=ACME_EMAIL=$ACME_EMAIL
-ReadWritePaths=/etc/caddy
-EOF
-    chmod 0644 /etc/systemd/system/caddy.service.d/tproxy.conf
-    systemctl daemon-reload
-fi
 
-# Keep the relay binary current as part of the same public update command.
-# Configuration, users, secrets and public-site files are not replaced.
-if [[ -f "$TEMP_DIR/source/repair-landing-pages.sh" ]]; then
-    wpp_progress 50 "Проверка публичного сайта"
-    chmod 0700 "$TEMP_DIR/source/repair-landing-pages.sh"
-    bash "$TEMP_DIR/source/repair-landing-pages.sh"
-fi
+def client_config(user, endpoint, name="AWG"):
+    _validate_user(user)
+    lines = ["# " + str(name), "[Interface]", "PrivateKey = " + user["secret"],
+             "Address = " + user["address"], "DNS = 1.1.1.1, 1.0.0.1", "MTU = " + str(_mtu(user))]
+    lines.extend(_parameter_lines(user["awg_parameters"]))
+    lines.extend(["", "[Peer]", "PublicKey = " + user["server_public_key"],
+                  "PresharedKey = " + user["preshared_key"],
+                  "Endpoint = %s:%d" % (endpoint, int(user["backend_port"])),
+                  "AllowedIPs = 0.0.0.0/0", "PersistentKeepalive = 25", ""])
+    return "\n".join(lines)
 
-wpp_progress 60 "Установка компонентов панели"
-if [[ "$MIGRATING_LEGACY" == 1 ]]; then
-    # New panel bootstrap: install-panel asks for a login and one password,
-    # creates the private URL and leaves the old core proxy data in place.
-    bash "$TEMP_DIR/source/install-panel.sh"
-else
-    WEB_PANEL_PROXY_UPDATE=1 bash "$TEMP_DIR/source/install-panel.sh"
-fi
-install -o root -g root -m 0755 \
-    "$TEMP_DIR/source/uninstall-web-proxy.sh" \
-    /usr/local/sbin/web-panel-proxy-uninstall
-wpp_progress 90 "Финальная проверка служб"
 
-if [[ -f "$LEGACY_SERVICE" ]]; then
-    systemctl disable --now web-proxy-panel.service 2>/dev/null || true
-    rm -f "$LEGACY_SERVICE"
-    systemctl daemon-reload
-fi
-
-DOMAIN="$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' /etc/systemd/system/caddy.service.d/tproxy.conf | head -n1)"
-PANEL_PATH="$(sed -n 's/^Environment=WEBPROXY_PANEL_PATH=//p' "$SERVICE" | head -n1 || true)"
-[[ "$PANEL_PATH" =~ ^/panel-[a-z0-9-]{3,64}$ ]] || die "The updated panel address could not be read."
-systemctl is-active --quiet web-proxy-panel-firewall.service ||
-    die "Persistent user firewall did not start after the update."
-nft list table inet web_proxy_panel >/dev/null 2>&1 ||
-    die "Persistent user firewall table is missing after the update."
-[[ -x /opt/web-panel-proxy/xray/xray ]] || die "Xray binary is missing after the update."
-[[ -s /etc/web-panel-proxy-xray/config.json ]] || die "Xray configuration is missing after the update."
-command -v caddy >/dev/null 2>&1 || die "Caddy is missing after the update."
-[[ -x /opt/MTProxy/objs/bin/mtproto-proxy ]] || die "MTProxy is missing after the update."
-systemctl is-active --quiet caddy.service || die "Caddy did not start after the update."
-systemctl is-active --quiet web-panel-proxy-sync-tls.timer ||
-    die "The Xray TLS synchronization timer did not start after the update."
-systemctl is-active --quiet web-panel-proxy-auto-update.timer ||
-    die "The automatic update timer did not start after the update."
-if [[ ! -s /etc/web-proxy-panel/caddy-owned ]]; then
-    printf '%s\n' 'WEB_PANEL_PROXY_V2_CADDY_SHARED' > /etc/web-proxy-panel/caddy-owned
-fi
-printf '%s\n' "${RELEASE_REF#v}" > /etc/web-proxy-panel/version
-chmod 0600 /etc/web-proxy-panel/caddy-owned /etc/web-proxy-panel/version
-UPDATE_COMMITTED=1
-wpp_progress 100 "Обновление завершено"
-echo
-echo "Update completed. Open the panel at: https://${DOMAIN}${PANEL_PATH}/login"
-NODE_API_TOKEN="$(python3 - "$DOMAIN" <<'PY'
-import sys
-sys.path.insert(0,"/opt/tproxy-panel")
-import wpp_nodes
-try:
-    key=open("/var/lib/tproxy-panel/api.key",encoding="ascii").read().strip()
-    print(wpp_nodes.make_connection_token(sys.argv[1],key))
-except (OSError,ValueError):
-    pass
-PY
-)"
-if [[ "$NODE_API_TOKEN" == wppnode1_* ]]; then
-    echo "Node API token: ${NODE_API_TOKEN}"
-fi
+def traffic(users):
+    if not PROTOCOLS:
+        return {}
+    by_key = {u.get("public_key"): u.get("id") for u in users
+              if u.get("protocol") in PROTOCOLS and u.get("public_key")}
+    result = {}
+    proc = _run(AWG, "show", "all", "dump", check=False, timeout=10)
+    if proc.returncode:
+        return result
+    for line in proc.stdout.splitlines():
+        columns = line.split("\t")
+        if len(columns) < 9 or columns[1] not in by_key:
+            continue
+        try:
+            result[by_key[columns[1]]] = {"up": int(columns[6]), "down": int(columns[7])}
+        except ValueError:
+            continue
+    return result

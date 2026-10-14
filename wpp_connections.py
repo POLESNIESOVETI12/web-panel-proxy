@@ -1,263 +1,294 @@
 #!/usr/bin/env python3
-"""Transactional Xray/OpenFlux version manager for the local WPP server."""
+"""Server connection templates for WEB PANEL PROXY.
 
-from contextlib import contextmanager
+Connections describe how traffic reaches a service.  Client credentials stay
+in users.json and only reference a connection by id.  This separation lets an
+operator repair a CDN hostname or TLS setting once without rotating UUIDs.
+"""
+import copy
+import hashlib
+import json
 import os
 import re
-import shutil
-import subprocess
+import secrets
 import tempfile
 import time
-from pathlib import Path
 
-from wpp_metrics import atomic_json, read_state
-
-ROOT = Path("/var/lib/web-panel-proxy-components")
-STATUS = ROOT / "status.json"
-ACTION_LOCK = ROOT / "action.lock"
-UNIT = "web-panel-proxy-component-update.service"
-OPENFLUX_PROFILES = Path("/etc/web-proxy-panel/openflux/profiles")
-SPECS = {
-    "xray": {
-        "repo": "https://github.com/XTLS/Xray-core.git",
-        "asset": "https://github.com/XTLS/Xray-core/releases/download/{tag}/Xray-linux-64.zip",
-        "binary": Path("/opt/web-panel-proxy/xray/xray"),
-        "service": "web-panel-proxy-xray.service",
-    },
-    "openflux": {
-        "repo": "https://github.com/damnurmum/OpenFlux-Android.git",
-        "asset": "https://github.com/damnurmum/OpenFlux-Android/releases/download/{tag}/openflux-linux-amd64",
-        "binary": Path("/opt/web-panel-proxy/openflux/openflux"),
-        "service": "web-panel-proxy-openflux.service",
-    },
-}
+SCHEMA = 1
+PROTOCOLS = {"vless", "hysteria", "mtproto", "web"}
+PROVIDERS = {"yandex", "vk", "beget", "selectel", "custom"}
+FINGERPRINTS = {"chrome", "firefox", "safari", "edge", "random", "randomized"}
+MODES = {"packet-up", "stream-up", "auto"}
+METHODS = {"GET", "POST", "DELETE"}
+HOST_RE = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", re.I)
 
 
-def _run(args, **kwargs):
-    return subprocess.run(args, text=True, capture_output=True, timeout=kwargs.pop("timeout", 30), check=False, **kwargs)
+class ConnectionError(ValueError):
+    pass
 
 
-def _version_tuple(value):
-    numbers = re.findall(r"\d+", str(value))
-    return tuple(int(x) for x in numbers[:4])
+def _base(cid, name, protocol, **config):
+    return {"id": cid, "name": name, "protocol": protocol, "enabled": True,
+            "created_at": int(time.time()), "config": config, "advanced": {}}
 
 
-def _current(component):
-    binary = SPECS[component]["binary"]
-    if not binary.is_file():
-        return "не установлен"
-    commands = [[str(binary), "version"], [str(binary), "--version"], [str(binary), "-version"]]
-    for command in commands:
-        try:
-            result = _run(command, timeout=5)
-        except (OSError, subprocess.SubprocessError):
-            continue
-        value = (result.stdout + " " + result.stderr).strip().splitlines()
-        if value:
-            match = re.search(r"v?(\d+(?:\.\d+){1,3})", " ".join(value[:2]))
-            if match:
-                return match.group(1)
-    return "установлен"
+def defaults():
+    return [
+        _base("vless-direct", "VLESS XHTTP · напрямую", "vless", route="direct", fingerprint="chrome", mode="packet-up", uplink_method="POST"),
+        _base("hysteria-primary", "Hysteria2 · основной", "hysteria", port=8443),
+        _base("mtproto-primary", "MTProto · отдельный порт", "mtproto", port=0),
+        _base("web-primary", "Web Proxy · HTTPS", "web", port=0),
+    ]
 
 
-@contextmanager
-def _action_lock():
-    import fcntl
-    ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
-    lock = ACTION_LOCK.open("a")
-    os.chmod(lock.name, 0o600)
+def _atomic(path, payload):
+    folder = os.path.dirname(path) or "."
+    os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".connections-", dir=folder, text=True)
     try:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        yield
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush(); os.fsync(stream.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
     finally:
-        lock.close()
+        try: os.unlink(tmp)
+        except FileNotFoundError: pass
 
 
-def _unit_running():
+def load(path):
     try:
-        result = _run(["systemctl", "show", UNIT, "-p", "ActiveState", "--value"], timeout=5)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return result.stdout.strip() in ("active", "activating", "reloading")
+        with open(path, encoding="utf-8") as stream: data = json.load(stream)
+    except FileNotFoundError:
+        return {"schema": SCHEMA, "connections": defaults()}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConnectionError("Файл подключений повреждён: "+str(exc))
+    if not isinstance(data, dict) or not isinstance(data.get("connections"), list):
+        raise ConnectionError("Некорректный формат файла подключений.")
+    return data
 
 
-def _tags(component):
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    result = _run(["git", "ls-remote", "--tags", "--refs", SPECS[component]["repo"], "v[0-9]*"],
-                  timeout=25, env=env)
-    if result.returncode:
-        raise ValueError("GitHub недоступен. Повторите позже.")
-    tags = set(re.findall(r"refs/tags/(v\d+(?:\.\d+){1,3})\s*$", result.stdout, re.M))
-    return sorted(tags, key=_version_tuple, reverse=True)[:30]
+def save(path, data):
+    clean = {"schema": SCHEMA, "connections": [validate(item, existing=item) for item in data.get("connections", [])]}
+    _atomic(path, clean)
+    return clean
 
 
-def _catalog(force=False):
-    state = read_state(STATUS)
-    cached = state.get("catalog", {})
-    if state.get("phase") in ("queued", "running"):
-        return {"current": {name: _current(name) for name in SPECS}, "catalog": cached,
-                "phase": state.get("phase"), "message": state.get("message", "")}
-    if force or time.time() - int(state.get("checked", 0)) > 300 or not cached:
-        cached = {name: _tags(name) for name in SPECS}
-        state.update(catalog=cached, checked=int(time.time()), phase="checked",
-                     message="Версии компонентов загружены.")
-        atomic_json(STATUS, state)
-    return {"current": {name: _current(name) for name in SPECS}, "catalog": cached,
-            "phase": state.get("phase", "idle"), "message": state.get("message", "")}
+def _host(value, label, required=False):
+    value = str(value or "").strip().lower().rstrip(".")
+    if required and not value: raise ConnectionError("Укажите "+label+".")
+    if value and not HOST_RE.fullmatch(value): raise ConnectionError("Некорректное значение поля «"+label+"».")
+    return value
 
 
-def catalog(force=False):
-    with _action_lock():
-        return _catalog(force)
+def _integer(value, label, low, high, default=0):
+    try: number = int(str(value if value not in (None, "") else default))
+    except (TypeError, ValueError): raise ConnectionError(label+" должен быть числом.")
+    if number < low or number > high: raise ConnectionError(f"{label}: допустимо от {low} до {high}.")
+    return number
 
 
-def status():
-    state = read_state(STATUS)
-    try:
-        started = int(state.get("started", 0) or 0)
-    except (TypeError, ValueError):
-        started = 0
-    if (state.get("phase") in ("queued", "running") and started and
-            time.time() - started > 60 and not _unit_running()):
-        state.update(phase="failed", finished=int(time.time()),
-                     message="Операция была прервана. Повторите её или проверьте журнал службы.")
-        atomic_json(STATUS, state)
-    state["current"] = {name: _current(name) for name in SPECS}
-    return state
-
-
-def start(component, tag):
-    if component not in SPECS or not re.fullmatch(r"v\d+(?:\.\d+){1,3}", str(tag)):
-        raise ValueError("Некорректный компонент или версия.")
-    with _action_lock():
-        state = status()
-        if state.get("phase") in ("queued", "running") or _unit_running():
-            raise ValueError("Другая операция с компонентами уже выполняется.")
-        info = _catalog()
-        if tag not in info["catalog"].get(component, []):
-            raise ValueError("Эта версия отсутствует среди опубликованных релизов GitHub.")
-        state = read_state(STATUS)
-        state.update(phase="queued", component=component, target=tag, started=int(time.time()),
-                     message=f"Подготовка {component} {tag}…")
-        atomic_json(STATUS, state)
-        result = _run(["systemctl", "start", "--no-block", UNIT], timeout=10)
-        if result.returncode:
-            state.update(phase="failed", message="Не удалось запустить обновление компонента.")
-            atomic_json(STATUS, state)
-            raise ValueError(state["message"])
-        return state
-
-
-def _download(url, destination):
-    result = _run(["curl", "-fL", "--retry", "3", "--retry-all-errors", "--connect-timeout", "20",
-                   "--max-time", "300", "-o", str(destination), url], timeout=360)
-    if result.returncode or not destination.is_file() or destination.stat().st_size < 100000:
-        raise RuntimeError("Не удалось скачать выбранный релиз с GitHub.")
-
-
-def _active_openflux_units():
-    result = _run(["systemctl", "list-units", "--type=service", "--state=active", "--no-legend",
-                   "web-panel-proxy-openflux*.service"])
-    return [line.split()[0] for line in result.stdout.splitlines()
-            if line.split() and re.fullmatch(r"web-panel-proxy-openflux(?:-[a-f0-9]{16})?\.service", line.split()[0])]
-
-
-def _max_profiles_configured():
-    """Return True when replacing OpenFlux must preserve the MAX transport."""
-    if not OPENFLUX_PROFILES.is_dir():
-        return False
-    for config_path in OPENFLUX_PROFILES.glob("*/config.json"):
-        try:
-            import json
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(config, dict) and config.get("transport") == "oneme":
-            return True
-    return False
-
-
-def _install(component, tag, directory):
-    spec = SPECS[component]
-    binary = spec["binary"]
-    candidate = directory / "candidate"
-    download = directory / "download"
-    _download(spec["asset"].format(tag=tag), download)
-    if component == "xray":
-        result = subprocess.run(["unzip", "-q", str(download), "xray", "-d", str(directory)],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, check=False)
-        if result.returncode:
-            raise RuntimeError("Не удалось распаковать Xray.")
-        (directory / "xray").replace(candidate)
+def validate(raw, existing=None):
+    if not isinstance(raw, dict): raise ConnectionError("Некорректные параметры подключения.")
+    old = existing if isinstance(existing, dict) else {}
+    cid = str(raw.get("id") or old.get("id") or secrets.token_hex(8))
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{2,63}", cid): raise ConnectionError("Некорректный идентификатор подключения.")
+    name = str(raw.get("name", "")).strip()
+    if not name or len(name) > 80 or any(ord(c) < 32 for c in name): raise ConnectionError("Укажите название длиной до 80 символов.")
+    protocol = str(raw.get("protocol", "")).lower()
+    if protocol not in PROTOCOLS: raise ConnectionError("Неизвестный протокол подключения.")
+    if old and old.get("protocol") and protocol != old.get("protocol"):
+        raise ConnectionError("Протокол используемого подключения менять нельзя. Создайте новое подключение.")
+    old_config = old.get("config") if isinstance(old.get("config"), dict) else {}
+    supplied_config = raw.get("config") if isinstance(raw.get("config"), dict) else {}
+    config = {**old_config, **supplied_config}
+    result = {"id": cid, "name": name, "protocol": protocol,
+              "enabled": bool(raw.get("enabled", True)),
+              "created_at": int(old.get("created_at") or raw.get("created_at") or time.time()),
+              "config": {}, "advanced": {}}
+    if protocol == "vless":
+        route = str(config.get("route", "direct"))
+        if route not in ("direct", "cdn"): raise ConnectionError("Неизвестный маршрут VLESS.")
+        provider = str(config.get("provider", "custom"))
+        if provider not in PROVIDERS: raise ConnectionError("Неизвестный CDN-провайдер.")
+        public_host = _host(config.get("public_host"), "публичный домен CDN", route == "cdn")
+        fingerprint = str(config.get("fingerprint", "chrome"))
+        if fingerprint not in FINGERPRINTS: raise ConnectionError("Неизвестный TLS fingerprint.")
+        mode = str(config.get("mode", "packet-up"))
+        if mode not in MODES: raise ConnectionError("Неизвестный режим XHTTP.")
+        method = str(config.get("uplink_method", "GET" if route == "cdn" else "POST")).upper()
+        if method not in METHODS: raise ConnectionError("Метод XHTTP должен быть GET, POST или DELETE.")
+        result["config"] = {"route": route, "provider": provider, "public_host": public_host,
+            "sni": _host(config.get("sni"), "TLS SNI"), "host_header": _host(config.get("host_header"), "HTTP Host"),
+            "fingerprint": fingerprint, "mode": mode, "uplink_method": method,
+            "padding": str(config.get("padding", "100-1000"))[:40],
+            "xmux": bool(config.get("xmux", provider in ("beget", "selectel"))),
+            "no_sse_header": bool(config.get("no_sse_header", False))}
     else:
-        download.replace(candidate)
-    os.chmod(candidate, 0o755)
-    if _run(["readelf", "-h", str(candidate)], timeout=10).returncode:
-        raise RuntimeError("Загруженный файл не является исполняемым Linux-бинарником.")
-    if component == "xray":
-        test = _run([str(candidate), "run", "-test", "-config", "/etc/web-panel-proxy-xray/config.json"], timeout=20)
-        if test.returncode:
-            raise RuntimeError("Выбранная версия Xray не принимает текущую конфигурацию.")
-        active = [spec["service"]] if _run(["systemctl", "is-active", "--quiet", spec["service"]]).returncode == 0 else []
-    else:
-        test = _run([str(candidate), "--help"], timeout=10)
-        if test.returncode not in (0, 1, 2):
-            raise RuntimeError("Выбранный бинарник OpenFlux не запускается.")
-        help_text = (test.stdout + "\n" + test.stderr).lower()
-        if _max_profiles_configured() and not all(marker in help_text for marker in ("maxtoken", "maxuid", "oneme")):
-            raise RuntimeError(
-                "Выбранная версия OpenFlux не поддерживает MAX. "
-                "Удалите MAX-профили или выберите более новый релиз."
-            )
-        active = _active_openflux_units()
-    backup = directory / "previous"
-    shutil.copy2(binary, backup)
-    try:
-        for service in active:
-            _run(["systemctl", "stop", service], timeout=30)
-        shutil.copy2(candidate, binary)
-        os.chmod(binary, 0o755)
-        for service in active:
-            result = _run(["systemctl", "restart", service], timeout=40)
-            if result.returncode or _run(["systemctl", "is-active", "--quiet", service], timeout=10).returncode:
-                raise RuntimeError("Служба не запустилась с выбранной версией.")
-    except Exception:
-        shutil.copy2(backup, binary)
-        os.chmod(binary, 0o755)
-        for service in active:
-            _run(["systemctl", "restart", service], timeout=40)
-        raise
+        result["config"] = {"port": _integer(config.get("port"), "Порт", 0, 65535)}
+    advanced = raw.get("advanced", old.get("advanced", {}))
+    if isinstance(advanced, str):
+        try: advanced = json.loads(advanced or "{}")
+        except json.JSONDecodeError: raise ConnectionError("Расширенные настройки должны быть корректным JSON-объектом.")
+    if not isinstance(advanced, dict): raise ConnectionError("Расширенные настройки должны быть JSON-объектом.")
+    encoded = json.dumps(advanced, ensure_ascii=False)
+    if len(encoded) > 16384: raise ConnectionError("Расширенные настройки слишком большие.")
+    result["advanced"] = advanced
+    return result
 
 
-def run():
-    import fcntl
-    lock_path = Path("/run/lock/web-panel-proxy.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock = lock_path.open("a")
-    try:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        state = read_state(STATUS)
-        state.update(phase="failed", message="Установка или другое обновление уже выполняется.")
-        atomic_json(STATUS, state)
-        return
-    state = read_state(STATUS)
-    component, tag = state.get("component"), state.get("target")
-    if state.get("phase") != "queued" or component not in SPECS:
-        raise SystemExit("No queued component update")
-    state.update(phase="running", message=f"Устанавливается {component} {tag}. Создана резервная копия.")
-    atomic_json(STATUS, state)
-    try:
-        with tempfile.TemporaryDirectory(prefix="wpp-component-") as directory:
-            _install(component, tag, Path(directory))
-        state.update(phase="done", message=f"{component} {tag} установлен. Проверка службы пройдена.")
-    except Exception as exc:
-        state.update(phase="failed", message="Изменение отменено: " + str(exc)[:600])
-    state["finished"] = int(time.time())
-    atomic_json(STATUS, state)
+def _signature(user):
+    protocol = str(user.get("protocol", ""))
+    cdn = user.get("cdn") if isinstance(user.get("cdn"), dict) else {}
+    if protocol == "vless" and cdn.get("enabled"):
+        return (protocol, "cdn", cdn.get("provider", "custom"), cdn.get("public_host", ""), cdn.get("sni", ""), cdn.get("host_header", ""))
+    return (protocol, "direct")
 
 
-if __name__ == "__main__":
-    if os.sys.argv[1:] != ["run"]:
-        raise SystemExit("Usage: wpp_components.py run")
-    run()
+def _from_user(user):
+    sig = _signature(user)
+    protocol = sig[0]
+    if protocol == "vless" and sig[1] == "cdn":
+        cdn = user.get("cdn", {})
+        seed = "|".join(str(x) for x in sig)
+        cid = "vless-" + hashlib.sha256(seed.encode()).hexdigest()[:12]
+        provider = str(cdn.get("provider", "custom"))
+        title = provider.title() if provider != "custom" else "CDN"
+        return _base(cid, f"VLESS XHTTP · {title} · {cdn.get('public_host','')}", "vless",
+            route="cdn", provider=provider, public_host=cdn.get("public_host", ""), sni=cdn.get("sni", ""),
+            host_header=cdn.get("host_header", ""), fingerprint=cdn.get("fingerprint", "chrome"),
+            mode=cdn.get("mode", "packet-up"), uplink_method=cdn.get("uplink_method", "GET"),
+            padding=cdn.get("padding", "100-1000"), xmux=cdn.get("xmux", provider in ("beget", "selectel")),
+            no_sse_header=cdn.get("no_sse_header", False))
+    mapping = {"vless": "vless-direct", "hysteria": "hysteria-primary", "mtproto": "mtproto-primary", "web": "web-primary"}
+    return next((item for item in defaults() if item["id"] == mapping.get(protocol)), None)
+
+
+def ensure(path, users=None, persist=True):
+    data = load(path)
+    current = {item.get("id"): item for item in data.get("connections", []) if isinstance(item, dict)}
+    changed = not os.path.exists(path)
+    for base in defaults():
+        if base["id"] not in current: current[base["id"]] = base; changed = True
+    for user in users or []:
+        if user.get("subscription_id"): continue
+        connection = _from_user(user)
+        if not connection: continue
+        if connection["id"] not in current: current[connection["id"]] = connection; changed = True
+        if user.get("connection_id") != connection["id"]: user["connection_id"] = connection["id"]
+    data = {"schema": SCHEMA, "connections": list(current.values())}
+    if persist and changed: data = save(path, data)
+    return data
+
+
+def get(data, cid):
+    return next((item for item in data.get("connections", []) if item.get("id") == cid), None)
+
+
+def request_for_connection(connection):
+    connection = validate(connection, existing=connection)
+    if not connection.get("enabled"): raise ConnectionError("Это подключение отключено.")
+    cfg = connection["config"]
+    request = {"protocol": connection["protocol"], "connection_id": connection["id"]}
+    if connection["protocol"] == "vless":
+        request.update({"vless_route": cfg["route"], "vless_cdn_provider": cfg.get("provider", "custom"),
+            "vless_cdn_public_host": cfg.get("public_host", ""), "vless_cdn_sni": cfg.get("sni", ""),
+            "vless_cdn_host_header": cfg.get("host_header", ""), "vless_cdn_fingerprint": cfg.get("fingerprint", "chrome"),
+            "vless_cdn_mode": cfg.get("mode", "packet-up"), "vless_cdn_uplink_method": cfg.get("uplink_method", "GET")})
+    elif connection["protocol"] == "mtproto" and cfg.get("port"):
+        request["port"] = cfg["port"]
+    return request
+
+
+def apply_to_user(user, connection):
+    """Apply mutable transport settings without touching client credentials."""
+    connection = validate(connection, existing=connection)
+    if user.get("protocol") != connection.get("protocol"):
+        raise ConnectionError("Протокол подключения не совпадает с протоколом пользователя.")
+    user["connection_id"] = connection["id"]
+    if user.get("protocol") == "vless":
+        cfg = connection["config"]
+        if cfg.get("route") == "direct":
+            user.pop("cdn", None)
+        else:
+            method = str(cfg.get("uplink_method", "GET")).lower()
+            if cfg.get("provider") == "selectel": method = "delete"
+            user["cdn"] = {"enabled": True, "provider": cfg.get("provider", "custom"),
+                "public_host": cfg.get("public_host", ""), "sni": cfg.get("sni") or cfg.get("public_host", ""),
+                "host_header": cfg.get("host_header") or cfg.get("public_host", ""),
+                "fingerprint": cfg.get("fingerprint", "chrome"), "mode": cfg.get("mode", "packet-up"),
+                "uplink_method": method}
+    return user
+
+
+def sync_users(data, users):
+    by_id = {item.get("id"): item for item in data.get("connections", [])}
+    changed = False
+    for user in users:
+        cid = user.get("connection_id")
+        if not cid or cid not in by_id: continue
+        before = json.dumps(user, sort_keys=True, ensure_ascii=True)
+        apply_to_user(user, by_id[cid])
+        changed = changed or before != json.dumps(user, sort_keys=True, ensure_ascii=True)
+    return changed
+
+
+def subscription_spec(connection):
+    connection=validate(connection,existing=connection)
+    spec={"id":connection["id"],"name":connection["name"],"protocol":connection["protocol"]}
+    if connection["protocol"]=="vless" and connection["config"].get("route")=="cdn":
+        cfg=connection["config"]; method=str(cfg.get("uplink_method","GET")).lower()
+        if cfg.get("provider")=="selectel": method="delete"
+        spec["cdn"]={"enabled":True,"provider":cfg.get("provider","custom"),
+            "public_host":cfg.get("public_host",""),"sni":cfg.get("sni") or cfg.get("public_host",""),
+            "host_header":cfg.get("host_header") or cfg.get("public_host",""),
+            "fingerprint":cfg.get("fingerprint","chrome"),"mode":cfg.get("mode","packet-up"),
+            "uplink_method":method}
+    return spec
+
+
+def sync_subscriptions(data, subscriptions):
+    by_id={item.get("id"):item for item in data.get("connections",[])}; changed=False
+    for sub in subscriptions:
+        specs=sub.get("connections")
+        if not isinstance(specs,list): continue
+        refreshed=[]
+        for spec in specs:
+            connection=by_id.get(spec.get("id")) if isinstance(spec,dict) else None
+            refreshed.append(subscription_spec(connection) if connection else spec)
+        if refreshed!=specs:
+            sub["connections"]=refreshed
+            sub["protocols"]=list(dict.fromkeys(item.get("protocol") for item in refreshed if isinstance(item,dict)))
+            changed=True
+    return changed
+
+
+def upsert(path, raw):
+    data = load(path); cid = str(raw.get("id", "")); old = get(data, cid) if cid else None
+    item = validate(raw, existing=old)
+    if any(row.get("id") == item["id"] and row is not old for row in data["connections"]):
+        raise ConnectionError("Подключение с таким идентификатором уже существует.")
+    if old: data["connections"] = [item if row.get("id") == item["id"] else row for row in data["connections"]]
+    else: data["connections"].append(item)
+    save(path, data); return item
+
+
+def remove(path, cid, users, subscriptions=None):
+    if cid in {item["id"] for item in defaults()}:
+        raise ConnectionError("Базовое подключение можно отключить, но нельзя удалить.")
+    if any(user.get("connection_id") == cid for user in users):
+        raise ConnectionError("Сначала перенесите привязанных пользователей на другое подключение.")
+    if any(any(isinstance(item,dict) and item.get("id")==cid for item in sub.get("connections",[])) for sub in (subscriptions or [])):
+        raise ConnectionError("Подключение используется клиентской подпиской. Сначала измените клиента.")
+    data = load(path)
+    if not get(data, cid): raise ConnectionError("Подключение не найдено.")
+    data["connections"] = [item for item in data["connections"] if item.get("id") != cid]
+    save(path, data)
+
+
+def clone(path, cid):
+    data = load(path); source = get(data, cid)
+    if not source: raise ConnectionError("Подключение не найдено.")
+    item = copy.deepcopy(source); item["id"] = secrets.token_hex(8); item["name"] += " · копия"; item["created_at"] = int(time.time())
+    data["connections"].append(item); save(path, data); return item

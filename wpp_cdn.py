@@ -1,360 +1,247 @@
-#!/usr/bin/env python3
-"""Retired AmneziaWG compatibility helpers for WEB PANEL PROXY.
-
-Every WPP profile owns a userspace interface, UDP port, address block, key set
-and obfuscation fingerprint.  Keeping device-level AWG parameters per profile
-avoids the shared-fingerprint limitation of a conventional multi-peer server.
-"""
-
-import ipaddress
-import json
-import os
+"""Strict validation and routing helpers for per-profile VLESS XHTTP CDN."""
 import re
-import secrets
-import subprocess
-import tempfile
 
-AWG = "/usr/local/bin/awg"
-CONFIG_DIR = "/etc/web-proxy-panel/awg"
-SERVICE_TEMPLATE = "web-panel-proxy-awg@{}.service"
-# AWG 3.1 can add IPv6/UDP + WireGuard transport framing, S4 padding and up to
-# 64 bytes of content padding. 1100 keeps the complete outer datagram below the
-# IPv6 minimum path MTU (1280) even in the worst generated profile. AWG 2.0 has
-# no 3.1 content padding and can retain the less conservative value.
-AWG20_MTU = 1280
-AWG31_MTU = 1100
-PORT_FIRST = 52000
-PORT_LAST = 52999
-# AWG is intentionally unavailable.  Keeping the module importable lets an
-# update read old users.json files without starting services or destroying
-# stored client records.  An empty protocol set makes sync() retire remaining
-# generated units/configs and prevents all new AWG operations.
-PROTOCOLS = ()
-PROFILE_SCHEMA = 2
+PROVIDERS = {"yandex", "vk", "beget", "selectel", "custom"}
+MODES = {"packet-up", "stream-up", "auto"}
+UPLINK_METHODS = {"post", "get", "delete"}
+FINGERPRINTS = {"chrome", "firefox", "safari", "edge", "random", "randomized"}
+HOST_RE = re.compile(r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+LEGACY_PATH_RE = re.compile(r"/vless-[a-f0-9]{24}\Z")
+STATIC_PATH_RE = re.compile(r"/assets/[a-f0-9]{12}/[a-f0-9]{12}\Z")
 
 
-def _mtu(user):
-    return AWG31_MTU if user.get("protocol") == "awg31" else AWG20_MTU
+class CDNError(ValueError):
+    pass
 
 
-def _run(*args, input_text=None, check=True, timeout=30):
-    proc = subprocess.run(args, input=input_text, text=True, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, timeout=timeout)
-    if check and proc.returncode:
-        raise RuntimeError((proc.stderr or proc.stdout or "AWG command failed").strip())
-    return proc
-
-
-def _key(command="genkey"):
-    value = _run(AWG, command).stdout.strip()
-    if len(value) != 44:
-        raise RuntimeError("AWG generated an invalid key")
-    return value
-
-
-def _public(private_key):
-    value = _run(AWG, "pubkey", input_text=private_key + "\n").stdout.strip()
-    if len(value) != 44:
-        raise RuntimeError("AWG generated an invalid public key")
-    return value
-
-
-def _interface(uid):
-    if not re.fullmatch(r"[a-f0-9]{16}", str(uid)):
-        raise RuntimeError("Invalid AWG profile id")
-    return "wa" + str(uid)[:11]  # Linux IFNAMSIZ: at most 15 bytes.
-
-
-def _occupied_udp_ports():
-    proc = _run("ss", "-Hlun", check=False, timeout=10)
-    return {int(m.group(1)) for m in re.finditer(r"[:.](\d{1,5})\s", proc.stdout or "")}
-
-
-def _allocate_port(users):
-    used = {int(u.get("backend_port", 0)) for u in users if u.get("protocol") in PROTOCOLS}
-    occupied = _occupied_udp_ports()
-    for port in range(PORT_FIRST, PORT_LAST + 1):
-        if port not in used and port not in occupied:
-            return port
-    raise RuntimeError("No free UDP port is available for AWG")
-
-
-def _allocate_network(users):
-    used = {str(u.get("awg_network", "")) for u in users if u.get("protocol") in PROTOCOLS}
-    # One /30 per profile: .1 server and .2 client. This intentionally has no
-    # dependency on the profile protocol, so AWG 2.0 and 3.1 cannot collide.
-    for second in range(80, 84):
-        for third in range(1, 255):
-            network = "10.%d.%d.0/30" % (second, third)
-            if network not in used:
-                return network
-    raise RuntimeError("No free AWG address block is available")
-
-
-def _parameters(protocol):
-    rng = secrets.SystemRandom()
-    # Match the constraints used by 3x-ui 3.8.5's GenerateObfuscation31.
-    # Each fixed H value gets its own band: H ranges must never overlap and
-    # values 1-4 are the recognisable vanilla WireGuard message types.
-    h_low = 5
-    h_band = (2147483647 - h_low + 1) // 4
-    headers = [rng.randint(h_low + i * h_band,
-                           h_low + (i + 1) * h_band - 1) for i in range(4)]
-    jmin = rng.randint(40, 89)
-    s1 = rng.randint(15, 150)
-    s2 = rng.randint(15, 150)
-    while s1 + 56 == s2:
-        s2 = rng.randint(15, 150)
-    values = {
-        "Jc": rng.randint(3, 6),
-        "Jmin": jmin,
-        "Jmax": jmin + rng.randint(50, 250),
-        "S1": s1,
-        "S2": s2,
-        "S3": rng.randint(12, 55),
-        "S4": rng.randint(12, 27),
-        "H1": headers[0], "H2": headers[1],
-        "H3": headers[2], "H4": headers[3],
-    }
-    if protocol == "awg31":
-        cp_low = rng.randint(8, 24)
-        rekey_low = rng.randint(100, 120)
-        rekey_high = rekey_low + rng.randint(10, 40)
-        reject_low = rekey_high + rng.randint(30, 60)
-        timeout_low = rng.randint(3, 6)
-        keepalive_low = rng.randint(8, 12)
-        attempts_low = rng.randint(15, 25)
-        values.update({
-            "I1": "<r %d>" % rng.randint(32, 256),
-            "HeaderProtectionKey": _key(),
-            "ContentPaddingAddition": "%d-%d" % (cp_low, cp_low + rng.randint(8, 40)),
-            "RekeyAfterTime": "%d-%d" % (rekey_low, rekey_high),
-            "RekeyTimeout": "%d-%d" % (timeout_low, timeout_low + rng.randint(1, 4)),
-            "RejectAfterTime": "%d-%d" % (reject_low, reject_low + rng.randint(30, 90)),
-            "KeepaliveTimeout": "%d-%d" % (keepalive_low, keepalive_low + rng.randint(2, 8)),
-            "MaxHandshakeAttempts": "%d-%d" % (attempts_low, attempts_low + rng.randint(5, 25)),
-            "RandomTrailers": "on",
-            "DisableCookies": "on",
-        })
-    return values
-
-
-def new_user(protocol, users, uid):
-    if protocol not in PROTOCOLS:
-        raise RuntimeError("Unsupported AWG protocol")
-    network = ipaddress.ip_network(_allocate_network(users))
-    client_private = _key()
-    server_private = _key()
-    existing_fingerprints = {
-        json.dumps(u.get("awg_parameters", {}), sort_keys=True)
-        for u in users if u.get("protocol") in PROTOCOLS
-    }
-    parameters = _parameters(protocol)
-    while json.dumps(parameters, sort_keys=True) in existing_fingerprints:
-        parameters = _parameters(protocol)
+def defaults():
     return {
-        "secret": client_private,
-        "public_key": _public(client_private),
-        "preshared_key": _key("genpsk"),
-        "server_private_key": server_private,
-        "server_public_key": _public(server_private),
-        "backend_port": _allocate_port(users),
-        "awg_network": str(network),
-        "address": str(list(network.hosts())[1]) + "/32",
-        "server_address": str(list(network.hosts())[0]) + "/30",
-        "awg_interface": _interface(uid),
-        "awg_parameters": parameters,
-        "awg_schema": PROFILE_SCHEMA,
+        "enabled": False,
+        "provider": "yandex",
+        "public_host": "",
+        "sni": "",
+        "host_header": "",
+        "mode": "packet-up",
+        "uplink_method": "post",
+        "fingerprint": "chrome",
     }
 
 
-def upgrade_users(users):
-    """Migrate the withdrawn shared-interface preview to independent profiles."""
-    required = ("secret", "public_key", "preshared_key", "server_private_key",
-                "server_public_key", "backend_port", "awg_network", "address",
-                "server_address", "awg_interface", "awg_parameters")
-    changed = False
-    for user in users:
-        if user.get("protocol") not in PROTOCOLS:
-            continue
-        complete = all(user.get(key) for key in required)
-        try:
-            valid_port = PORT_FIRST <= int(user.get("backend_port", 0)) <= PORT_LAST
-            valid_interface = user.get("awg_interface") == _interface(user.get("id", ""))
-        except (TypeError, ValueError, RuntimeError):
-            valid_port = valid_interface = False
-        if complete and valid_port and valid_interface:
-            if user.get("awg_schema") != PROFILE_SCHEMA:
-                other = {json.dumps(u.get("awg_parameters", {}), sort_keys=True)
-                         for u in users if u is not user and u.get("protocol") in PROTOCOLS}
-                parameters = _parameters(user["protocol"])
-                while json.dumps(parameters, sort_keys=True) in other:
-                    parameters = _parameters(user["protocol"])
-                user["awg_parameters"] = parameters
-                user["awg_schema"] = PROFILE_SCHEMA
-                changed = True
-            continue
-        fresh = new_user(user["protocol"], users, user["id"])
-        for key in list(user):
-            if key.startswith("awg_") or key in ("secret", "public_key", "preshared_key",
-                    "server_private_key", "server_public_key", "backend_port", "address", "server_address"):
-                user.pop(key, None)
-        user.update(fresh)
-        changed = True
-    return changed
+def valid_path_root(value):
+    """Accept both existing technical roots and new static-looking roots."""
+    value = str(value or "")
+    return bool(LEGACY_PATH_RE.fullmatch(value) or STATIC_PATH_RE.fullmatch(value))
 
 
-def _parameter_lines(parameters):
-    order = ("Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4",
-             "I1", "I2", "I3", "I4", "I5",
-             "HeaderProtectionKey", "ContentPaddingAddition", "RekeyAfterTime", "RekeyTimeout",
-             "RejectAfterTime", "KeepaliveTimeout", "MaxHandshakeAttempts", "RandomTrailers",
-             "DisableCookies")
-    return ["%s = %s" % (key, parameters[key]) for key in order if key in parameters]
+def endpoint_path(root, variant="direct"):
+    """Build an XHTTP endpoint while preserving paths issued by older WPP builds."""
+    root = str(root or "")
+    if not valid_path_root(root):
+        raise CDNError("Некорректный локальный путь XHTTP.")
+    variant = str(variant or "direct")
+    if variant not in {"direct", "cdn", "beget", "selectel"}:
+        raise CDNError("Неизвестный вариант пути XHTTP.")
+    if LEGACY_PATH_RE.fullmatch(root):
+        suffixes = {
+            "direct": "",
+            "cdn": "-cdn",
+            "beget": "-beget/segment0.ts",
+            "selectel": "-selectel/upload.m3u8",
+        }
+    else:
+        suffixes = {
+            "direct": "/index.html",
+            "cdn": "/config.json",
+            "beget": "/segment0.ts",
+            "selectel": "/upload.m3u8",
+        }
+    return root + suffixes[variant]
 
 
-def _server_config(user):
-    client_ip = str(ipaddress.ip_interface(user["address"]).ip) + "/32"
-    lines = ["[Interface]", "PrivateKey = " + user["server_private_key"],
-             "ListenPort = " + str(int(user["backend_port"]))]
-    lines.extend(_parameter_lines(user["awg_parameters"]))
-    lines.extend(["", "[Peer]", "PublicKey = " + user["public_key"],
-                  "PresharedKey = " + user["preshared_key"], "AllowedIPs = " + client_ip, ""])
-    return "\n".join(lines)
+def _host(value, label, required=False):
+    value = str(value or "").strip().lower().rstrip(".")
+    if value.startswith("http://") or value.startswith("https://") or "/" in value or ":" in value:
+        raise CDNError(f"{label}: укажите только домен без https://, пути и порта.")
+    if value and not HOST_RE.fullmatch(value):
+        raise CDNError(f"{label}: некорректное доменное имя.")
+    if required and not value:
+        raise CDNError(f"{label}: поле обязательно.")
+    return value
 
 
-def _atomic_text(path, value):
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    old = None
-    try:
-        with open(path, encoding="utf-8") as handle:
-            old = handle.read()
-    except FileNotFoundError:
-        pass
-    if old == value:
-        return False
-    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", dir=os.path.dirname(path))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(value); handle.flush(); os.fsync(handle.fileno())
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-    return True
-
-
-def _validate_user(user):
-    protocol = user.get("protocol")
-    if protocol not in PROTOCOLS:
-        raise RuntimeError("Unsupported AWG protocol")
-    if not re.fullmatch(r"[a-f0-9]{16}", str(user.get("id", ""))):
-        raise RuntimeError("Invalid AWG profile id")
-    for key in ("secret", "public_key", "preshared_key", "server_private_key", "server_public_key",
-                "address", "server_address", "awg_network", "awg_interface", "awg_parameters"):
-        if not user.get(key):
-            raise RuntimeError("AWG profile is incomplete: " + key)
-    if user["awg_interface"] != _interface(user["id"]):
-        raise RuntimeError("Invalid AWG interface name")
-    if user.get("awg_schema") != PROFILE_SCHEMA:
-        raise RuntimeError("Outdated AWG profile schema")
-    port = int(user.get("backend_port", 0))
-    if not PORT_FIRST <= port <= PORT_LAST:
-        raise RuntimeError("Invalid AWG UDP port")
-    parameters = user["awg_parameters"]
-    try:
-        if not 3 <= int(parameters["Jc"]) <= 6:
-            raise ValueError
-        if not 40 <= int(parameters["Jmin"]) <= int(parameters["Jmax"]) <= 339:
-            raise ValueError
-        if not 12 <= int(parameters["S3"]) <= 55 or not 12 <= int(parameters["S4"]) <= 27:
-            raise ValueError
-        if int(parameters["S1"]) + 56 == int(parameters["S2"]):
-            raise ValueError
-        if len({int(parameters[k]) for k in ("H1", "H2", "H3", "H4")}) != 4:
-            raise ValueError
-    except (KeyError, TypeError, ValueError):
-        raise RuntimeError("Invalid AWG obfuscation parameters")
-    if protocol == "awg31":
-        if parameters.get("RandomTrailers") != "on" or parameters.get("DisableCookies") != "on":
-            raise RuntimeError("Incomplete AWG 3.1 protection settings")
-        if not str(parameters.get("I1", "")).startswith("<r "):
-            raise RuntimeError("Invalid AWG 3.1 signature packet")
-
-
-def service_for(user):
-    return SERVICE_TEMPLATE.format(user.get("id", "")) if user.get("protocol") in PROTOCOLS else ""
-
-
-def sync(users):
-    if not PROTOCOLS:
-        # Feature retired: installation cleanup stops/removes the units.  Do
-        # not erase old configuration files here; they are rollback data.
-        return
-    os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
-    selected = {u["id"]: u for u in users if u.get("protocol") in PROTOCOLS and u.get("enabled", True)}
-    changed = set()
-    for uid, user in selected.items():
-        _validate_user(user)
-        config = os.path.join(CONFIG_DIR, uid + ".conf")
-        meta = os.path.join(CONFIG_DIR, uid + ".json")
-        changed_config = _atomic_text(config, _server_config(user))
-        changed_meta = _atomic_text(meta, json.dumps({"interface": user["awg_interface"],
-            "address": user["server_address"], "mtu": _mtu(user)}, sort_keys=True) + "\n")
-        if changed_config or changed_meta:
-            changed.add(uid)
-    for name in os.listdir(CONFIG_DIR):
-        match = re.fullmatch(r"([a-f0-9]{16})\.(?:conf|json)", name)
-        if not match or match.group(1) in selected:
-            continue
-        uid = match.group(1)
-        _run("systemctl", "disable", "--now", SERVICE_TEMPLATE.format(uid), check=False)
-        for suffix in (".conf", ".json"):
-            try: os.unlink(os.path.join(CONFIG_DIR, uid + suffix))
-            except FileNotFoundError: pass
-    _run("systemctl", "daemon-reload", check=True)
-    for uid, user in selected.items():
-        unit = SERVICE_TEMPLATE.format(uid)
-        active = _run("systemctl", "is-active", "--quiet", unit, check=False).returncode == 0
-        _run("systemctl", "enable", unit, check=True)
-        _run("systemctl", "restart" if uid in changed or not active else "start", unit, check=True)
-        if _run("systemctl", "is-active", "--quiet", unit, check=False).returncode:
-            status = _run("systemctl", "status", unit, "--no-pager", "--full", check=False)
-            raise RuntimeError("AWG profile failed: " + (status.stdout or status.stderr)[-2500:])
-        _run(AWG, "show", user["awg_interface"], check=True)
-        link = _run("/usr/sbin/ip", "-o", "link", "show", "dev", user["awg_interface"], check=True)
-        if not re.search(r"\bmtu\s+%d\b" % _mtu(user), link.stdout or ""):
-            raise RuntimeError("AWG interface started with an unsafe MTU")
-
-
-def client_config(user, endpoint, name="AWG"):
-    _validate_user(user)
-    lines = ["# " + str(name), "[Interface]", "PrivateKey = " + user["secret"],
-             "Address = " + user["address"], "DNS = 1.1.1.1, 1.0.0.1", "MTU = " + str(_mtu(user))]
-    lines.extend(_parameter_lines(user["awg_parameters"]))
-    lines.extend(["", "[Peer]", "PublicKey = " + user["server_public_key"],
-                  "PresharedKey = " + user["preshared_key"],
-                  "Endpoint = %s:%d" % (endpoint, int(user["backend_port"])),
-                  "AllowedIPs = 0.0.0.0/0", "PersistentKeepalive = 25", ""])
-    return "\n".join(lines)
-
-
-def traffic(users):
-    if not PROTOCOLS:
-        return {}
-    by_key = {u.get("public_key"): u.get("id") for u in users
-              if u.get("protocol") in PROTOCOLS and u.get("public_key")}
-    result = {}
-    proc = _run(AWG, "show", "all", "dump", check=False, timeout=10)
-    if proc.returncode:
-        return result
-    for line in proc.stdout.splitlines():
-        columns = line.split("\t")
-        if len(columns) < 9 or columns[1] not in by_key:
-            continue
-        try:
-            result[by_key[columns[1]]] = {"up": int(columns[6]), "down": int(columns[7])}
-        except ValueError:
-            continue
+def normalize(value):
+    source = value if isinstance(value, dict) else {}
+    result = defaults()
+    result["enabled"] = bool(source.get("enabled", False))
+    result["provider"] = str(source.get("provider", "yandex")).strip().lower()
+    if result["provider"] not in PROVIDERS:
+        raise CDNError("Неизвестный CDN-провайдер.")
+    result["public_host"] = _host(source.get("public_host"), "Публичный домен CDN", result["enabled"])
+    result["sni"] = _host(source.get("sni"), "TLS SNI") or result["public_host"]
+    result["host_header"] = _host(source.get("host_header"), "HTTP Host") or result["public_host"]
+    result["mode"] = str(source.get("mode", "packet-up")).strip().lower()
+    if result["mode"] not in MODES:
+        raise CDNError("Неизвестный режим XHTTP.")
+    result["uplink_method"] = str(source.get("uplink_method", "post")).strip().lower()
+    if result["uplink_method"] not in UPLINK_METHODS:
+        raise CDNError("Неизвестный HTTP-метод XHTTP.")
+    if result["uplink_method"] in {"get", "delete"}:
+        result["mode"] = "packet-up"
+    result["fingerprint"] = str(source.get("fingerprint", "chrome")).strip().lower()
+    if result["fingerprint"] not in FINGERPRINTS:
+        raise CDNError("Неизвестный TLS fingerprint.")
     return result
+
+
+def _get_only_extra():
+    return {
+        "mode": "packet-up",
+        "uplinkHTTPMethod": "GET",
+        "uplinkDataPlacement": "header",
+        "uplinkDataKey": "X-Data",
+        "uplinkChunkSize": 2048,
+    }
+
+
+def _beget_extra():
+    """XHTTP profile compatible with Beget CDN/CDNvideo GET forwarding."""
+    return {
+        "mode": "packet-up",
+        "xPaddingBytes": "4-10",
+        "xPaddingObfsMode": True,
+        "xPaddingKey": "_token",
+        "xPaddingHeader": "X-Client-Version",
+        "xPaddingPlacement": "query",
+        "xPaddingMethod": "tokenish",
+        "sessionIDPlacement": "path",
+        "sessionIDKey": "sid",
+        "sessionIDTable": "kdleowms............",
+        "sessionIDLength": "16-24",
+        "seqPlacement": "query",
+        "seqKey": "offset",
+        "uplinkDataPlacement": "body",
+        "uplinkDataKey": "",
+        "scMaxEachPostBytes": "500000-1000000",
+        "noSSEHeader": False,
+        "scMaxBufferedPosts": 50,
+        "scStreamUpServerSecs": "20-80",
+        "serverMaxHeaderBytes": 0,
+        "uplinkHTTPMethod": "GET",
+        "headers": {},
+        "scMinPostsIntervalMs": "50-150",
+        "uplinkChunkSize": 0,
+        "noGRPCHeader": False,
+        "xmux": {
+            # Xray rejects positive maxConcurrency together with positive
+            # maxConnections. Keep the connection pool from the guide and
+            # disable the mutually exclusive concurrency limit.
+            "maxConcurrency": "0",
+            "maxConnections": "4-8",
+            "cMaxReuseTimes": "0",
+            "hMaxRequestTimes": "300-600",
+            "hMaxReusableSecs": "900-1800",
+            "hKeepAlivePeriod": 0,
+        },
+        "enableXmux": True,
+    }
+
+
+def _selectel_extra():
+    """XHTTP profile for Selectel CDN with DELETE forwarding enabled."""
+    return {
+        "mode": "packet-up",
+        "xPaddingBytes": "80-240",
+        "xPaddingObfsMode": True,
+        "xPaddingKey": "q",
+        "xPaddingHeader": "X-Client-Version",
+        "xPaddingPlacement": "query",
+        "xPaddingMethod": "tokenish",
+        "sessionPlacement": "header",
+        "sessionKey": "X-Upload-Token",
+        "seqPlacement": "query",
+        "seqKey": "page",
+        "noSSEHeader": False,
+        "scMaxBufferedPosts": 30,
+        "scStreamUpServerSecs": "20-80",
+        "serverMaxHeaderBytes": 0,
+        "uplinkHTTPMethod": "DELETE",
+        "uplinkChunkSize": 0,
+        "noGRPCHeader": False,
+        "enableXmux": True,
+        "uplinkDataPlacement": "body",
+        "xmux": {
+            "maxConcurrency": "16-32",
+            "maxConnections": 0,
+            "cMaxReuseTimes": 1000,
+            "hMaxRequestTimes": "600-900",
+            "hMaxReusableSecs": "100",
+            "hKeepAlivePeriod": 20000,
+        },
+        "sessionIDPlacement": "query",
+        "sessionIDKey": "sid",
+    }
+
+
+def server_xhttp(path, preset="direct"):
+    result = {"path": path, "mode": "auto"}
+    if preset is True or preset == "get":
+        result.update(_get_only_extra())
+    elif preset == "beget":
+        result.update(_beget_extra())
+    elif preset == "selectel":
+        result.update(_selectel_extra())
+    return result
+
+
+def profile_from_request(request):
+    """Return a validated per-VLESS CDN profile or None for a direct route."""
+    source = request if isinstance(request, dict) else {}
+    route = str(source.get("vless_route", "direct")).strip().lower()
+    if route == "direct":
+        return None
+    if route != "cdn":
+        raise CDNError("Неизвестный маршрут VLESS.")
+    provider = str(source.get("vless_cdn_provider", "yandex")).strip().lower()
+    default_method = "delete" if provider == "selectel" else "get"
+    return normalize({
+        "enabled": True,
+        "provider": provider,
+        "public_host": source.get("vless_cdn_public_host", ""),
+        "sni": source.get("vless_cdn_sni", ""),
+        "host_header": source.get("vless_cdn_host_header", ""),
+        "mode": source.get("vless_cdn_mode", "packet-up"),
+        "uplink_method": source.get("vless_cdn_uplink_method", default_method),
+        "fingerprint": source.get("vless_cdn_fingerprint", "chrome"),
+    })
+
+
+def vless_route(origin_domain, profile=None):
+    try:
+        value = normalize(profile) if isinstance(profile, dict) else defaults()
+    except CDNError:
+        value = defaults()
+    if not value["enabled"]:
+        return {
+            "enabled": False,
+            "address": origin_domain,
+            "sni": origin_domain,
+            "host": origin_domain,
+            "mode": "auto",
+            "extra": None,
+            "fingerprint": value.get("fingerprint", "chrome"),
+            "path_suffix": "",
+            "path_variant": "direct",
+        }
+    beget = value["provider"] == "beget"
+    selectel = value["provider"] == "selectel"
+    return {
+        "enabled": True,
+        "address": value["public_host"],
+        "sni": value["sni"],
+        "host": value["host_header"],
+        "mode": value["mode"],
+        "extra": _beget_extra() if beget else (_selectel_extra() if selectel else (_get_only_extra() if value["uplink_method"] == "get" else None)),
+        "fingerprint": value["fingerprint"],
+        "path_suffix": "-beget/segment0.ts" if beget else ("-selectel/upload.m3u8" if selectel else "-cdn"),
+        "path_variant": "beget" if beget else ("selectel" if selectel else "cdn"),
+    }

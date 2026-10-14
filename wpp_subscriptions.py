@@ -1,104 +1,229 @@
-"""Panel-only HTML helpers. No public subscription request may render admin data."""
-import html
+"""Local subscription/device registry. HWID is client-supplied, not attested hardware."""
+import copy
+import hashlib
+import re
+import secrets
 import time
+import uuid
+
+PREFIX = '/wpp-sub/'
+MAX_ACCOUNTS = 64
+MAX_PROFILES = 256
 
 
-def esc(value):
-    return html.escape(str(value), quote=True)
+class SubscriptionError(ValueError):
+    def __init__(self, message, status=400, code='invalid'):
+        super().__init__(message)
+        self.status, self.code = status, code
 
 
-def stamp(value):
-    return time.strftime('%d.%m.%Y %H:%M UTC', time.gmtime(value)) if value else '—'
+def accounts(data):
+    value = data.setdefault('subscriptions', [])
+    if not isinstance(value, list):
+        raise SubscriptionError('Повреждён реестр подписок.', 503, 'storage')
+    return value
 
 
-def subscription_ui(subs, path, domain, csrf, traffic, human_bytes):
-    path, token = esc(path), esc(csrf)
+def find_account(data, sid):
+    value = next((s for s in accounts(data) if s['id'] == sid), None)
+    if value is None:
+        raise SubscriptionError('Подписка не найдена.', 404, 'not_found')
+    return value
 
-    def hidden(sub, op):
-        return (f'<input type="hidden" name="csrf" value="{token}">'
-                f'<input type="hidden" name="id" value="{esc(sub.get("id", ""))}">'
-                f'<input type="hidden" name="operation" value="{op}">')
 
-    def checks(sub):
-        return ''.join(f'<label class="check"><input type="checkbox" name="{p}" value="1" '
-                       f'{"checked" if p in sub.get("protocols", ["vless", "hysteria"]) else ""}> {title}</label>'
-                       for p, title in [('vless', 'VLESS XHTTP'), ('hysteria', 'Hysteria2')])
+def clean_name(value, maximum=80):
+    value = str(value).strip()
+    if not value or len(value) > maximum or any(ord(c) < 32 for c in value):
+        raise SubscriptionError('Укажите имя длиной от 1 до %d символов.' % maximum)
+    return value
 
-    cards = []
-    for sub in subs:
-        sid = esc(sub['id'])
-        url = 'https://' + domain + '/wpp-sub/' + sub['token']
+
+def limits(value):
+    try:
+        number = int(value)
+    except (ValueError, TypeError):
+        raise SubscriptionError('Лимит должен быть целым числом от 0 до 20.')
+    if not 0 <= number <= 20:
+        raise SubscriptionError('Лимит должен быть от 0 до 20; 0 — без HWID-привязки.')
+    return number
+
+
+def protocols(value):
+    supported = ('vless', 'hysteria')
+    if not isinstance(value, list) or not value or any(p not in supported for p in value):
+        raise SubscriptionError('Выберите хотя бы один поддерживаемый протокол.')
+    return list(dict.fromkeys(value))
+
+
+def connection_specs(value, fallback_protocols=None):
+    """Validate the inbound list stored on a client subscription."""
+    if value is None:
+        value=[{'id':('vless-direct' if p=='vless' else 'hysteria-primary'),
+                'name':('VLESS XHTTP · напрямую' if p=='vless' else 'Hysteria2 · основной'),
+                'protocol':p} for p in protocols(fallback_protocols or ['vless','hysteria'])]
+    if not isinstance(value,list) or not value or len(value)>16:
+        raise SubscriptionError('Выберите от 1 до 16 подключений клиента.')
+    result=[]; seen=set()
+    for raw in value:
+        if not isinstance(raw,dict): raise SubscriptionError('Некорректное подключение клиента.')
+        cid=str(raw.get('id',''))
+        protocol=str(raw.get('protocol',''))
+        if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{2,63}',cid) or protocol not in ('vless','hysteria'):
+            raise SubscriptionError('Подписки поддерживают подключения VLESS и Hysteria2.')
+        if cid in seen: continue
+        seen.add(cid)
+        item={'id':cid,'name':clean_name(raw.get('name','Подключение')),'protocol':protocol}
+        if protocol=='vless' and isinstance(raw.get('cdn'),dict): item['cdn']=copy.deepcopy(raw['cdn'])
+        result.append(item)
+    if not result: raise SubscriptionError('Выберите хотя бы одно подключение.')
+    return result
+
+
+def normalize_account(sub):
+    specs=connection_specs(sub.get('connections'),sub.get('protocols',['vless','hysteria']))
+    sub['connections']=specs
+    sub['protocols']=list(dict.fromkeys(item['protocol'] for item in specs))
+    return sub
+
+
+def drop_profiles(data, sid, did=None):
+    data['users'] = [u for u in data['users'] if not (
+        u.get('subscription_id') == sid and (did is None or u.get('device_id') == did))]
+
+
+def provision(data, sub, device):
+    normalize_account(sub)
+    for connection in sub['connections']:
+        protocol=connection['protocol']; connection_id=connection['id']
+        if any(u.get('subscription_id') == sub['id'] and u.get('device_id') == device['id']
+               and u.get('connection_id') == connection_id for u in data['users']):
+            continue
+        if sum(bool(u.get('subscription_id')) for u in data['users']) >= MAX_PROFILES:
+            raise SubscriptionError('Достигнут общий лимит профилей подписок.', 503, 'capacity')
+        uid = secrets.token_hex(8)
+        sub.setdefault('profile_ids', []).append(uid)
+        ports = {'vless': 443, 'hysteria': 8443}
+        profile = {
+            'id': uid, 'name': sub['name'] + ' / ' + device['name'],
+            'protocol': protocol, 'enabled': sub['enabled'], 'secret': str(uuid.uuid4()),
+            'backend_port': ports[protocol],
+            'connection_id': connection_id,
+            'subscription_id': sub['id'], 'device_id': device['id'],
+            'created_at': int(time.time()),
+        }
+        if protocol=='vless' and isinstance(connection.get('cdn'),dict):
+            profile['cdn']=copy.deepcopy(connection['cdn'])
+        data['users'].append(profile)
+
+
+def mutate(data, request):
+    """Pure state transition. Caller serializes and commits config + data atomically."""
+    data = copy.deepcopy(data)
+    operation = request.get('operation')
+    if operation == 'create':
+        if len(accounts(data)) >= MAX_ACCOUNTS:
+            raise SubscriptionError('Достигнут лимит подписок.')
+        specs=connection_specs(request.get('connections'),request.get('protocols'))
+        sub = {'id': secrets.token_hex(8), 'token': secrets.token_hex(32),
+               'name': clean_name(request.get('name', '')), 'enabled': True,
+               'max_devices': limits(request.get('max_devices', 1)),
+               'connections':specs,
+               'protocols':list(dict.fromkeys(item['protocol'] for item in specs)), 'devices': [],
+               'created_at': int(time.time())}
+        accounts(data).append(sub)
+    else:
+        sub = find_account(data, request.get('id'))
+        if operation == 'delete':
+            drop_profiles(data, sub['id'])
+            data['subscriptions'].remove(sub)
+            return data, {'ok': True}
+        if operation == 'update':
+            limit = limits(request.get('max_devices', sub['max_devices']))
+            active = [d for d in sub['devices'] if not d.get('revoked')]
+            if bool(limit) != bool(sub['max_devices']):
+                # Switching to/from a shared subscription must revoke the old keys.
+                drop_profiles(data, sub['id'])
+                sub['devices'] = []
+            elif limit and len(active) > limit:
+                raise SubscriptionError('Сначала отзовите лишние устройства, затем уменьшите лимит.')
+            sub['name'] = clean_name(request.get('name', sub['name']))
+            sub['max_devices'] = limit
+            specs=connection_specs(request.get('connections'),sub.get('protocols')) if 'connections' in request else connection_specs(sub.get('connections'),request.get('protocols',sub.get('protocols')))
+            sub['connections']=specs
+            sub['protocols']=list(dict.fromkeys(item['protocol'] for item in specs))
+            selected={item['id'] for item in specs}
+            data['users'] = [u for u in data['users'] if u.get('subscription_id') != sub['id']
+                             or u.get('connection_id') in selected]
+            for device in sub['devices']:
+                if not device.get('revoked'):
+                    provision(data, sub, device)
+            for user in data['users']:
+                if user.get('subscription_id') == sub['id']:
+                    device = next(d for d in sub['devices'] if d['id'] == user['device_id'])
+                    user['name'] = sub['name'] + ' / ' + device['name']
+        elif operation in ('toggle', 'set-enabled'):
+            if operation == 'set-enabled' and not isinstance(request.get('enabled'), bool):
+                raise SubscriptionError('Некорректное состояние доступа.')
+            sub['enabled'] = request['enabled'] if operation == 'set-enabled' else not sub['enabled']
+            for user in data['users']:
+                if user.get('subscription_id') == sub['id']:
+                    user['enabled'] = sub['enabled']
+        elif operation == 'rotate':
+            sub['token'] = secrets.token_hex(32)
+            sub['devices'] = []
+            drop_profiles(data, sub['id'])
+        elif operation in ('revoke', 'allow'):
+            device = next((d for d in sub['devices'] if d['id'] == request.get('device_id')), None)
+            if device is None:
+                raise SubscriptionError('Устройство не найдено.', 404, 'not_found')
+            drop_profiles(data, sub['id'], device['id'])
+            if operation == 'revoke':
+                device['revoked'] = True
+            elif not device.get('revoked'):
+                raise SubscriptionError('Устройство уже разрешено.')
+            else:
+                sub['devices'].remove(device)
+        else:
+            raise SubscriptionError('Неизвестная операция.')
+    return data, {'ok': True, 'id': sub['id']}
+
+
+def issue(data, request):
+    """Issue per-device keys on first fetch, or return the same existing keys."""
+    data = copy.deepcopy(data)
+    token = str(request.get('token', ''))
+    if not re.fullmatch(r'[a-f0-9]{64}', token):
+        raise SubscriptionError('Подписка не найдена.', 404, 'not_found')
+    sub = next((s for s in accounts(data) if secrets.compare_digest(s['token'], token)), None)
+    if sub is None or not sub['enabled']:
+        raise SubscriptionError('Подписка не найдена или отключена.', 404, 'not_found')
+    if sub['max_devices']:
+        hwid = str(request.get('hwid', '')).strip()
+        if not 8 <= len(hwid) <= 256 or any(ord(c) < 33 or ord(c) > 126 for c in hwid):
+            raise SubscriptionError('Нужен клиент, передающий X-HWID (например, Happ).', 403, 'hwid_required')
+        # Do not store raw HWIDs; salt by account so records cannot be correlated.
+        digest = hashlib.sha256((sub['id'] + ':' + hwid).encode()).hexdigest()
+    else:
+        digest = 'shared'
+    device = next((d for d in sub['devices'] if d['hwid_hash'] == digest), None)
+    if device is not None and device.get('revoked'):
+        raise SubscriptionError('Доступ этого устройства отозван.', 403, 'revoked')
+    if device is None:
         active = sum(not d.get('revoked') for d in sub['devices'])
-        limit = sub['max_devices']
-        total = sum(int(traffic.get(uid, {}).get('up', 0)) + int(traffic.get(uid, {}).get('down', 0))
-                    for uid in sub.get('profile_ids', []))
-        devices = []
-        for d in sub['devices']:
-            revoked = d.get('revoked', False)
-            devices.append(f'''<div class="device"><div><b>{esc(d['name'])}</b>
-<small>{'Отозвано' if revoked else 'Разрешено'} · ID {esc(d['id'])}<br>Обновление подписки: {stamp(d.get('last_seen'))}</small></div>
-<form method="post" action="{path}/subscription-action">{hidden(sub, 'allow' if revoked else 'revoke')}
-<input type="hidden" name="device_id" value="{esc(d['id'])}"><button class="btn {'danger' if not revoked else ''}">{'Разрешить регистрацию' if revoked else 'Отозвать устройство'}</button></form></div>''')
-        cards.append(f'''<article class="card subscription-card"><div class="sub-title"><h3>{esc(sub['name'])}</h3><span class="status {'on' if sub['enabled'] else 'off'}">{'Включена' if sub['enabled'] else 'Отключена'}</span></div>
-<p class="muted">{'HWID: '+str(active)+' / '+str(limit) if limit else 'Без лимита HWID · общий ключ'} · Трафик: {human_bytes(total)}</p>
-<label>Единая ссылка подписки</label><input class="sub-url" value="{esc(url)}" readonly aria-label="Ссылка подписки {esc(sub['name'])}">
-<div class="actions"><button type="button" class="btn primary copy-sub" data-link="{esc(url)}">Скопировать</button><button type="button" class="btn show-sub-qr" data-src="{path}/subscription-qr?id={sid}">QR подписки</button></div>
-<details><summary>Настройки и устройства</summary><form method="post" action="{path}/subscription-action">{hidden(sub,'update')}
-<label>Имя</label><input name="name" value="{esc(sub['name'])}" maxlength="80" required>
-<label>Максимум устройств (HWID), 0 — без привязки</label><input type="number" name="max_devices" min="0" max="20" value="{limit}" required>
-<div class="checks">{checks(sub)}</div><button class="btn primary">Сохранить настройки</button></form>
-<p class="muted">При переходе между 0 и HWID-лимитом старые ключи отзываются. «Обновление подписки» не означает, что устройство сейчас онлайн.</p>
-<div class="devices">{''.join(devices) or '<p class="muted">Устройства появятся после импорта подписки в клиент.</p>'}</div>
-<div class="actions"><form method="post" action="{path}/subscription-action">{hidden(sub,'toggle')}<button class="btn">{'Отключить подписку' if sub['enabled'] else 'Включить подписку'}</button></form>
-<form method="post" action="{path}/subscription-action" data-confirm="Сменить ссылку и отозвать ключи всех устройств?">{hidden(sub,'rotate')}<button class="btn danger">Сменить ссылку и сбросить устройства</button></form>
-<form method="post" action="{path}/subscription-action" data-confirm="Удалить подписку и отозвать все её ключи?">{hidden(sub,'delete')}<button class="btn danger">Удалить</button></form></div></details></article>''')
-    return f'''<style>
-.sub-title,.device{{display:flex;align-items:center;justify-content:space-between;gap:16px}}.sub-title h3{{margin:0}}.actions,.checks{{display:flex;flex-wrap:wrap;gap:10px;margin:12px 0}}.check{{display:flex;gap:8px;align-items:center}}.check input{{width:auto;margin:0}}.device{{padding:14px 0;border-top:1px solid #ffffff12}}.device small{{display:block;color:#aab4c9;line-height:1.6}}.device form{{flex-shrink:0}}summary{{cursor:pointer;padding:16px 0;color:#c5baff}}.subscription-card{{margin-bottom:16px}}.sub-url{{font-size:12px;min-width:0}}.sub-qr{{max-width:260px;width:100%;background:#fff;padding:12px;border-radius:12px}}@media(max-width:600px){{.device{{align-items:flex-start;flex-direction:column}}}}
-</style><div class="topbar"><div><h1>Подписки</h1><p>Одна ссылка: VLESS XHTTP + Hysteria2</p></div></div>
-<div class="card"><p>Лимит учитывает HWID, переданный клиентом (например, Happ), а не IP и не число соединений. Клиенты без HWID при включённом лимите не получат конфигурацию. Для каждого устройства создаются отдельные ключи.</p>
-<p class="muted">HWID можно подделать, а полученный ключ — скопировать. Это контроль регистрации и отзыва, не гарантированная аппаратная привязка. WEB Proxy остаётся отдельной Telegram-ссылкой. Первая регистрация и отзыв устройства кратковременно перезапускают Xray.</p></div>
-<div class="card"><h3>Новая подписка</h3><form method="post" action="{path}/subscription-action">{hidden({},'create')}
-<label>Имя пользователя</label><input name="name" maxlength="80" placeholder="Например, Александр" required>
-<label>Максимум устройств (HWID), 0 — без привязки</label><input type="number" name="max_devices" value="2" min="0" max="20" required>
-<div class="checks">{checks({})}</div><button class="btn primary">Создать подписку</button></form></div>
-{''.join(cards) or '<div class="card muted">Подписок пока нет. Старые отдельные подключения сохранены во вкладке «Пользователи».</div>'}
-<dialog id="subQrDialog" style="border:0;border-radius:20px;padding:24px"><img id="subQrImg" class="sub-qr" alt="QR подписки"><p><button class="btn" id="closeSubQr">Закрыть</button></p></dialog>
-<script>
-document.querySelectorAll('.copy-sub').forEach(b=>b.addEventListener('click',async()=>{{try{{await navigator.clipboard.writeText(b.dataset.link);b.textContent='Скопировано ✓'}}catch(e){{b.closest('article').querySelector('.sub-url').select();document.execCommand('copy');b.textContent='Скопировано ✓'}}}}));
-document.querySelectorAll('.show-sub-qr').forEach(b=>b.addEventListener('click',()=>{{document.getElementById('subQrImg').src=b.dataset.src;document.getElementById('subQrDialog').showModal()}}));
-document.getElementById('closeSubQr').addEventListener('click',()=>document.getElementById('subQrDialog').close());
-document.querySelectorAll('form[data-confirm]').forEach(f=>f.addEventListener('submit',e=>{{if(!confirm(f.dataset.confirm))e.preventDefault()}}));
-</script>'''
-
-
-def editor_ui(source, path, csrf, presets, has_draft):
-    buttons = ''.join(f'<form method="post" action="{esc(path)}/draft-preset" class="preset-card">'
-                      f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
-                      f'<input type="hidden" name="preset" value="{esc(p["id"])}">'
-                      f'<b>{esc(p["name"])}</b><p class="muted">{esc(p["description"])}</p>'
-                      '<button class="btn">Открыть в черновике</button></form>' for p in presets)
-    return f'''<style>.editor-actions{{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}}.preview-wrap{{overflow:auto;padding:12px;background:#090d18;border-radius:16px}}#landingPreview{{display:block;width:100%;height:660px;max-width:100%;border:0;margin:0 auto;background:white}}#landingPreview.phone{{width:390px;height:720px}}#htmlSource{{width:100%;font:12px/1.6 ui-monospace,monospace}}#previewStatus{{min-height:24px;color:#bdcce9}}</style>
-<div class="card"><h3>Пресеты заглушек</h3><p class="muted">Пресет открывается в черновике. Рабочий сайт изменится только после публикации. Текущий черновик будет заменён.</p><div class="preset-grid">{buttons}</div></div>
-<div class="card"><h3>HTML главной страницы · {'черновик' if has_draft else 'опубликованный исходник'}</h3>
-<p class="muted">Предпросмотр изолирован от панели. Внешние ресурсы, формы и сетевые запросы заблокированы; стили и скрипты должны быть внутри HTML. В живом сайте ограничения могут отличаться — после публикации проверьте страницу.</p>
-<form id="editorForm" method="post" action="{esc(path)}/site-html"><input type="hidden" name="csrf" value="{esc(csrf)}">
-<textarea id="htmlSource" name="html" rows="20" spellcheck="false" required>{esc(source)}</textarea>
-<div class="editor-actions"><button class="btn" formaction="{esc(path)}/save-draft">Сохранить черновик</button><button class="btn" type="button" id="previewHtml">Предпросмотр</button><button class="btn primary" id="publishHtml">Опубликовать на сайте</button></div></form>
-<form method="post" action="{esc(path)}/discard-draft"><input type="hidden" name="csrf" value="{esc(csrf)}"><button class="btn" onclick="return confirm('Удалить черновик и вернуться к опубликованному исходнику?')">Удалить черновик</button></form>
-<div class="editor-actions"><button type="button" class="btn" id="previewDesktop">Компьютер</button><button type="button" class="btn" id="previewPhone">Телефон</button></div>
-<p id="previewStatus">Нажмите «Предпросмотр», чтобы увидеть текущий код без публикации.</p><div class="preview-wrap"><iframe id="landingPreview" title="Изолированный предпросмотр заглушки" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe></div></div>
-<script>
-const ef=document.getElementById('editorForm'),pf=document.getElementById('landingPreview'),ps=document.getElementById('previewStatus');
-document.getElementById('previewHtml').addEventListener('click',async()=>{{ps.textContent='Подготовка…';try{{const body=new URLSearchParams(new FormData(ef));const r=await fetch('{esc(path)}/preview-html',{{method:'POST',body}});const d=await r.json();if(!r.ok)throw new Error(d.message||'Ошибка предпросмотра');pf.srcdoc=d.document;ps.textContent='Предпросмотр обновлён. Рабочий сайт не изменён.'}}catch(e){{ps.textContent=e.message}}}});
-document.getElementById('previewPhone').addEventListener('click',()=>pf.classList.add('phone'));
-document.getElementById('previewDesktop').addEventListener('click',()=>pf.classList.remove('phone'));
-ef.addEventListener('submit',e=>{{if(e.submitter&&e.submitter.id==='publishHtml'&&!confirm('Опубликовать текущий HTML на основном сайте?'))e.preventDefault()}});
-</script>'''
-
-
-def preview_document(source, externalize):
-    # Preview the exact document without rewriting tags or JSON-LD. Network
-    # access stays disabled inside the sandbox, while inline CSS and JavaScript
-    # behave as they will on the published static site.
-    csp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
-    return '<meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="' + csp + '">' + source
+        if sub['max_devices'] and active >= sub['max_devices']:
+            raise SubscriptionError('Лимит устройств исчерпан. Обратитесь к администратору.', 403, 'device_limit')
+        if len(sub['devices']) >= 100:
+            raise SubscriptionError('Нужна ротация подписки: слишком много отозванных устройств.', 403, 'device_limit')
+        did = secrets.token_hex(8)
+        device = {'id': did, 'hwid_hash': digest,
+                  'name': 'Общий профиль' if digest == 'shared' else 'Устройство ' + did[:6],
+                  'created_at': int(time.time()), 'last_seen': 0, 'revoked': False}
+        sub['devices'].append(device)
+        provision(data, sub, device)
+    device['last_seen'] = int(time.time())
+    users = [u for u in data['users'] if u.get('subscription_id') == sub['id']
+             and u.get('device_id') == device['id'] and u.get('enabled', True)]
+    normalize_account(sub)
+    if len(users) != len(sub['connections']):
+        raise SubscriptionError('Профили устройства повреждены. Обратитесь к администратору.', 503, 'storage')
+    return data, {'ok': True, 'name': sub['name'], 'limited': bool(sub['max_devices']), 'users': users}
