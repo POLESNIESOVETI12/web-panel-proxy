@@ -64,7 +64,7 @@ trap finish_install EXIT
 wpp_progress_start "Проверка пакета"
 wpp_progress 5 "Подготовка сервера"
 
-echo "WEB PANEL PROXY V 2.5.0: preparing server..."
+echo "WEB PANEL PROXY V 2.5.1: preparing server..."
 
 PANEL_UPDATE=0
 if [[ -s /var/lib/tproxy-panel/data.json ]] &&
@@ -86,7 +86,7 @@ install -o root -g root -m 0755 \
 
 echo "Installing proxy services..."
 wpp_progress 10 "Установка прокси-служб"
-WEB_PANEL_PROXY_PACKAGE_VERSION="2.5.0" bash "$BASE/install-webproxy-core.sh"
+WEB_PANEL_PROXY_PACKAGE_VERSION="2.5.1" bash "$BASE/install-webproxy-core.sh"
 wpp_progress 55 "Прокси-службы установлены"
 
 echo "Installing control panel..."
@@ -112,6 +112,5 @@ systemctl is-active --quiet web-panel-proxy-sync-tls.timer ||
     die "The Xray TLS synchronization timer did not start."
 echo "Installation complete."
 wpp_progress 100 "Установка завершена"
-printf '%s\n' '2.5.0' > /etc/web-proxy-panel/version
+printf '%s\n' '2.5.1' > /etc/web-proxy-panel/version
 chmod 0600 /etc/web-proxy-panel/version
-

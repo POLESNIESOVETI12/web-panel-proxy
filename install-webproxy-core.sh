@@ -8,7 +8,7 @@ export GIT_TERMINAL_PROMPT=0
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
 
-VERSION="${WEB_PANEL_PROXY_PACKAGE_VERSION:-2.5.0}"
+VERSION="${WEB_PANEL_PROXY_PACKAGE_VERSION:-2.5.1}"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
