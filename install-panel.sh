@@ -438,9 +438,9 @@ XRAY_PATH="$(cat "$XRAY_PATH_FILE")"
 [[ "$XRAY_PATH" =~ ^/vless-[a-f0-9]{24}$ || "$XRAY_PATH" =~ ^/assets/[a-f0-9]{12}/[a-f0-9]{12}$ ]] || die "Stored VLESS path is invalid."
 
 if [[ "$UPDATING" == "1" ]]; then
-    echo "Updating WEB PANEL PROXY V 2.5.1..."
+    echo "Updating WEB PANEL PROXY V 2.5.2..."
 else
-    echo "Configuring WEB PANEL PROXY V 2.5.1..."
+    echo "Configuring WEB PANEL PROXY V 2.5.2..."
 fi
 INSTALL_CREDENTIALS="/etc/web-proxy-panel/install-credentials"
 if [[ "$UPDATING" == "1" ]]; then
@@ -545,6 +545,7 @@ XRAY_VLESS_PORT=10000
 XRAY_VLESS_CDN_PORT=10001
 XRAY_VLESS_BEGET_PORT=10002
 XRAY_VLESS_SELECTEL_PORT=10003
+XRAY_VLESS_VK_PORT=10004
 XRAY_API="127.0.0.1:10085"
 HYSTERIA_PORT=8443
 CADDYFILE="/etc/caddy/Caddyfile"
@@ -808,6 +809,7 @@ def sync_xray(d):
     vless_cdn=[]
     vless_beget=[]
     vless_selectel=[]
+    vless_vk=[]
     hysteria=[]
     for u in d["users"]:
         if not u.get("enabled",True):
@@ -819,6 +821,8 @@ def sync_xray(d):
                 target=vless_beget
             elif profile.get("enabled") and profile.get("provider")=="selectel":
                 target=vless_selectel
+            elif profile.get("enabled") and profile.get("provider")=="vk":
+                target=vless_vk
             elif profile.get("enabled"):
                 target=vless_cdn
             else:
@@ -883,6 +887,20 @@ def sync_xray(d):
                 "network":"xhttp",
                 "security":"none",
                 "xhttpSettings":wpp_cdn.server_xhttp(wpp_cdn.endpoint_path(xray_path,"selectel"),"selectel")
+            },
+            "sniffing":{"enabled":True,"destOverride":["http","tls","quic"],"routeOnly":True}
+        })
+    if vless_vk:
+        inbounds.append({
+            "tag":"vless-xhttp-vk",
+            "listen":"127.0.0.1",
+            "port":XRAY_VLESS_VK_PORT,
+            "protocol":"vless",
+            "settings":{"clients":vless_vk,"decryption":"none","encryption":"none"},
+            "streamSettings":{
+                "network":"xhttp",
+                "security":"none",
+                "xhttpSettings":wpp_cdn.server_xhttp(wpp_cdn.endpoint_path(xray_path,"vk"),"vk")
             },
             "sniffing":{"enabled":True,"destOverride":["http","tls","quic"],"routeOnly":True}
         })
@@ -2485,7 +2503,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.api_auth(): return
             if path==node_api.API_PREFIX+"/status":
                 loc=node_api.load_location(LOCATION_FILE)
-                self.send_json({"ok":True,"api_version":1,"version":"2.5.1","domain":DOMAIN,
+                self.send_json({"ok":True,"api_version":1,"version":"2.5.2","domain":DOMAIN,
                     "location":loc,"capabilities":["vless","hysteria","federation"]}); return
             if path==node_api.API_PREFIX+"/profiles":
                 result=[]
@@ -3278,7 +3296,7 @@ fi
 echo "[4/6] Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=WEB PANEL PROXY V 2.5.1
+Description=WEB PANEL PROXY V 2.5.2
 After=network-online.target caddy.service tproxy-server.service mtproxy.service web-proxy-panel-firewall.service
 Wants=network-online.target
 Requires=web-proxy-panel-firewall.service
@@ -3412,7 +3430,7 @@ unlock_changes(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 show_info(){
     local d p version
-    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.5.1')"
+    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.5.2')"
     echo
     echo "============================================================"
     echo "                 WEB PANEL PROXY"
@@ -3602,11 +3620,13 @@ s = Path(p).read_text(encoding="utf-8")
 if re.fullmatch(r"/vless-[a-f0-9]{24}", xray_path):
     direct_path = xray_path
     cdn_path = xray_path + "-cdn"
+    vk_path = xray_path + "-vk/media/hls/playlist.m3u8"
     beget_path = xray_path + "-beget/segment0.ts"
     selectel_path = xray_path + "-selectel/upload.m3u8"
 elif re.fullmatch(r"/assets/[a-f0-9]{12}/[a-f0-9]{12}", xray_path):
     direct_path = xray_path + "/index.html"
     cdn_path = xray_path + "/config.json"
+    vk_path = xray_path + "/media/hls/playlist.m3u8"
     beget_path = xray_path + "/segment0.ts"
     selectel_path = xray_path + "/upload.m3u8"
 else:
@@ -3717,6 +3737,19 @@ route = (
     "        header CDN-Cache-Control \"no-store\"\n"
     "        header X-Accel-Buffering \"no\"\n"
     "        reverse_proxy 127.0.0.1:10002 {\n"
+    "            transport http {\n"
+    "                versions h2c\n"
+    "            }\n"
+    "            flush_interval -1\n"
+    "        }\n"
+    "    }\n"
+    "\n"
+    "    @web_panel_vless_vk path " + vk_path + " " + vk_path + "/*\n"
+    "    handle @web_panel_vless_vk {\n"
+    "        header Cache-Control \"no-store, no-cache\"\n"
+    "        header CDN-Cache-Control \"no-store\"\n"
+    "        header X-Accel-Buffering \"no\"\n"
+    "        reverse_proxy 127.0.0.1:10004 {\n"
     "            transport http {\n"
     "                versions h2c\n"
     "            }\n"
@@ -3937,9 +3970,9 @@ fi
 echo
 echo "============================================================"
 if [[ "$UPDATING" == "1" ]]; then
-echo "          WEB PANEL PROXY V 2.5.1 UPDATED"
+echo "          WEB PANEL PROXY V 2.5.2 UPDATED"
 else
-echo "         WEB PANEL PROXY V 2.5.1 IS READY"
+echo "         WEB PANEL PROXY V 2.5.2 IS READY"
 fi
 echo "============================================================"
 echo

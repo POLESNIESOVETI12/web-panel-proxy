@@ -39,12 +39,13 @@ def endpoint_path(root, variant="direct"):
     if not valid_path_root(root):
         raise CDNError("Некорректный локальный путь XHTTP.")
     variant = str(variant or "direct")
-    if variant not in {"direct", "cdn", "beget", "selectel"}:
+    if variant not in {"direct", "cdn", "vk", "beget", "selectel"}:
         raise CDNError("Неизвестный вариант пути XHTTP.")
     if LEGACY_PATH_RE.fullmatch(root):
         suffixes = {
             "direct": "",
             "cdn": "-cdn",
+            "vk": "-vk/media/hls/playlist.m3u8",
             "beget": "-beget/segment0.ts",
             "selectel": "-selectel/upload.m3u8",
         }
@@ -52,6 +53,7 @@ def endpoint_path(root, variant="direct"):
         suffixes = {
             "direct": "/index.html",
             "cdn": "/config.json",
+            "vk": "/media/hls/playlist.m3u8",
             "beget": "/segment0.ts",
             "selectel": "/upload.m3u8",
         }
@@ -100,6 +102,26 @@ def _get_only_extra():
         "uplinkDataPlacement": "header",
         "uplinkDataKey": "X-Data",
         "uplinkChunkSize": 2048,
+    }
+
+
+def _vk_extra():
+    """XHTTP profile that keeps VK Cloud CDN uplink data out of headers."""
+    return {
+        "mode": "packet-up",
+        "uplinkHTTPMethod": "GET",
+        "uplinkDataPlacement": "body",
+        "sessionIDPlacement": "query",
+        "sessionIDKey": "session",
+        "seqPlacement": "query",
+        "seqKey": "part",
+        "scMaxEachPostBytes": "100000-300000",
+        "scMinPostsIntervalMs": "20-45",
+        "xPaddingBytes": "550-1450",
+        "xPaddingObfsMode": True,
+        "xPaddingKey": "_t",
+        "xPaddingPlacement": "query",
+        "xPaddingMethod": "tokenish",
     }
 
 
@@ -186,6 +208,8 @@ def server_xhttp(path, preset="direct"):
     result = {"path": path, "mode": "auto"}
     if preset is True or preset == "get":
         result.update(_get_only_extra())
+    elif preset == "vk":
+        result.update(_vk_extra())
     elif preset == "beget":
         result.update(_beget_extra())
     elif preset == "selectel":
@@ -234,14 +258,15 @@ def vless_route(origin_domain, profile=None):
         }
     beget = value["provider"] == "beget"
     selectel = value["provider"] == "selectel"
+    vk = value["provider"] == "vk"
     return {
         "enabled": True,
         "address": value["public_host"],
         "sni": value["sni"],
         "host": value["host_header"],
         "mode": value["mode"],
-        "extra": _beget_extra() if beget else (_selectel_extra() if selectel else (_get_only_extra() if value["uplink_method"] == "get" else None)),
+        "extra": _beget_extra() if beget else (_selectel_extra() if selectel else (_vk_extra() if vk else (_get_only_extra() if value["uplink_method"] == "get" else None))),
         "fingerprint": value["fingerprint"],
-        "path_suffix": "-beget/segment0.ts" if beget else ("-selectel/upload.m3u8" if selectel else "-cdn"),
-        "path_variant": "beget" if beget else ("selectel" if selectel else "cdn"),
+        "path_suffix": "-beget/segment0.ts" if beget else ("-selectel/upload.m3u8" if selectel else ("-vk/media/hls/playlist.m3u8" if vk else "-cdn")),
+        "path_variant": "beget" if beget else ("selectel" if selectel else ("vk" if vk else "cdn")),
     }

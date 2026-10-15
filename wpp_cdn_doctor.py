@@ -11,7 +11,7 @@ from urllib.parse import quote
 import wpp_cdn
 
 HOST_RE = re.compile(r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
-PROVIDER_PORTS = {"beget": 10002, "selectel": 10003, "yandex": 10001, "vk": 10001, "custom": 10001}
+PROVIDER_PORTS = {"beget": 10002, "selectel": 10003, "vk": 10004, "yandex": 10001, "custom": 10001}
 
 
 def _managed_routes(xray_path):
@@ -200,7 +200,7 @@ def run(profile, origin_domain, xray_path, timeout=7):
     provider = str(profile.get("provider", "custom")).strip().lower()
     cdn_host = _host(profile.get("public_host"))
     origin_host = _host(origin_domain)
-    variant = "beget" if provider == "beget" else ("selectel" if provider == "selectel" else "cdn")
+    variant = "beget" if provider == "beget" else ("selectel" if provider == "selectel" else ("vk" if provider == "vk" else "cdn"))
     method = "DELETE" if provider == "selectel" else "GET"
     expected_path = wpp_cdn.endpoint_path(xray_path, variant)
     results = []

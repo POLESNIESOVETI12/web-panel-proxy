@@ -2,7 +2,7 @@
   <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
 </p>
 
-<h1 align="center">WEB PANEL PROXY 2.5.1</h1>
+<h1 align="center">WEB PANEL PROXY 2.5.2</h1>
 
 <p align="center">WEB Proxy, MTProto, VLESS XHTTP, Hysteria2, OpenFlux и аккуратная панель управления для собственного VPS</p>
 
@@ -16,6 +16,13 @@
 - Автоматическое определение страны ноды с отображением флага.
 - Готовые HTML-заглушки и собственные страницы с HTML, CSS, JavaScript, SEO и аналитикой.
 - Проверка обновлений и безопасное обновление с резервной копией настроек.
+
+## Релиз 2.5.2
+
+- VK Cloud CDN получил отдельный Xray-вход и отдельный статический путь.
+- Данные XHTTP для VK больше не передаются через динамические заголовки `X-Data-*`.
+- Клиентская ссылка и серверный inbound используют одинаковый VK-совместимый профиль GET + body.
+- Yandex, Beget и Selectel продолжают работать на своих прежних профилях.
 
 ## Релиз 2.5.1
 
@@ -264,15 +271,15 @@ sudo -i
 ### Установка
 
 ```bash
-sudo -i bash -c 'curl -4fsSL "https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.5.1/install.sh" -o /tmp/wpp-install.sh && bash /tmp/wpp-install.sh; code=$?; rm -f /tmp/wpp-install.sh; exit $code'
+sudo -i bash -c 'curl -4fsSL "https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.5.2/install.sh" -o /tmp/wpp-install.sh && bash /tmp/wpp-install.sh; code=$?; rm -f /tmp/wpp-install.sh; exit $code'
 ```
 
-Команда доступна после публикации тега `v2.5.1` в GitHub. Установщик запросит домен, email для HTTPS-сертификата, логин и пароль панели. После установки он покажет адрес панели и данные для входа.
+Команда доступна после публикации тега `v2.5.2` в GitHub. Установщик запросит домен, email для HTTPS-сертификата, логин и пароль панели. После установки он покажет адрес панели и данные для входа.
 
 Локальная установка из ZIP:
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=600 install -y unzip && rm -rf /root/wpp-251-release && mkdir -p /root/wpp-251-release && unzip -q /root/WEB-PANEL-PROXY-V-2.5.1-GITHUB.zip -d /root/wpp-251-release && cd /root/wpp-251-release && chmod +x ./*.sh && bash ./install-final.sh
+apt-get -o DPkg::Lock::Timeout=600 install -y unzip && rm -rf /root/wpp-252-release && mkdir -p /root/wpp-252-release && unzip -q /root/WEB-PANEL-PROXY-V-2.5.2-GITHUB.zip -d /root/wpp-252-release && cd /root/wpp-252-release && chmod +x ./*.sh && bash ./install-final.sh
 ```
 
 ### После установки
