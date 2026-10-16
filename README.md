@@ -2,7 +2,7 @@
   <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
 </p>
 
-<h1 align="center">WEB PANEL PROXY 2.5.3</h1>
+<h1 align="center">WEB PANEL PROXY 2.5.4</h1>
 
 <p align="center">WEB Proxy, MTProto, VLESS XHTTP, Hysteria2, OpenFlux и аккуратная панель управления для собственного VPS</p>
 
@@ -18,13 +18,11 @@
 - Проверка обновлений и безопасное обновление с временным автоматическим откатом.
 - Ручной экспорт и импорт полной резервной копии настроек через браузер без накопления архивов на VPS.
 
-## Релиз 2.5.3
+## Релиз 2.5.4
 
-- Снижена постоянная фоновая нагрузка: сбор трафика выполняется раз в 30 секунд, метрик — раз в минуту.
-- Дашборд больше не опрашивает VPS каждые 5 секунд.
-- В настройках появились скачивание и восстановление переносимой резервной копии.
-- Автоматические обновления используют только временный откат в `/tmp` и больше не копят каталоги в `/root`.
-- При первом успешном обновлении старые автоматические каталоги `web-panel-proxy-update-backup-*` удаляются.
+- Исправлено восстановление резервной копии со старым XHTTP-путём.
+- После импорта Caddy автоматически получает те же пути, которые используют Xray и клиентские ссылки.
+- Новая конфигурация Caddy проверяется до применения; при ошибке восстановление отменяется безопасно.
 
 ## Требования
 
@@ -47,15 +45,15 @@ sudo -i
 ### Установка
 
 ```bash
-sudo -i bash -c 'curl -4fsSL "https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.5.3/install.sh" -o /tmp/wpp-install.sh && bash /tmp/wpp-install.sh; code=$?; rm -f /tmp/wpp-install.sh; exit $code'
+sudo -i bash -c 'curl -4fsSL "https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.5.4/install.sh" -o /tmp/wpp-install.sh && bash /tmp/wpp-install.sh; code=$?; rm -f /tmp/wpp-install.sh; exit $code'
 ```
 
-Команда доступна после публикации тега `v2.5.3` в GitHub. Установщик запросит домен, email для HTTPS-сертификата, логин и пароль панели. После установки он покажет адрес панели и данные для входа.
+Команда доступна после публикации тега `v2.5.4` в GitHub. Установщик запросит домен, email для HTTPS-сертификата, логин и пароль панели. После установки он покажет адрес панели и данные для входа.
 
 Локальная установка из ZIP:
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=600 install -y unzip && rm -rf /root/wpp-253-release && mkdir -p /root/wpp-253-release && unzip -q /root/WEB-PANEL-PROXY-V-2.5.3-GITHUB.zip -d /root/wpp-253-release && cd /root/wpp-253-release && chmod +x ./*.sh && bash ./install-final.sh
+apt-get -o DPkg::Lock::Timeout=600 install -y unzip && rm -rf /root/wpp-254-release && mkdir -p /root/wpp-254-release && unzip -q /root/WEB-PANEL-PROXY-V-2.5.4-GITHUB.zip -d /root/wpp-254-release && cd /root/wpp-254-release && chmod +x ./*.sh && bash ./install-final.sh
 ```
 
 ### После установки

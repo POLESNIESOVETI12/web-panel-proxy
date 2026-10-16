@@ -438,9 +438,9 @@ XRAY_PATH="$(cat "$XRAY_PATH_FILE")"
 [[ "$XRAY_PATH" =~ ^/vless-[a-f0-9]{24}$ || "$XRAY_PATH" =~ ^/assets/[a-f0-9]{12}/[a-f0-9]{12}$ ]] || die "Stored VLESS path is invalid."
 
 if [[ "$UPDATING" == "1" ]]; then
-    echo "Updating WEB PANEL PROXY V 2.5.3..."
+    echo "Updating WEB PANEL PROXY V 2.5.4..."
 else
-    echo "Configuring WEB PANEL PROXY V 2.5.3..."
+    echo "Configuring WEB PANEL PROXY V 2.5.4..."
 fi
 INSTALL_CREDENTIALS="/etc/web-proxy-panel/install-credentials"
 if [[ "$UPDATING" == "1" ]]; then
@@ -2513,7 +2513,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.api_auth(): return
             if path==node_api.API_PREFIX+"/status":
                 loc=node_api.load_location(LOCATION_FILE)
-                self.send_json({"ok":True,"api_version":1,"version":"2.5.3","domain":DOMAIN,
+                self.send_json({"ok":True,"api_version":1,"version":"2.5.4","domain":DOMAIN,
                     "location":loc,"capabilities":["vless","hysteria","federation"]}); return
             if path==node_api.API_PREFIX+"/profiles":
                 result=[]
@@ -2791,11 +2791,34 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok":False,"message":"Архив пуст или превышает лимит 16 МБ."},413); return
             raw=self.rfile.read(length)
             def apply_restored_state():
+                # The XHTTP root is portable state because existing client links
+                # must survive a reinstall.  Keep Caddy in lockstep whenever a
+                # backup installs (or rolls back) that root.
+                with open(CADDYFILE,encoding="utf-8") as stream:
+                    old_caddy=stream.read()
+                new_caddy=cdn.rewrite_caddy_xhttp_routes(old_caddy,xray_path())
+                if new_caddy!=old_caddy:
+                    caddy_stat=os.stat(CADDYFILE)
+                    caddy_tmp=CADDYFILE+".restore-tmp"
+                    try:
+                        with open(caddy_tmp,"w",encoding="utf-8") as stream:
+                            stream.write(new_caddy)
+                        os.chmod(caddy_tmp,caddy_stat.st_mode & 0o7777)
+                        os.chown(caddy_tmp,caddy_stat.st_uid,caddy_stat.st_gid)
+                        subprocess.run(["caddy","validate","--config",caddy_tmp,"--adapter","caddyfile"],
+                                       check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=30)
+                        os.replace(caddy_tmp,CADDYFILE)
+                    finally:
+                        try: os.unlink(caddy_tmp)
+                        except FileNotFoundError: pass
                 ctl("sync")
                 openflux.restore_if_configured()
-                subprocess.run(["systemctl","try-restart","tproxy-server.service","mtproxy.service",
-                                "web-panel-proxy-xray.service","web-panel-proxy-openflux.service"],
-                               stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=45)
+                restarted=subprocess.run(["systemctl","try-restart","tproxy-server.service","mtproxy.service",
+                                          "web-panel-proxy-xray.service","web-panel-proxy-openflux.service",
+                                          "caddy.service"],stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL,timeout=45)
+                if restarted.returncode:
+                    raise RuntimeError("Не удалось перезапустить службы после восстановления.")
             try:
                 with STATE_LOCK:
                     result=backup_store.restore_bytes(raw,apply_restored_state)
@@ -3346,7 +3369,7 @@ fi
 echo "[4/6] Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=WEB PANEL PROXY V 2.5.3
+Description=WEB PANEL PROXY V 2.5.4
 After=network-online.target caddy.service tproxy-server.service mtproxy.service web-proxy-panel-firewall.service
 Wants=network-online.target
 Requires=web-proxy-panel-firewall.service
@@ -3480,7 +3503,7 @@ unlock_changes(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 show_info(){
     local d p version
-    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.5.3')"
+    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.5.4')"
     echo
     echo "============================================================"
     echo "                 WEB PANEL PROXY"
@@ -4020,9 +4043,9 @@ fi
 echo
 echo "============================================================"
 if [[ "$UPDATING" == "1" ]]; then
-echo "          WEB PANEL PROXY V 2.5.3 UPDATED"
+echo "          WEB PANEL PROXY V 2.5.4 UPDATED"
 else
-echo "         WEB PANEL PROXY V 2.5.3 IS READY"
+echo "         WEB PANEL PROXY V 2.5.4 IS READY"
 fi
 echo "============================================================"
 echo

@@ -6,7 +6,7 @@ import re
 import time
 from urllib.parse import urlencode, urlsplit, parse_qs
 
-VERSION = '2.5.3'
+VERSION = '2.5.4'
 
 
 def esc(value): return html.escape(str(value), quote=True)

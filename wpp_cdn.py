@@ -60,6 +60,31 @@ def endpoint_path(root, variant="direct"):
     return root + suffixes[variant]
 
 
+def rewrite_caddy_xhttp_routes(source, root):
+    """Align the managed Caddy matchers with the restored XHTTP root."""
+    if not isinstance(source, str):
+        raise CDNError("Конфигурация Caddy повреждена.")
+    routes = {
+        "web_panel_vless_direct": "direct",
+        "web_panel_vless_cdn": "cdn",
+        "web_panel_vless_beget": "beget",
+        "web_panel_vless_vk": "vk",
+        "web_panel_vless_selectel": "selectel",
+    }
+    updated = source
+    for matcher, variant in routes.items():
+        route_path = endpoint_path(root, variant)
+        pattern = r"(?m)^([ \t]*@" + re.escape(matcher) + r"[ \t]+path)[^\r\n]*$"
+        updated, count = re.subn(
+            pattern,
+            lambda match, value=route_path: match.group(1) + " " + value + " " + value + "/*",
+            updated,
+        )
+        if count != 1:
+            raise CDNError("Не удалось синхронизировать маршрут Caddy: " + matcher + ".")
+    return updated
+
+
 def _host(value, label, required=False):
     value = str(value or "").strip().lower().rstrip(".")
     if value.startswith("http://") or value.startswith("https://") or "/" in value or ":" in value:
