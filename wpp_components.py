@@ -245,7 +245,7 @@ def run():
     component, tag = state.get("component"), state.get("target")
     if state.get("phase") != "queued" or component not in SPECS:
         raise SystemExit("No queued component update")
-    state.update(phase="running", message=f"Устанавливается {component} {tag}. Создана резервная копия.")
+    state.update(phase="running", message=f"Устанавливается {component} {tag}. Подготовлен временный откат.")
     atomic_json(STATUS, state)
     try:
         with tempfile.TemporaryDirectory(prefix="wpp-component-") as directory:

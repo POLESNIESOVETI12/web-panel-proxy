@@ -150,7 +150,7 @@ def sample_metrics(traffic, force=False):
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         data = read_state()
         now = int(time.time())
-        if not force and 0 <= now - data.get('latest', {}).get('time', 0) < 25: return
+        if not force and 0 <= now - data.get('latest', {}).get('time', 0) < 45: return
         previous = data.get('latest', {})
         point = make_sample(traffic, previous, now)
         # First install: obtain a real CPU delta, not an invented zero.
@@ -163,8 +163,9 @@ def sample_metrics(traffic, force=False):
             if delta > 0: point['cpu'] = max(0,min(100,100*(1-(sum(values[3:5])-ticks[1])/delta)))
         history = [h for h in data.get('history', []) if now - 86400 <= h.get('time', 0) < now]
         history.append({k: point[k] for k in ('time', 'up_rate', 'down_rate', 'cpu')})
-        # Ten-second sampling keeps a full day plus one point.
-        atomic_json(STATE, {'latest': point, 'history': history[-8641:]})
+        # One-minute sampling keeps a full day plus one point without growing
+        # the state file or waking Python thousands of times per day.
+        atomic_json(STATE, {'latest': point, 'history': history[-1441:]})
 
 
 def collect_once():

@@ -109,7 +109,7 @@ fi
 MTPROTO_HOST="${MTPROTO_HOST:-$DOMAIN}"
 [[ -s "$PRIMARY_SECRET" ]] || die "Primary install-time secret not found."
 [[ -s "$LOGO_SOURCE" ]] || die "Panel logo file is missing: panel-logo.png"
-for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py; do
+for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py; do
     [[ -s "$BASE/$module" ]] || die "Missing panel module: $module; extract the complete archive."
 done
 FLAG_ARCHIVE="$BASE/wpp-panel/flags.tar.gz"
@@ -438,9 +438,9 @@ XRAY_PATH="$(cat "$XRAY_PATH_FILE")"
 [[ "$XRAY_PATH" =~ ^/vless-[a-f0-9]{24}$ || "$XRAY_PATH" =~ ^/assets/[a-f0-9]{12}/[a-f0-9]{12}$ ]] || die "Stored VLESS path is invalid."
 
 if [[ "$UPDATING" == "1" ]]; then
-    echo "Updating WEB PANEL PROXY V 2.5.2..."
+    echo "Updating WEB PANEL PROXY V 2.5.3..."
 else
-    echo "Configuring WEB PANEL PROXY V 2.5.2..."
+    echo "Configuring WEB PANEL PROXY V 2.5.3..."
 fi
 INSTALL_CREDENTIALS="/etc/web-proxy-panel/install-credentials"
 if [[ "$UPDATING" == "1" ]]; then
@@ -473,7 +473,7 @@ fi
 
 echo "[1/6] Writing manager..."
 
-for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py; do
+for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py; do
     [[ -s "$BASE/$module" ]] || die "Package is incomplete: $module is missing."
     install -o root -g root -m 0644 "$BASE/$module" "$APP_DIR/$module"
 done
@@ -996,8 +996,6 @@ def _nft_traffic():
 
 def _xray_traffic():
     result={}
-    if run("systemctl","is-active","--quiet",XRAY_SERVICE).returncode:
-        return result
     p=run(XRAY_BIN,"api","statsquery","--server="+XRAY_API,timeout=15)
     if p.returncode: return result
     try:
@@ -1017,12 +1015,30 @@ def _collect_traffic_unlocked(d=None):
     d=d or load()
     now=int(time.time())
     current=_nft_traffic()
-    current.update(_xray_traffic())
+    if any(u.get("enabled",True) and u.get("protocol") in ("vless","hysteria")
+           for u in d.get("users",[])):
+        current.update(_xray_traffic())
     current.update(wpp_awg.traffic(d.get("users",[])))
     state=_load_traffic()
     targets={"primary":{"protocol":"web","enabled":True}}
     targets.update({u["id"]:u for u in d.get("users",[])})
+    def target_unit(uid,u):
+        protocol=u.get("protocol","web")
+        if uid=="primary": return "mtproxy.service"
+        if protocol in ("web","mtproto"): return "web-proxy-user-"+uid+".service"
+        if protocol in ("vless","hysteria"): return XRAY_SERVICE
+        if protocol in wpp_awg.PROTOCOLS: return wpp_awg.service_for(u)
+        return ""
+    unit_by_uid={uid:target_unit(uid,u) for uid,u in targets.items()}
+    units=sorted({unit for unit in unit_by_uid.values() if unit})
     service_states={}
+    if units:
+        # One systemctl process for all profiles instead of one process per
+        # profile. Large installations previously caused continuous CPU churn.
+        status=run("systemctl","is-active",*units,timeout=10)
+        values=[line.strip()=="active" for line in status.stdout.splitlines()]
+        service_states={unit:(values[index] if index<len(values) else False)
+                        for index,unit in enumerate(units)}
     for uid,u in targets.items():
         raw=current.get(uid)
         entry=state.setdefault(uid,{"up":0,"down":0,"raw_up":0,"raw_down":0,"last_change":0})
@@ -1040,21 +1056,8 @@ def _collect_traffic_unlocked(d=None):
             entry["raw_"+direction]=value
         if changed: entry["last_change"]=now
         protocol=u.get("protocol","web")
-        if uid=="primary":
-            unit="mtproxy.service"
-        elif protocol=="web":
-            unit="web-proxy-user-"+uid+".service"
-        elif protocol in ("vless","hysteria"):
-            unit=XRAY_SERVICE
-        elif protocol=="mtproto":
-            unit="web-proxy-user-"+uid+".service"
-        elif protocol in wpp_awg.PROTOCOLS:
-            unit=wpp_awg.service_for(u)
-        else:
-            unit=""
-        if unit not in service_states:
-            service_states[unit]=(run("systemctl","is-active","--quiet",unit).returncode==0)
-        entry["service_active"]=service_states[unit] and u.get("enabled",True)
+        unit=unit_by_uid[uid]
+        entry["service_active"]=service_states.get(unit,False) and u.get("enabled",True)
         if raw is not None: entry["updated_at"]=now
         entry["protocol"]=protocol
     _save_traffic(state)
@@ -1603,12 +1606,12 @@ EOF
 
 cat > /etc/systemd/system/web-proxy-panel-traffic.timer <<'EOF'
 [Unit]
-Description=Collect WEB PANEL PROXY traffic every 10 seconds
+Description=Collect WEB PANEL PROXY traffic every 30 seconds
 
 [Timer]
-OnActiveSec=5s
-OnUnitInactiveSec=10s
-AccuracySec=1s
+OnActiveSec=15s
+OnUnitInactiveSec=30s
+AccuracySec=5s
 Unit=web-proxy-panel-traffic.service
 
 [Install]
@@ -1632,12 +1635,12 @@ Nice=10
 EOF
 cat > /etc/systemd/system/web-panel-proxy-metrics.timer <<'EOF'
 [Unit]
-Description=Collect WEB PANEL PROXY VPS metrics every 10 seconds
+Description=Collect WEB PANEL PROXY VPS metrics every 60 seconds
 
 [Timer]
-OnActiveSec=5s
-OnUnitInactiveSec=10s
-AccuracySec=1s
+OnActiveSec=20s
+OnUnitInactiveSec=60s
+AccuracySec=10s
 Unit=web-panel-proxy-metrics.service
 
 [Install]
@@ -1852,6 +1855,7 @@ import wpp_awg as awg
 import wpp_cdn as cdn
 import wpp_cdn_doctor as cdn_doctor
 import wpp_connections as connection_store
+import wpp_backup as backup_store
 
 HOST="127.0.0.1"
 PORT=8090
@@ -2452,6 +2456,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_data(json.dumps(value,ensure_ascii=True),code,"application/json")
     def send_png(self,b):
         self.send_response(200); self.send_header("Content-Type","image/png"); self.send_header("Cache-Control","no-store"); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
+    def send_download(self,b,filename):
+        self.send_response(200); self.send_header("Content-Type","application/zip")
+        self.send_header("Content-Disposition",'attachment; filename="'+filename+'"')
+        self.send_header("Cache-Control","no-store, private"); self.send_header("Pragma","no-cache")
+        self.send_header("X-Content-Type-Options","nosniff"); self.send_header("Content-Length",str(len(b)))
+        self.end_headers(); self.wfile.write(b)
     def send_logo(self,b):
         self.send_response(200); self.send_header("Content-Type","image/png"); self.send_header("Cache-Control","public, max-age=86400"); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
     def send_svg(self,b):
@@ -2503,7 +2513,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.api_auth(): return
             if path==node_api.API_PREFIX+"/status":
                 loc=node_api.load_location(LOCATION_FILE)
-                self.send_json({"ok":True,"api_version":1,"version":"2.5.2","domain":DOMAIN,
+                self.send_json({"ok":True,"api_version":1,"version":"2.5.3","domain":DOMAIN,
                     "location":loc,"capabilities":["vless","hysteria","federation"]}); return
             if path==node_api.API_PREFIX+"/profiles":
                 result=[]
@@ -2662,6 +2672,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html("Не удалось сформировать конфигурацию AWG.",503)
             return
 
+        if path==PANEL_PATH+"/backup-download":
+            try:
+                version=open("/etc/web-proxy-panel/version",encoding="ascii").read().strip()
+            except OSError: version=""
+            try:
+                with STATE_LOCK:
+                    payload=backup_store.export_bytes(version)
+                stamp=time.strftime("%Y%m%d-%H%M%S",time.gmtime())
+                self.send_download(payload,"wpp-settings-"+stamp+".zip")
+            except (OSError,backup_store.BackupError) as exc:
+                self.send_html("Не удалось создать резервную копию: "+esc(str(exc)),503)
+            return
+
 
         if path==PANEL_PATH+"/settings":
             token=esc(self.csrf())
@@ -2672,9 +2695,11 @@ class Handler(BaseHTTPRequestHandler):
                 else: site_html=read_site_html()
             except Exception: site_html="<!-- Не удалось прочитать исходник -->"
             editor=editor_ui(site_html,PANEL_PATH,self.csrf(),all_presets(),has_draft)
-            body=f'''<div class="page-head"><div><span class="eyebrow">WPP / STUDIO</span><h1>Настройки</h1><p>Оформление сайта и доступ к панели</p></div></div>
+            body=f'''<div class="page-head"><div><span class="eyebrow">WPP / STUDIO</span><h1>Настройки</h1><p>Оформление сайта, резервная копия и доступ к панели</p></div></div>
 {editor}
+<div class="card"><div class="card-title"><div><h2>Резервная копия настроек</h2><p class="muted">Клиенты, подписки, ключи, подключения, ноды, OpenFlux, сайт и учётная запись панели</p></div><span class="pill">Хранится на вашем компьютере</span></div><div class="note"><b>Архив содержит пароль и секретные ключи.</b> Храните его в безопасном месте. После восстановления действуют логин и пароль из архива. На VPS постоянные копии не создаются.</div><div class="actions" style="margin-top:16px"><a class="btn primary" href="{PANEL_PATH}/backup-download">Скачать резервную копию</a><label class="btn" for="backupFile">Выбрать архив</label><input id="backupFile" type="file" accept=".zip,application/zip" hidden><button type="button" id="restoreBackup" disabled>Установить копию</button><small id="backupStatus" role="status"></small></div></div>
 <div class=card><h2>Пароль администратора</h2><form method=post action="{PANEL_PATH}/password"><input type=hidden name=csrf value="{token}"><label for="adminNewPassword">Новый пароль</label><input id="adminNewPassword" type=password name=a minlength=3 required autocomplete=new-password><div class="actions" style="margin-top:16px"><button class="btn primary">Сохранить пароль</button><small>Минимум 3 символа · смена пароля завершит все сессии панели</small></div></form></div>'''
+            body+=f'''<script>(()=>{{const input=document.getElementById('backupFile'),button=document.getElementById('restoreBackup'),status=document.getElementById('backupStatus');input.addEventListener('change',()=>{{button.disabled=!input.files.length;status.textContent=input.files.length?'Выбран: '+input.files[0].name:''}});button.addEventListener('click',async()=>{{const file=input.files[0];if(!file||!confirm('Заменить текущие настройки данными из резервной копии? Подключения кратковременно перезапустятся.'))return;button.disabled=true;status.textContent='Проверяем и устанавливаем резервную копию…';try{{const response=await fetch('{PANEL_PATH}/backup-restore',{{method:'POST',headers:{{'Content-Type':'application/zip','X-WPP-CSRF':'{token}'}},body:file}});let result;try{{result=await response.json()}}catch(e){{throw new Error('Панель вернула некорректный ответ.')}}if(!response.ok||!result.ok)throw new Error(result.message||'Не удалось установить резервную копию.');status.textContent='Готово. Восстановлено файлов: '+result.files+'. Перезагружаем страницу…';setTimeout(()=>location.reload(),1200)}}catch(error){{status.textContent=error.message;button.disabled=false}}}})}})();</script>'''
             self.send_html(layout("Настройки",body,"settings")); return
 
         self.redirect("/")
@@ -2755,6 +2780,31 @@ class Handler(BaseHTTPRequestHandler):
         # Everything below requires an authenticated session.
         if not self.auth():
             self.redirect("/login")
+            return
+
+        if path==PANEL_PATH+"/backup-restore":
+            if not secrets.compare_digest(self.headers.get("X-WPP-CSRF",""),self.csrf()):
+                self.send_json({"ok":False,"message":"Недействительный запрос. Обновите страницу."},403); return
+            try: length=int(self.headers.get("Content-Length","0"))
+            except ValueError: length=0
+            if length<1 or length>backup_store.MAX_ARCHIVE:
+                self.send_json({"ok":False,"message":"Архив пуст или превышает лимит 16 МБ."},413); return
+            raw=self.rfile.read(length)
+            def apply_restored_state():
+                ctl("sync")
+                openflux.restore_if_configured()
+                subprocess.run(["systemctl","try-restart","tproxy-server.service","mtproxy.service",
+                                "web-panel-proxy-xray.service","web-panel-proxy-openflux.service"],
+                               stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=45)
+            try:
+                with STATE_LOCK:
+                    result=backup_store.restore_bytes(raw,apply_restored_state)
+                self.send_json({"ok":True,**result})
+            except backup_store.BackupError as exc:
+                self.send_json({"ok":False,"message":str(exc)},400)
+            except (OSError,subprocess.SubprocessError,RuntimeError) as exc:
+                print("backup restore failed:",type(exc).__name__,file=sys.stderr,flush=True)
+                self.send_json({"ok":False,"message":"Восстановление отменено, прежние настройки возвращены."},503)
             return
 
         try: form=self.form()
@@ -3256,7 +3306,7 @@ PY
 fi
 
 python3 -m py_compile "$APP_FILE"
-python3 -m py_compile "$APP_DIR/wpp_subscriptions.py" "$APP_DIR/wpp_panel_extras.py" "$APP_DIR/wpp_ui.py" "$APP_DIR/wpp_metrics.py" "$APP_DIR/wpp_update.py" "$APP_DIR/wpp_nodes.py" "$APP_DIR/wpp_openflux.py" "$APP_DIR/wpp_awg.py" "$APP_DIR/wpp_firewall.py" "$APP_DIR/wpp_components.py" "$APP_DIR/wpp_cdn.py" "$APP_DIR/wpp_cdn_doctor.py" "$APP_DIR/wpp_connections.py"
+python3 -m py_compile "$APP_DIR/wpp_subscriptions.py" "$APP_DIR/wpp_panel_extras.py" "$APP_DIR/wpp_ui.py" "$APP_DIR/wpp_metrics.py" "$APP_DIR/wpp_update.py" "$APP_DIR/wpp_nodes.py" "$APP_DIR/wpp_openflux.py" "$APP_DIR/wpp_awg.py" "$APP_DIR/wpp_firewall.py" "$APP_DIR/wpp_components.py" "$APP_DIR/wpp_cdn.py" "$APP_DIR/wpp_cdn_doctor.py" "$APP_DIR/wpp_connections.py" "$APP_DIR/wpp_backup.py"
 
 
 # ---- Finish installation: service, Caddy route, permissions, start ----
@@ -3296,7 +3346,7 @@ fi
 echo "[4/6] Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=WEB PANEL PROXY V 2.5.2
+Description=WEB PANEL PROXY V 2.5.3
 After=network-online.target caddy.service tproxy-server.service mtproxy.service web-proxy-panel-firewall.service
 Wants=network-online.target
 Requires=web-proxy-panel-firewall.service
@@ -3430,7 +3480,7 @@ unlock_changes(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 show_info(){
     local d p version
-    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.5.2')"
+    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.5.3')"
     echo
     echo "============================================================"
     echo "                 WEB PANEL PROXY"
@@ -3970,9 +4020,9 @@ fi
 echo
 echo "============================================================"
 if [[ "$UPDATING" == "1" ]]; then
-echo "          WEB PANEL PROXY V 2.5.2 UPDATED"
+echo "          WEB PANEL PROXY V 2.5.3 UPDATED"
 else
-echo "         WEB PANEL PROXY V 2.5.2 IS READY"
+echo "         WEB PANEL PROXY V 2.5.3 IS READY"
 fi
 echo "============================================================"
 echo

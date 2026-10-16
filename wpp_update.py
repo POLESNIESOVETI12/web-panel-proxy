@@ -166,7 +166,7 @@ def run_update():
         if (state.get('phase') != 'queued' or time.time() - _timestamp(state.get('started')) > 120 or
                 tag not in state.get('releases',[]) or not version_tuple(tag) or tag.lstrip('v')==current_version().lstrip('v')):
             raise ValueError('Нет подтверждённого релиза для установки.')
-        state.update(phase='running', message='Создание резервной копии и обновление. Подождите несколько минут.')
+        state.update(phase='running', message='Подготовка временного отката и обновление. Подождите несколько минут.')
         atomic_json(STATUS, state)
     # Preserve status outside panel backup paths; run in a separate systemd unit.
     env = {**os.environ, 'WEB_PANEL_PROXY_REF': tag, 'GIT_TERMINAL_PROMPT': '0', 'DEBIAN_FRONTEND': 'noninteractive'}

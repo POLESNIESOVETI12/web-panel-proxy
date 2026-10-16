@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Safe in-place updater for WEB PANEL PROXY V 2.5.2.
+# Safe in-place updater for WEB PANEL PROXY V 2.5.3.
 set -Eeuo pipefail
 umask 077
 
@@ -48,8 +48,8 @@ RELEASE_REF="$REQUESTED_REF"
 LOCAL_SOURCE=""
 if [[ "${1:-}" == "--local" ]]; then
     LOCAL_SOURCE="$(cd "$(dirname "$0")" && pwd)"
-    RELEASE_REF="v2.5.2"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py; do
+    RELEASE_REF="v2.5.3"
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py; do
         [[ -s "$LOCAL_SOURCE/$file" ]] || { echo "Incomplete local archive: $file is missing." >&2; exit 1; }
     done
     [[ -s "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" || -s "$LOCAL_SOURCE/OpenFlux-linux-amd64" ]] || {
@@ -73,7 +73,7 @@ exec 9>/run/lock/web-panel-proxy.lock
 flock -n 9 || die "Another WEB PANEL PROXY install, update or removal is already running."
 
 echo "============================================================"
-echo "     WEB PANEL PROXY V 2.5.2 — SAFE UPDATE"
+echo "     WEB PANEL PROXY V 2.5.3 — SAFE UPDATE"
 echo "============================================================"
 echo "Users, administrator password, panel URL and site HTML will be retained."
 wpp_progress_start "Проверка установленной версии"
@@ -127,7 +127,6 @@ else
     [[ -s "$PRIMARY_SECRET" ]] || die "Primary Secret is missing from the existing panel installation."
 fi
 
-STAMP="$(date +%Y%m%d-%H%M%S)"
 # Pause the HTTP writer before taking a snapshot of subscription slots/keys.
 # Proxy services keep running. Recover the panel if snapshot/download fails.
 PANEL_WAS_RUNNING=0
@@ -135,10 +134,10 @@ if systemctl is-active --quiet tproxy-panel.service; then
     PANEL_WAS_RUNNING=1
     systemctl stop tproxy-panel.service
 fi
-early_finish() { local code=$?; if [[ "$PANEL_WAS_RUNNING" == 1 ]]; then systemctl start tproxy-panel.service || true; fi; wpp_progress_finish "$code"; }
+BACKUP="$(mktemp -d /tmp/web-panel-proxy-rollback.XXXXXX)"
+chmod 0700 "$BACKUP"
+early_finish() { local code=$?; if [[ "$PANEL_WAS_RUNNING" == 1 ]]; then systemctl start tproxy-panel.service || true; fi; rm -rf -- "${BACKUP:-}"; wpp_progress_finish "$code"; }
 trap early_finish EXIT
-BACKUP="/root/web-panel-proxy-update-backup-${STAMP}"
-install -d -m 0700 "$BACKUP"
 BACKUP_ITEMS=()
 for item in /opt/tproxy-panel /opt/web-panel-proxy /opt/MTProxy /usr/local/bin/caddy /usr/local/bin/tproxy-server /usr/local/bin/amneziawg-go /usr/local/bin/awg /usr/local/bin/awg-quick /usr/local/sbin/web-proxy-panelctl /usr/local/sbin/web-proxy-panel-user-firewall /usr/local/sbin/web-panel-proxy-sync-tls /usr/local/sbin/web-panel-proxy-awg-run /usr/local/sbin/web-panel-proxy-awg-up /usr/local/sbin/web-panel-proxy-awg-down /usr/local/sbin/web-panel-proxy-update /usr/local/sbin/web-panel-proxy-uninstall /usr/local/sbin/WPP /usr/local/sbin/wpp /etc/systemd/system/tproxy-panel.service /etc/systemd/system/web-proxy-panel-firewall.service /etc/systemd/system/web-proxy-panel-traffic.service /etc/systemd/system/web-proxy-panel-traffic.timer /etc/systemd/system/web-panel-proxy-xray.service /etc/systemd/system/web-panel-proxy-openflux.service /etc/systemd/system/web-panel-proxy-awg@.service /etc/systemd/system/web-panel-proxy-sync-tls.service /etc/systemd/system/web-panel-proxy-sync-tls.timer /etc/systemd/system/web-panel-proxy-component-update.service /etc/systemd/system/tproxy-server.service /etc/systemd/system/mtproxy.service /etc/systemd/system/caddy.service.d/tproxy.conf /etc/caddy/Caddyfile /etc/tproxy-server /etc/mtproxy /etc/mita /etc/web-panel-proxy-xray /etc/sysctl.d/90-web-panel-proxy-awg.conf /var/lib/web-panel-proxy-xray /var/lib/web-panel-proxy-components /var/lib/tproxy-panel /etc/web-proxy-panel /srv/tproxy-site; do
     [[ -e "$item" ]] && BACKUP_ITEMS+=("$item")
@@ -152,8 +151,8 @@ for item in /etc/systemd/system/web-proxy-user-*.service /etc/systemd/system/web
 done
 shopt -u nullglob
 tar --numeric-owner -cpf "$BACKUP/state.tar" "${BACKUP_ITEMS[@]}"
-echo "Backup created: $BACKUP"
-wpp_progress 15 "Резервная копия создана"
+echo "Temporary rollback snapshot prepared. It will be deleted automatically."
+wpp_progress 15 "Временный откат подготовлен"
 
 HAD_FIREWALL_SERVICE=0
 [[ -e /etc/systemd/system/web-proxy-panel-firewall.service ]] && HAD_FIREWALL_SERVICE=1
@@ -283,7 +282,7 @@ rollback_update() {
     [[ "$HAD_TRAFFIC_TIMER" == 1 ]] && systemctl restart web-proxy-panel-traffic.timer 2>/dev/null || true
     [[ "$HAD_METRICS_TIMER" == 1 ]] && systemctl restart web-panel-proxy-metrics.timer 2>/dev/null || true
     [[ "$HAD_AUTO_UPDATE_UNITS" == 1 ]] && systemctl enable --now web-panel-proxy-auto-update.timer 2>/dev/null || true
-    echo "Previous files restored from: $BACKUP" >&2
+    echo "Previous files restored; the temporary snapshot will now be removed." >&2
 }
 
 if ! command -v git >/dev/null 2>&1; then
@@ -316,6 +315,7 @@ finish() {
     trap - EXIT
     rollback_update "$code"
     rm -rf "$TEMP_DIR"
+    rm -rf -- "$BACKUP"
     wpp_progress_finish "$code"
     exit "$code"
 }
@@ -326,7 +326,7 @@ wpp_progress 25 "Получение файлов обновления"
 if [[ -n "$LOCAL_SOURCE" ]]; then
     install -d -m 0700 "$TEMP_DIR/source"
     install -d -m 0700 "$TEMP_DIR/source/assets"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py; do
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py; do
         cp -a "$LOCAL_SOURCE/$file" "$TEMP_DIR/source/$file"
     done
     if [[ -s "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" ]]; then
@@ -437,6 +437,15 @@ fi
 printf '%s\n' "${RELEASE_REF#v}" > /etc/web-proxy-panel/version
 chmod 0600 /etc/web-proxy-panel/caddy-owned /etc/web-proxy-panel/version
 UPDATE_COMMITTED=1
+# Versions up to 2.5.2 left automatic update snapshots in /root. They are not
+# user exports and are no longer needed now that the update passed all checks.
+shopt -s nullglob
+for old_snapshot in /root/web-panel-proxy-update-backup-*; do
+    resolved_snapshot="$(readlink -f -- "$old_snapshot" 2>/dev/null || true)"
+    [[ -d "$resolved_snapshot" && "$resolved_snapshot" == /root/web-panel-proxy-update-backup-* ]] || continue
+    rm -rf -- "$resolved_snapshot"
+done
+shopt -u nullglob
 wpp_progress 100 "Обновление завершено"
 echo
 echo "Update completed. Open the panel at: https://${DOMAIN}${PANEL_PATH}/login"
