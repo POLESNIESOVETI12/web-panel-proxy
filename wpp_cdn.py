@@ -126,6 +126,14 @@ def _get_only_extra():
         "uplinkHTTPMethod": "GET",
         "uplinkDataPlacement": "header",
         "uplinkDataKey": "X-Data",
+        "scMaxEachPostBytes": 32768,
+        "scMinPostsIntervalMs": 10,
+        "serverMaxHeaderBytes": 65536,
+        "extra": {
+            "xmux": {
+                "maxConnections": 1
+            }
+        },
         "uplinkChunkSize": 2048,
     }
 
