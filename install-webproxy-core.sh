@@ -8,7 +8,7 @@ export GIT_TERMINAL_PROMPT=0
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
 
-VERSION="${WEB_PANEL_PROXY_PACKAGE_VERSION:-2.5.4}"
+VERSION="${WEB_PANEL_PROXY_PACKAGE_VERSION:-2.6.0}"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
@@ -283,7 +283,6 @@ chmod 0600 /etc/web-proxy-panel/mtproto-host
 
 echo
 echo "[3/10] Checking ports..."
-check_install_port 80 caddy
 check_install_port 443 caddy
 if EXISTING_MTPROXY_PORT="$(find_mtproxy_port 2>/dev/null)"; then
     MT_PORT="$EXISTING_MTPROXY_PORT"
@@ -698,9 +697,8 @@ else
 fi
 rm -f "$CANONICAL_CADDY"
 
-# Restore standard Caddy automatic HTTPS. Caddy keeps TCP/80 open for HTTP to
-# HTTPS redirects and for the HTTP-01 ACME challenge, while TCP/443 serves HTTPS.
-# This also migrates releases which forced TLS-ALPN-only issuance on TCP/443.
+# Keep TCP/80 free. Automatic certificates use TLS-ALPN-01 on TCP/443 and
+# automatic HTTP redirects are disabled, so Caddy never needs an HTTP listener.
 python3 - /etc/caddy/Caddyfile "$DOMAIN" <<'PY'
 import re, sys
 from pathlib import Path
@@ -718,58 +716,54 @@ text = legacy_address.sub(
     lambda match: match.group("indent") + domain + " {", text, count=1
 )
 text = re.sub(
-    r'\n?\s*# WPP TLS WITHOUT PORT 80 BEGIN\n.*?\n\s*# WPP TLS WITHOUT PORT 80 END\n?',
-    '\n', text, flags=re.S,
-)
-text = re.sub(r'(?m)^\s*auto_https\s+disable_redirects\s*\n?', '', text)
-text = re.sub(r'\A\s*\{\s*\}\s*', '', text, count=1)
-if not re.search(r'(?m)^\s*' + re.escape(domain) + r'\s*\{\s*$', text):
-    raise SystemExit("WEB PANEL PROXY Caddy site block was not found")
-text = re.sub(
     r'\n?\s*# WPP HTTP REDIRECT BEGIN\n.*?\n\s*# WPP HTTP REDIRECT END\n?',
     '\n', text, flags=re.S,
 )
-# An explicit ACME issuer may remain (for example to retain its account email),
-# but HTTP-01 must no longer be disabled in the WPP site block.
-def enable_http_challenge(source, hostname):
-    match = re.search(r'(?m)^\s*' + re.escape(hostname) + r'\s*\{\s*$', source)
-    opening = source.find('{', match.start(), match.end())
-    depth = 0
-    closing = None
-    for index in range(opening, len(source)):
-        if source[index] == '{':
-            depth += 1
-        elif source[index] == '}':
-            depth -= 1
-            if depth == 0:
-                closing = index + 1
-                break
-    if closing is None:
-        raise SystemExit("WEB PANEL PROXY Caddy site block is incomplete")
-    block = source[match.start():closing]
-    block = re.sub(r'(?m)^\s*disable_http_challenge\s*\n?', '', block)
-    return source[:match.start()] + block + source[closing:]
-text = enable_http_challenge(text, domain)
-
-# Keep an explicit managed HTTP site so Caddy reliably owns TCP/80 after an
-# upgrade from the HTTPS-only release, even before a certificate is available.
-redirect = (
-    "# WPP HTTP REDIRECT BEGIN\n"
-    "http://" + domain + " {\n"
-    "    redir https://" + domain + "{uri} permanent\n"
-    "}\n"
-    "# WPP HTTP REDIRECT END\n"
+text = re.sub(
+    r'\n?\s*# WPP TLS WITHOUT PORT 80 BEGIN\n.*?\n\s*# WPP TLS WITHOUT PORT 80 END\n?',
+    '\n', text, flags=re.S,
 )
-text = text.rstrip() + "\n\n" + redirect
-Path(path).write_text(text, encoding="utf-8")
+
+def block_end(lines, start):
+    depth = 0
+    for index in range(start, len(lines)):
+        depth += lines[index].count("{") - lines[index].count("}")
+        if depth == 0:
+            return index
+    raise SystemExit("Unclosed Caddy block")
+
+lines = text.splitlines(keepends=True)
+global_start = next((i for i, line in enumerate(lines) if line.strip() == "{"), None)
+if global_start is None:
+    lines[0:0] = ["{\n", "\tauto_https disable_redirects\n", "}\n", "\n"]
+else:
+    global_end = block_end(lines, global_start)
+    body = [line for line in lines[global_start + 1:global_end]
+            if not re.match(r'^\s*auto_https\b', line)]
+    lines[global_start + 1:global_end] = ["\tauto_https disable_redirects\n"] + body
+
+site_pattern = re.compile(r"^\s*" + re.escape(domain) + r"\s*\{\s*$")
+site_start = next((i for i, line in enumerate(lines) if site_pattern.match(line)), None)
+if site_start is None:
+    raise SystemExit("WEB PANEL PROXY Caddy site block was not found")
+tls_block = [
+    "\t# WPP TLS WITHOUT PORT 80 BEGIN\n",
+    "\ttls {\n",
+    "\t\tissuer acme {\n",
+    "\t\t\tdisable_http_challenge\n",
+    "\t\t}\n",
+    "\t}\n",
+    "\t# WPP TLS WITHOUT PORT 80 END\n",
+    "\n",
+]
+lines[site_start + 1:site_start + 1] = tls_block
+Path(path).write_text("".join(lines), encoding="utf-8")
 PY
 test -s /etc/caddy/Caddyfile || die "Caddyfile was not configured."
-grep -Fqx '# WPP HTTP REDIRECT BEGIN' /etc/caddy/Caddyfile ||
-    die "Caddy HTTP redirect block was not generated."
-grep -Fqx "http://${DOMAIN} {" /etc/caddy/Caddyfile ||
-    die "Caddy HTTP listener for ${DOMAIN} was not generated."
-grep -Eq '^[[:space:]]*auto_https[[:space:]]+disable_redirects' /etc/caddy/Caddyfile &&
-    die "Caddy automatic HTTP listener is still disabled."
+grep -Eq '^[[:space:]]*auto_https[[:space:]]+disable_redirects' /etc/caddy/Caddyfile ||
+    die "Caddy HTTP redirects were not disabled."
+grep -Eq '^[[:space:]]*disable_http_challenge[[:space:]]*$' /etc/caddy/Caddyfile ||
+    die "Caddy HTTP-01 challenge was not disabled."
 
 install -d -m 0755 /etc/systemd/system/caddy.service.d
 cat > /etc/systemd/system/caddy.service.d/tproxy.conf <<EOF
@@ -1089,24 +1083,6 @@ else
     fi
 fi
 
-# A successfully running HTTPS listener does not prove that the HTTP redirect
-# listener was applied. Repair a stale runtime config once before health checks.
-if ! port_is_listening 80; then
-    echo "      TCP/80 is not active yet; reloading the verified Caddyfile..."
-    "$CADDY_BIN" reload --config /etc/caddy/Caddyfile --adapter caddyfile --force 2>/dev/null ||
-        systemctl restart caddy.service
-    for _ in $(seq 1 15); do
-        port_is_listening 80 && break
-        sleep 1
-    done
-fi
-port_is_listening 80 || {
-    echo "      Effective Caddy listeners:"
-    "$CADDY_BIN" adapt --config /etc/caddy/Caddyfile --adapter caddyfile --pretty 2>/dev/null |
-        grep -E '"listen"|":80"|":443"' || true
-    die "Caddy did not activate its managed HTTP listener on port 80."
-}
-
 echo
 echo "[9/10] Running health checks..."
 curl -fsS --max-time 5 http://127.0.0.1:8081/healthz >/dev/null ||
@@ -1172,7 +1148,7 @@ runuser -u mtproxy -- test -x /opt/MTProxy/objs/bin/mtproto-proxy ||
 runuser -u tproxy -- test -r /srv/tproxy-site/index.html ||
     die "Final site permission check failed."
 
-for p in "$MT_PORT" 8080 8081 80 443; do
+for p in "$MT_PORT" 8080 8081 443; do
     if ! ss -lnt | grep -Eq ":(${p})\b"; then
         echo "      Missing expected listening port: ${p}" >&2
         ss -lntp || true

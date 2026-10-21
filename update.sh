@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Safe in-place updater for WEB PANEL PROXY V 2.5.4.
+# Safe in-place updater for WEB PANEL PROXY V 2.6.0.
 set -Eeuo pipefail
 umask 077
 
@@ -46,18 +46,36 @@ REPOSITORY="https://github.com/POLESNIESOVETI12/web-panel-proxy.git"
 REQUESTED_REF="${WEB_PANEL_PROXY_REF:-}"
 RELEASE_REF="$REQUESTED_REF"
 LOCAL_SOURCE=""
-if [[ "${1:-}" == "--local" ]]; then
-    LOCAL_SOURCE="$(cd "$(dirname "$0")" && pwd)"
-    RELEASE_REF="v2.5.4"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py; do
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# A complete extracted ZIP is itself the requested release. Prefer it
+# automatically so `bash ./update.sh` never falls back to an older public tag.
+AUTO_LOCAL=0
+if [[ $# == 0 && -s "$SCRIPT_DIR/install-panel.sh" && -s "$SCRIPT_DIR/wpp_ui.py" &&
+      -s "$SCRIPT_DIR/assets/amneziawg-go-linux-amd64" ]]; then
+    AUTO_LOCAL=1
+fi
+if [[ "${1:-}" == "--local" || "$AUTO_LOCAL" == 1 ]]; then
+    LOCAL_SOURCE="$SCRIPT_DIR"
+    RELEASE_REF="v2.6.0"
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
         [[ -s "$LOCAL_SOURCE/$file" ]] || { echo "Incomplete local archive: $file is missing." >&2; exit 1; }
     done
     [[ -s "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" || -s "$LOCAL_SOURCE/OpenFlux-linux-amd64" ]] || {
         echo "Incomplete local archive: OpenFlux-linux-amd64 is missing." >&2; exit 1;
     }
+    for file in amneziawg-go-linux-amd64 awg-linux-amd64 awg-quick-linux-amd64; do
+        [[ -s "$LOCAL_SOURCE/assets/$file" ]] || {
+            echo "Incomplete local archive: assets/$file is missing." >&2; exit 1;
+        }
+    done
     [[ -s "$LOCAL_SOURCE/wpp-panel/flags.tar.gz" ]] || {
         echo "Incomplete local archive: wpp-panel/flags.tar.gz is missing." >&2; exit 1;
     }
+    for file in preset-cars.webp preset-car-graphite.webp preset-car-silver.webp preset-car-white.webp preset-car-blue.webp preset-car-red.webp preset-car-black.webp preset-coffee.webp; do
+        [[ -s "$LOCAL_SOURCE/assets/$file" ]] || {
+            echo "Incomplete local archive: assets/$file is missing." >&2; exit 1;
+        }
+    done
 elif [[ $# != 0 ]]; then
     echo "Usage: bash update.sh [--local]" >&2; exit 1
 fi
@@ -73,7 +91,7 @@ exec 9>/run/lock/web-panel-proxy.lock
 flock -n 9 || die "Another WEB PANEL PROXY install, update or removal is already running."
 
 echo "============================================================"
-echo "     WEB PANEL PROXY V 2.5.4 — SAFE UPDATE"
+echo "     WEB PANEL PROXY V 2.6.0 — SAFE UPDATE"
 echo "============================================================"
 echo "Users, administrator password, panel URL and site HTML will be retained."
 wpp_progress_start "Проверка установленной версии"
@@ -139,7 +157,7 @@ chmod 0700 "$BACKUP"
 early_finish() { local code=$?; if [[ "$PANEL_WAS_RUNNING" == 1 ]]; then systemctl start tproxy-panel.service || true; fi; rm -rf -- "${BACKUP:-}"; wpp_progress_finish "$code"; }
 trap early_finish EXIT
 BACKUP_ITEMS=()
-for item in /opt/tproxy-panel /opt/web-panel-proxy /opt/MTProxy /usr/local/bin/caddy /usr/local/bin/tproxy-server /usr/local/bin/amneziawg-go /usr/local/bin/awg /usr/local/bin/awg-quick /usr/local/sbin/web-proxy-panelctl /usr/local/sbin/web-proxy-panel-user-firewall /usr/local/sbin/web-panel-proxy-sync-tls /usr/local/sbin/web-panel-proxy-awg-run /usr/local/sbin/web-panel-proxy-awg-up /usr/local/sbin/web-panel-proxy-awg-down /usr/local/sbin/web-panel-proxy-update /usr/local/sbin/web-panel-proxy-uninstall /usr/local/sbin/WPP /usr/local/sbin/wpp /etc/systemd/system/tproxy-panel.service /etc/systemd/system/web-proxy-panel-firewall.service /etc/systemd/system/web-proxy-panel-traffic.service /etc/systemd/system/web-proxy-panel-traffic.timer /etc/systemd/system/web-panel-proxy-xray.service /etc/systemd/system/web-panel-proxy-openflux.service /etc/systemd/system/web-panel-proxy-awg@.service /etc/systemd/system/web-panel-proxy-sync-tls.service /etc/systemd/system/web-panel-proxy-sync-tls.timer /etc/systemd/system/web-panel-proxy-component-update.service /etc/systemd/system/tproxy-server.service /etc/systemd/system/mtproxy.service /etc/systemd/system/caddy.service.d/tproxy.conf /etc/caddy/Caddyfile /etc/tproxy-server /etc/mtproxy /etc/mita /etc/web-panel-proxy-xray /etc/sysctl.d/90-web-panel-proxy-awg.conf /var/lib/web-panel-proxy-xray /var/lib/web-panel-proxy-components /var/lib/tproxy-panel /etc/web-proxy-panel /srv/tproxy-site; do
+for item in /opt/tproxy-panel /opt/web-panel-proxy /opt/MTProxy /usr/local/bin/caddy /usr/local/bin/tproxy-server /usr/local/bin/amneziawg-go /usr/local/bin/awg /usr/local/bin/awg-quick /usr/local/sbin/web-proxy-panelctl /usr/local/sbin/web-proxy-panel-user-firewall /usr/local/sbin/web-panel-proxy-sync-tls /usr/local/sbin/web-panel-proxy-awg-run /usr/local/sbin/web-panel-proxy-awg-up /usr/local/sbin/web-panel-proxy-awg-down /usr/local/sbin/web-proxy-panel-update /usr/local/sbin/web-panel-proxy-uninstall /usr/local/sbin/WPP /usr/local/sbin/wpp /etc/systemd/system/tproxy-panel.service /etc/systemd/system/tproxy-panel.service.d/go-runtime.conf /etc/systemd/system/web-panel-proxy-web-update.service.d/go-runtime.conf /etc/systemd/system/web-panel-proxy-auto-update.service.d/go-runtime.conf /etc/systemd/system/web-panel-proxy-awg@.service.d/go-runtime.conf /etc/systemd/system/web-proxy-panel-firewall.service /etc/systemd/system/web-proxy-panel-traffic.service /etc/systemd/system/web-proxy-panel-traffic.timer /etc/systemd/system/web-panel-proxy-xray.service /etc/systemd/system/web-panel-proxy-openflux.service /etc/systemd/system/web-panel-proxy-awg@.service /etc/systemd/system/web-panel-proxy-sync-tls.service /etc/systemd/system/web-panel-proxy-sync-tls.timer /etc/systemd/system/web-panel-proxy-component-update.service /etc/systemd/system/tproxy-server.service /etc/systemd/system/mtproxy.service /etc/systemd/system/caddy.service.d/tproxy.conf /etc/caddy/Caddyfile /etc/tproxy-server /etc/mtproxy /etc/mita /etc/web-panel-proxy-xray /etc/sysctl.d/90-web-panel-proxy-awg.conf /var/lib/web-panel-proxy-xray /var/lib/web-panel-proxy-components /var/lib/tproxy-panel /etc/web-proxy-panel /srv/tproxy-site; do
     [[ -e "$item" ]] && BACKUP_ITEMS+=("$item")
     [[ -e "$item" ]] && cp -a --parents "$item" "$BACKUP"
 done
@@ -153,6 +171,28 @@ shopt -u nullglob
 tar --numeric-owner -cpf "$BACKUP/state.tar" "${BACKUP_ITEMS[@]}"
 echo "Temporary rollback snapshot prepared. It will be deleted automatically."
 wpp_progress 15 "Временный откат подготовлен"
+
+# The experimental 3.0 Go cutover used systemd drop-ins to replace the Python
+# commands.  A normal Python release must remove those overrides; otherwise
+# systemd keeps starting the old Go binary even though every panel file was
+# successfully updated.  The files are already in the rollback snapshot above.
+GO_RUNTIME_DROPINS=(
+    /etc/systemd/system/tproxy-panel.service.d/go-runtime.conf
+    /etc/systemd/system/web-panel-proxy-web-update.service.d/go-runtime.conf
+    /etc/systemd/system/web-panel-proxy-auto-update.service.d/go-runtime.conf
+    /etc/systemd/system/web-panel-proxy-awg@.service.d/go-runtime.conf
+)
+GO_RUNTIME_REMOVED=0
+for dropin in "${GO_RUNTIME_DROPINS[@]}"; do
+    if [[ -e "$dropin" ]]; then
+        rm -f -- "$dropin"
+        GO_RUNTIME_REMOVED=1
+    fi
+done
+if [[ "$GO_RUNTIME_REMOVED" == 1 ]]; then
+    systemctl daemon-reload
+    echo "Experimental Go runtime overrides disabled; returning to the Python panel."
+fi
 
 HAD_FIREWALL_SERVICE=0
 [[ -e /etc/systemd/system/web-proxy-panel-firewall.service ]] && HAD_FIREWALL_SERVICE=1
@@ -326,7 +366,7 @@ wpp_progress 25 "Получение файлов обновления"
 if [[ -n "$LOCAL_SOURCE" ]]; then
     install -d -m 0700 "$TEMP_DIR/source"
     install -d -m 0700 "$TEMP_DIR/source/assets"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py; do
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
         cp -a "$LOCAL_SOURCE/$file" "$TEMP_DIR/source/$file"
     done
     if [[ -s "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" ]]; then
@@ -334,6 +374,12 @@ if [[ -n "$LOCAL_SOURCE" ]]; then
     else
         cp -a "$LOCAL_SOURCE/OpenFlux-linux-amd64" "$TEMP_DIR/source/assets/OpenFlux-linux-amd64"
     fi
+    for file in amneziawg-go-linux-amd64 awg-linux-amd64 awg-quick-linux-amd64; do
+        cp -a "$LOCAL_SOURCE/assets/$file" "$TEMP_DIR/source/assets/$file"
+    done
+    for file in preset-cars.webp preset-car-graphite.webp preset-car-silver.webp preset-car-white.webp preset-car-blue.webp preset-car-red.webp preset-car-black.webp preset-coffee.webp; do
+        cp -a "$LOCAL_SOURCE/assets/$file" "$TEMP_DIR/source/assets/$file"
+    done
     install -d -m 0700 "$TEMP_DIR/source/wpp-panel"
     cp -a "$LOCAL_SOURCE/wpp-panel/flags.tar.gz" "$TEMP_DIR/source/wpp-panel/flags.tar.gz"
 else
@@ -431,6 +477,9 @@ systemctl is-active --quiet web-panel-proxy-sync-tls.timer ||
     die "The Xray TLS synchronization timer did not start after the update."
 systemctl is-active --quiet web-panel-proxy-auto-update.timer ||
     die "The automatic update timer did not start after the update."
+PANEL_EXEC_START="$(systemctl show -p ExecStart --value tproxy-panel.service 2>/dev/null || true)"
+[[ "$PANEL_EXEC_START" == *"/usr/bin/python3 /opt/tproxy-panel/panel.py"* ]] ||
+    die "The panel service is not using the Python runtime after the update."
 if [[ ! -s /etc/web-proxy-panel/caddy-owned ]]; then
     printf '%s\n' 'WEB_PANEL_PROXY_V2_CADDY_SHARED' > /etc/web-proxy-panel/caddy-owned
 fi
@@ -446,6 +495,11 @@ for old_snapshot in /root/web-panel-proxy-update-backup-*; do
     rm -rf -- "$resolved_snapshot"
 done
 shopt -u nullglob
+wpp_progress 96 "Обновление Xray и OpenFlux"
+flock -u 9
+if ! systemctl start web-panel-proxy-component-auto-update.service; then
+    echo "WARNING: Latest Xray/OpenFlux check failed; the automatic timer will retry." >&2
+fi
 wpp_progress 100 "Обновление завершено"
 echo
 echo "Update completed. Open the panel at: https://${DOMAIN}${PANEL_PATH}/login"

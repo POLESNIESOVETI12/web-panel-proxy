@@ -11,7 +11,7 @@ from urllib.parse import quote
 import wpp_cdn
 
 HOST_RE = re.compile(r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
-PROVIDER_PORTS = {"beget": 10002, "selectel": 10003, "vk": 10004, "yandex": 10001, "custom": 10001}
+PROVIDER_PORTS = {"beget": 10002, "selectel": 10003, "vk": 10004, "yandex": 10001, "timeweb": 10005, "custom": 10001}
 
 
 def _managed_routes(xray_path):
@@ -21,6 +21,8 @@ def _managed_routes(xray_path):
     cdn_path = wpp_cdn.endpoint_path(xray_path, "cdn")
     beget_path = wpp_cdn.endpoint_path(xray_path, "beget")
     selectel_path = wpp_cdn.endpoint_path(xray_path, "selectel")
+    vk_path = wpp_cdn.endpoint_path(xray_path, "vk")
+    timeweb_path = wpp_cdn.endpoint_path(xray_path, "timeweb")
     return (
         '    @web_panel_cdn_probe path /__wpp_cdn_probe\n'
         '    handle @web_panel_cdn_probe {\n'
@@ -42,6 +44,9 @@ def _managed_routes(xray_path):
         '    }\n\n'
         f'    @web_panel_vless_cdn path {cdn_path} {cdn_path}/*\n'
         '    handle @web_panel_vless_cdn {\n'
+        '        header Cache-Control "no-store, no-cache"\n'
+        '        header CDN-Cache-Control "no-store"\n'
+        '        header X-Accel-Buffering "no"\n'
         '        reverse_proxy 127.0.0.1:10001 {\n'
         '            transport http {\n'
         '                versions h2c\n'
@@ -68,6 +73,32 @@ def _managed_routes(xray_path):
         '        header X-Accel-Buffering "no"\n'
         '        header Accept-Ranges "none"\n'
         '        reverse_proxy 127.0.0.1:10003 {\n'
+        '            transport http {\n'
+        '                versions h2c\n'
+        '            }\n'
+        '            flush_interval -1\n'
+        '        }\n'
+        '    }\n'
+        '\n'
+        f'    @web_panel_vless_vk path {vk_path} {vk_path}/*\n'
+        '    handle @web_panel_vless_vk {\n'
+        '        header Cache-Control "no-store, no-cache"\n'
+        '        header CDN-Cache-Control "no-store"\n'
+        '        header X-Accel-Buffering "no"\n'
+        '        reverse_proxy 127.0.0.1:10004 {\n'
+        '            transport http {\n'
+        '                versions h2c\n'
+        '            }\n'
+        '            flush_interval -1\n'
+        '        }\n'
+        '    }\n'
+        '\n'
+        f'    @web_panel_vless_timeweb path {timeweb_path} {timeweb_path}/*\n'
+        '    handle @web_panel_vless_timeweb {\n'
+        '        header Cache-Control "no-store, no-cache"\n'
+        '        header CDN-Cache-Control "no-store"\n'
+        '        header X-Accel-Buffering "no"\n'
+        '        reverse_proxy 127.0.0.1:10005 {\n'
         '            transport http {\n'
         '                versions h2c\n'
         '            }\n'
@@ -200,8 +231,9 @@ def run(profile, origin_domain, xray_path, timeout=7):
     provider = str(profile.get("provider", "custom")).strip().lower()
     cdn_host = _host(profile.get("public_host"))
     origin_host = _host(origin_domain)
-    variant = "beget" if provider == "beget" else ("selectel" if provider == "selectel" else ("vk" if provider == "vk" else "cdn"))
-    method = "DELETE" if provider == "selectel" else "GET"
+    variant = "beget" if provider == "beget" else ("selectel" if provider == "selectel" else ("vk" if provider == "vk" else ("timeweb" if provider == "timeweb" else "cdn")))
+    transport = wpp_cdn.transport_defaults(provider)
+    method = transport["uplink_method"].upper()
     expected_path = wpp_cdn.endpoint_path(xray_path, variant)
     results = []
 
@@ -262,18 +294,20 @@ def run(profile, origin_domain, xray_path, timeout=7):
         status, headers, payload, latency = _request(cdn_host, method, probe_path, timeout)
         if status == 200 and headers.get("x-wpp-cdn-probe") == "ok":
             results.append(_result("method", f"Метод {method}", "pass", f"Разрешён, {latency} мс"))
-        elif status in (403, 405) and provider == "selectel":
-            results.append(_result(
-                "method", f"Проверка метода {method}", "warn",
-                f"Пустой диагностический запрос получил HTTP {status}.",
-                "Selectel может отклонять запрос без XHTTP-сеанса; если клиент передаёт трафик, менять настройки не требуется.",
-            ))
-        elif status in (403, 405):
+        elif status in (403, 405, 413, 501):
             results.append(_result("method", f"Метод {method}", "fail", f"CDN вернул HTTP {status}.", f"Разрешите метод {method} в настройках CDN."))
         else:
             results.append(_result("method", f"Метод {method}", "warn", f"Получен HTTP {status}.", "Проверьте разрешённые HTTP-методы CDN."))
     except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
         results.append(_result("method", f"Метод {method}", "fail", str(exc), f"Проверьте поддержку метода {method} у CDN."))
+
+    if transport["mode"] == "stream-up":
+        results.append(_result("uplink", "Режим исходящего трафика", "pass", "stream-up · потоковый POST без дробления upload"))
+    else:
+        results.append(_result(
+            "uplink", "Режим исходящего трафика", "warn",
+            "packet-up · CDN принимает только GET, поэтому скорость upload зависит от лимитов edge-сервера.",
+        ))
 
     cache = cdn_headers.get("x-cdn-edge-cache", cdn_headers.get("x-cache", ""))
     if "HIT" in cache.upper():

@@ -509,7 +509,13 @@ def _install_extra_service(config):
     except FileNotFoundError:
         current = ""
     if current != expected:
-        _atomic(paths["unit"], expected, 0o644)
+        try:
+            _atomic(paths["unit"], expected, 0o644)
+        except OSError as exc:
+            raise OpenFluxError(
+                "Панель не может записать службу OpenFlux в /etc/systemd/system. "
+                "Повторите обновление WPP, чтобы применить разрешение systemd."
+            ) from exc
         _run(["systemctl", "daemon-reload"])
 
 
@@ -520,6 +526,27 @@ def _extra_active(profile_id):
                               timeout=5, check=False).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def _extra_activity(configs):
+    """Read all profile service states with one systemd process."""
+    services = [_extra_service(config["id"]) for config in configs]
+    if not services:
+        return {}
+    try:
+        completed = subprocess.run(
+            ["systemctl", "is-active", *services],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=7,
+            check=False,
+        )
+        states = completed.stdout.splitlines()
+        return {config["id"]: index < len(states) and states[index].strip() == "active"
+                for index, config in enumerate(configs)}
+    except (OSError, subprocess.SubprocessError):
+        return {config["id"]: False for config in configs}
 
 
 def _start_extra(config):
@@ -547,7 +574,9 @@ def profile_states():
         main.update({"id": "main", "name": _load().get("name", "OpenFlux"),
                      "platform": "ios" if main["ios_compatible"] else "android"})
         result.append(main)
-    for config in _extra_configs():
+    configs = _extra_configs()
+    activity = _extra_activity(configs)
+    for config in configs:
         try:
             max_uid = int(config.get("max_uid", 0) or 0)
         except (TypeError, ValueError):
@@ -560,7 +589,7 @@ def profile_states():
             "id": config["id"], "name": config.get("name", "OpenFlux"),
             "platform": config.get("platform", "android"), "url": config.get("url", ""),
             "key": config.get("key", ""), "configured": True,
-            "enabled": bool(config.get("enabled", True)), "active": _extra_active(config["id"]),
+            "enabled": bool(config.get("enabled", True)), "active": activity.get(config["id"], False),
             "encrypted": config.get("platform") != "ios", "transport": _transport_for(config),
             "codec": _codec_for(config), "version": VERSION,
             "max_client_token": config.get("max_client_token", ""),
@@ -610,15 +639,19 @@ def create_profile(name, document_url, platform, transport=TRANSPORT,
     _write_extra_files(config)
     try:
         _start_extra(config)
-    except Exception:
+    except OpenFluxError as exc:
+        # Creation and service startup are separate outcomes.  Keep a valid
+        # profile when the binary or its remote transport cannot start yet;
+        # otherwise the UI appears to ignore the Create button and the user
+        # loses every entered value.  A later Enable action retries startup.
         _run(["systemctl", "disable", "--now", _extra_service(profile_id)], check=False)
-        shutil.rmtree(_extra_paths(profile_id)["dir"], ignore_errors=True)
-        try:
-            _extra_paths(profile_id)["unit"].unlink()
-        except FileNotFoundError:
-            pass
-        _run(["systemctl", "daemon-reload"], check=False)
-        raise
+        config["enabled"] = False
+        config["startup_warning"] = str(exc).strip()[-900:]
+        config["updated_at"] = int(time.time())
+        _write_extra_files(config)
+        return config
+    config.pop("startup_warning", None)
+    _write_extra_files(config)
     return config
 
 

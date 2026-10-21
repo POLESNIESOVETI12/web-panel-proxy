@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Retired AmneziaWG compatibility helpers for WEB PANEL PROXY.
+"""Independent AmneziaWG 2.0 and 3.1 profiles for WEB PANEL PROXY.
 
 Every WPP profile owns a userspace interface, UDP port, address block, key set
 and obfuscation fingerprint.  Keeping device-level AWG parameters per profile
@@ -25,11 +25,7 @@ AWG20_MTU = 1280
 AWG31_MTU = 1100
 PORT_FIRST = 52000
 PORT_LAST = 52999
-# AWG is intentionally unavailable.  Keeping the module importable lets an
-# update read old users.json files without starting services or destroying
-# stored client records.  An empty protocol set makes sync() retire remaining
-# generated units/configs and prevents all new AWG operations.
-PROTOCOLS = ()
+PROTOCOLS = ("awg20", "awg31")
 PROFILE_SCHEMA = 2
 
 
@@ -193,7 +189,14 @@ def upgrade_users(users):
                 user["awg_parameters"] = parameters
                 user["awg_schema"] = PROFILE_SCHEMA
                 changed = True
-            continue
+            try:
+                _validate_user(user)
+                continue
+            except RuntimeError:
+                # A damaged or manually modified backup must not reach the
+                # generated systemd unit or firewall script. Replace only the
+                # affected AWG credentials and keep the client record itself.
+                pass
         fresh = new_user(user["protocol"], users, user["id"])
         for key in list(user):
             if key.startswith("awg_") or key in ("secret", "public_key", "preshared_key",
@@ -255,6 +258,10 @@ def _validate_user(user):
                 "address", "server_address", "awg_network", "awg_interface", "awg_parameters"):
         if not user.get(key):
             raise RuntimeError("AWG profile is incomplete: " + key)
+    key_pattern = re.compile(r"[A-Za-z0-9+/]{43}=")
+    for key in ("secret", "public_key", "preshared_key", "server_private_key", "server_public_key"):
+        if not key_pattern.fullmatch(str(user[key])):
+            raise RuntimeError("Invalid AWG key: " + key)
     if user["awg_interface"] != _interface(user["id"]):
         raise RuntimeError("Invalid AWG interface name")
     if user.get("awg_schema") != PROFILE_SCHEMA:
@@ -263,6 +270,24 @@ def _validate_user(user):
     if not PORT_FIRST <= port <= PORT_LAST:
         raise RuntimeError("Invalid AWG UDP port")
     parameters = user["awg_parameters"]
+    if not isinstance(parameters, dict) or any(
+            not isinstance(key, str) or not isinstance(value, (str, int)) or
+            len(str(value)) > 160 or "\n" in str(value) or "\r" in str(value)
+            for key, value in parameters.items()):
+        raise RuntimeError("Invalid AWG obfuscation parameters")
+    try:
+        network = ipaddress.ip_network(str(user["awg_network"]), strict=True)
+        server = ipaddress.ip_interface(str(user["server_address"]))
+        client = ipaddress.ip_interface(str(user["address"]))
+        pool = ipaddress.ip_network("10.80.0.0/14")
+        if network.version != 4 or network.prefixlen != 30 or not network.subnet_of(pool):
+            raise ValueError
+        if server.network != network or client.network.prefixlen != 32 or client.ip not in network:
+            raise ValueError
+        if server.ip != network.network_address + 1 or client.ip != network.network_address + 2:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise RuntimeError("Invalid AWG address allocation")
     try:
         if not 3 <= int(parameters["Jc"]) <= 6:
             raise ValueError
@@ -279,8 +304,10 @@ def _validate_user(user):
     if protocol == "awg31":
         if parameters.get("RandomTrailers") != "on" or parameters.get("DisableCookies") != "on":
             raise RuntimeError("Incomplete AWG 3.1 protection settings")
-        if not str(parameters.get("I1", "")).startswith("<r "):
+        if not re.fullmatch(r"<r (?:3[2-9]|[4-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-6])>", str(parameters.get("I1", ""))):
             raise RuntimeError("Invalid AWG 3.1 signature packet")
+        if not key_pattern.fullmatch(str(parameters.get("HeaderProtectionKey", ""))):
+            raise RuntimeError("Invalid AWG 3.1 header protection key")
 
 
 def service_for(user):
@@ -288,10 +315,6 @@ def service_for(user):
 
 
 def sync(users):
-    if not PROTOCOLS:
-        # Feature retired: installation cleanup stops/removes the units.  Do
-        # not erase old configuration files here; they are rollback data.
-        return
     os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
     selected = {u["id"]: u for u in users if u.get("protocol") in PROTOCOLS and u.get("enabled", True)}
     changed = set()
@@ -341,8 +364,6 @@ def client_config(user, endpoint, name="AWG"):
 
 
 def traffic(users):
-    if not PROTOCOLS:
-        return {}
     by_key = {u.get("public_key"): u.get("id") for u in users
               if u.get("protocol") in PROTOCOLS and u.get("public_key")}
     result = {}

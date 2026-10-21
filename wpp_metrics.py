@@ -17,6 +17,7 @@ PROC = Path('/proc')
 SERVICES = {'xray': 'web-panel-proxy-xray.service', 'panel': 'tproxy-panel.service',
             'caddy': 'caddy.service', 'relay': 'tproxy-server.service'}
 OPENFLUX_PROFILES = Path('/etc/web-proxy-panel/openflux/profiles')
+MTPROXY_ECONOMY = Path('/etc/web-proxy-panel/mtproxy-economy')
 
 
 def read_state(path=None):
@@ -52,18 +53,35 @@ def proc_text(name):
         return ''
 
 
-def _service_fields(unit):
-    run = subprocess.run(['systemctl', 'show', unit, '--no-pager',
-        '-p', 'ActiveState', '-p', 'MemoryCurrent', '-p', 'TasksCurrent',
-        '-p', 'ExecMainStartTimestampMonotonic'], capture_output=True, text=True, timeout=3,
+def _service_fields_many(units):
+    """Read every service in one systemctl process instead of one fork per unit."""
+    units = list(dict.fromkeys(str(unit) for unit in units if unit))
+    if not units:
+        return {}
+    run = subprocess.run([
+        'systemctl', 'show', '--no-pager', '-p', 'Id', '-p', 'ActiveState',
+        '-p', 'MemoryCurrent', '-p', 'TasksCurrent',
+        '-p', 'ExecMainStartTimestampMonotonic', *units,
+    ], capture_output=True, text=True, timeout=5,
         env={**os.environ, 'LC_ALL':'C', 'SYSTEMD_COLORS':'0'})
-    fields = dict(line.split('=', 1) for line in run.stdout.splitlines() if '=' in line)
-    numeric = lambda key: int(fields[key]) if fields.get(key, '').isdigit() and int(fields[key]) < 2**63 else None
-    return {'state': fields.get('ActiveState', 'unknown'), 'memory': numeric('MemoryCurrent'),
-            'tasks': numeric('TasksCurrent'), 'start_us': numeric('ExecMainStartTimestampMonotonic')}
+    result = {}
+    for block in re.split(r'\n\s*\n', run.stdout.strip()):
+        fields = dict(line.split('=', 1) for line in block.splitlines() if '=' in line)
+        unit = fields.get('Id', '')
+        if not unit:
+            continue
+        def numeric(key):
+            value = fields.get(key, '')
+            return int(value) if value.isdigit() and int(value) < 2**63 else None
+        result[unit] = {
+            'state': fields.get('ActiveState', 'unknown'),
+            'memory': numeric('MemoryCurrent'), 'tasks': numeric('TasksCurrent'),
+            'start_us': numeric('ExecMainStartTimestampMonotonic'),
+        }
+    return result
 
 
-def _openflux_snapshot():
+def _openflux_units():
     units = ['web-panel-proxy-openflux.service']
     try:
         profile_ids = sorted(entry.name for entry in OPENFLUX_PROFILES.iterdir()
@@ -71,7 +89,11 @@ def _openflux_snapshot():
     except OSError:
         profile_ids = []
     units.extend('web-panel-proxy-openflux-' + profile_id + '.service' for profile_id in profile_ids)
-    states = [_service_fields(unit) for unit in units]
+    return units
+
+
+def _openflux_snapshot(units, fields):
+    states = [fields.get(unit, {'state': 'unknown'}) for unit in units]
     active = [value for value in states if value.get('state') == 'active']
     selected = active or states
     numbers = lambda key: [value[key] for value in selected if value.get(key) is not None]
@@ -86,15 +108,17 @@ def _openflux_snapshot():
 
 
 def service_snapshot():
-    result = {}
-    for name, unit in SERVICES.items():
-        try:
-            result[name] = _service_fields(unit)
-        except (OSError, subprocess.TimeoutExpired, ValueError):
-            result[name] = {'state': 'unknown'}
+    openflux_units = _openflux_units()
     try:
-        result['openflux'] = _openflux_snapshot()
+        fields = _service_fields_many([*SERVICES.values(), *openflux_units])
     except (OSError, subprocess.TimeoutExpired, ValueError):
+        fields = {}
+    result = {name: fields.get(unit, {'state': 'unknown'}) for name, unit in SERVICES.items()}
+    if MTPROXY_ECONOMY.exists() and result.get('relay', {}).get('state') != 'active':
+        result['relay'] = {**result.get('relay', {}), 'state': 'economy'}
+    try:
+        result['openflux'] = _openflux_snapshot(openflux_units, fields)
+    except (OSError, ValueError):
         result['openflux'] = {'state': 'unknown'}
     return result
 
@@ -107,13 +131,24 @@ def make_sample(traffic, previous, now=None):
         if len(parts) > 1 and parts[1].isdigit(): mem[parts[0].rstrip(':')] = int(parts[1]) * 1024
     cpu = proc_text('stat').splitlines()
     raw = [int(x) for x in cpu[0].split()[1:9]] if cpu and cpu[0].startswith('cpu ') else []
-    total = sum(raw) if raw else 0
+    elapsed_total = sum(raw) if raw else 0
+    steal = raw[7] if len(raw) > 7 else 0
+    # Linux accounts time taken by the host hypervisor as ``steal``. It is
+    # useful diagnostics, but it is not work performed by this VPS. Keep it
+    # out of the main CPU gauge and expose it separately.
+    total = elapsed_total - steal
     idle = sum(raw[3:5]) if raw else 0  # idle + iowait, excluding guest double-counting
     before = previous.get('cpu_ticks', [0, 0])
     delta = total - before[0]
     boot = proc_text('sys/kernel/random/boot_id')
-    same_boot = bool(boot) and boot == previous.get('boot_id')
+    same_boot = (bool(boot) and boot == previous.get('boot_id')
+                 and previous.get('cpu_ticks_version') == 2)
     percent = max(0, min(100, 100 * (1 - (idle - before[1]) / delta))) if same_boot and delta > 0 else None
+    elapsed_before = int(previous.get('cpu_elapsed_ticks', 0) or 0)
+    steal_before = int(previous.get('cpu_steal_ticks', 0) or 0)
+    elapsed_delta = elapsed_total - elapsed_before
+    steal_percent = (max(0, min(100, 100 * (steal - steal_before) / elapsed_delta))
+                     if same_boot and elapsed_delta > 0 else None)
     up = sum(max(0, int(v.get('up', 0))) for v in traffic.values() if isinstance(v, dict))
     down = sum(max(0, int(v.get('down', 0))) for v in traffic.values() if isinstance(v, dict))
     dt = now - previous.get('time', now)
@@ -130,7 +165,17 @@ def make_sample(traffic, previous, now=None):
     except (ValueError, IndexError): uptime = None
     try: load = [float(x) for x in proc_text('loadavg').split()[:3]]
     except ValueError: load = []
-    return {'time': now, 'boot_id': boot, 'cpu_ticks': [total, idle], 'cpu': percent,
+    service_checked = int(previous.get('services_checked', 0) or 0)
+    services = previous.get('services') if isinstance(previous.get('services'), dict) else None
+    # Service state changes slowly during normal operation. Reusing the last
+    # snapshot avoids spawning systemctl on every metrics tick while keeping
+    # the dashboard state reasonably fresh.
+    if services is None or not (0 <= now - service_checked < 180):
+        services = service_snapshot()
+        service_checked = now
+    return {'time': now, 'boot_id': boot, 'cpu_ticks': [total, idle], 'cpu_ticks_version': 2,
+            'cpu_elapsed_ticks': elapsed_total, 'cpu_steal_ticks': steal,
+            'cpu': percent, 'cpu_steal': steal_percent,
             'cores': os.cpu_count() or 1, 'ram_total': mem.get('MemTotal'),
             'ram_used': max(0, mem['MemTotal'] - mem.get('MemAvailable', mem.get('MemFree', 0))) if 'MemTotal' in mem else None,
             'swap_total': mem.get('SwapTotal'), 'swap_used': max(0, mem.get('SwapTotal', 0) - mem.get('SwapFree', 0)),
@@ -139,7 +184,7 @@ def make_sample(traffic, previous, now=None):
             'traffic_time': observed, 'traffic_fresh': traffic_fresh,
             'up_rate': (up - previous['up']) / traffic_dt if rates_valid else None,
             'down_rate': (down - previous['down']) / traffic_dt if rates_valid else None,
-            'services': service_snapshot()}
+            'services': services, 'services_checked': service_checked}
 
 
 def sample_metrics(traffic, force=False):
@@ -159,8 +204,14 @@ def sample_metrics(traffic, force=False):
             time.sleep(0.15)
             raw = proc_text('stat').splitlines()
             values = [int(x) for x in raw[0].split()[1:9]] if raw and raw[0].startswith('cpu ') else []
-            delta = sum(values)-ticks[0]
+            elapsed_total=sum(values)
+            steal=values[7] if len(values)>7 else 0
+            total=elapsed_total-steal
+            delta=total-ticks[0]
+            elapsed_delta=elapsed_total-point.get('cpu_elapsed_ticks',elapsed_total)
             if delta > 0: point['cpu'] = max(0,min(100,100*(1-(sum(values[3:5])-ticks[1])/delta)))
+            if elapsed_delta > 0:
+                point['cpu_steal']=max(0,min(100,100*(steal-point.get('cpu_steal_ticks',steal))/elapsed_delta))
         history = [h for h in data.get('history', []) if now - 86400 <= h.get('time', 0) < now]
         history.append({k: point[k] for k in ('time', 'up_rate', 'down_rate', 'cpu')})
         # One-minute sampling keeps a full day plus one point without growing

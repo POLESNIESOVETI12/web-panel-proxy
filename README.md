@@ -2,7 +2,7 @@
   <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
 </p>
 
-<h1 align="center">WEB PANEL PROXY 2.5.4</h1>
+<h1 align="center">WEB PANEL PROXY 2.6.0</h1>
 
 <p align="center">WEB Proxy, MTProto, VLESS XHTTP, Hysteria2, OpenFlux и аккуратная панель управления для собственного VPS</p>
 
@@ -10,6 +10,7 @@
 
 - Подписки и отдельные подключения с QR-кодами и готовыми конфигурациями.
 - VLESS XHTTP и Hysteria2, включая прямые и CDN-подключения VLESS.
+- Отдельные профили AmneziaWG 2.0 и 3.1 с QR-кодом и файлом `.conf`.
 - Отдельные профили MTProto, Telegram Web Proxy и OpenFlux через Яндекс, Mail.ru или MAX для iOS и Android.
 - Управление пользователями, ограничениями устройств, трафиком и состоянием служб.
 - Объединение нескольких VPS в одну подписку через Node API token.
@@ -18,19 +19,13 @@
 - Проверка обновлений и безопасное обновление с временным автоматическим откатом.
 - Ручной экспорт и импорт полной резервной копии настроек через браузер без накопления архивов на VPS.
 
-## Релиз 2.5.4
-
-- Исправлено восстановление резервной копии со старым XHTTP-путём.
-- После импорта Caddy автоматически получает те же пути, которые используют Xray и клиентские ссылки.
-- Новая конфигурация Caddy проверяется до применения; при ошибке восстановление отменяется безопасно.
-
 ## Требования
 
 - Чистый VPS с Ubuntu 22.04+, Ubuntu 24.04+ или Debian 12+.
 - [Аренда VPS](https://play2go.cloud/?ref_id=m1o4quWG0sE)
 - Архитектура `x86_64` и доступ пользователя `root`.
 - Домен или поддомен с A-записью на публичный IPv4 сервера.
-- Свободные и открытые `80/tcp` и `443/tcp`.
+- Свободный и открытый `443/tcp`. Порт `80/tcp` панель не занимает.
 
 Перед установкой убедитесь, что домен уже указывает на сервер. Дополнительные порты выбранных подключений панель покажет автоматически; их также нужно открыть во внешнем firewall личного кабинета VPS-провайдера.
 
@@ -45,15 +40,15 @@ sudo -i
 ### Установка
 
 ```bash
-sudo -i bash -c 'curl -4fsSL "https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.5.4/install.sh" -o /tmp/wpp-install.sh && bash /tmp/wpp-install.sh; code=$?; rm -f /tmp/wpp-install.sh; exit $code'
+sudo -i bash -c 'curl -4fsSL "https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.6.0/install.sh" -o /tmp/wpp-install.sh && bash /tmp/wpp-install.sh; code=$?; rm -f /tmp/wpp-install.sh; exit $code'
 ```
 
-Команда доступна после публикации тега `v2.5.4` в GitHub. Установщик запросит домен, email для HTTPS-сертификата, логин и пароль панели. После установки он покажет адрес панели и данные для входа.
+Команда доступна после публикации тега `v2.6.0` в GitHub. Установщик запросит домен, email для HTTPS-сертификата, логин и пароль панели. После установки он покажет адрес панели и данные для входа.
 
 Локальная установка из ZIP:
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=600 install -y unzip && rm -rf /root/wpp-254-release && mkdir -p /root/wpp-254-release && unzip -q /root/WEB-PANEL-PROXY-V-2.5.4-GITHUB.zip -d /root/wpp-254-release && cd /root/wpp-254-release && chmod +x ./*.sh && bash ./install-final.sh
+apt-get -o DPkg::Lock::Timeout=600 install -y unzip && rm -rf /root/wpp-260-release && mkdir -p /root/wpp-260-release && unzip -q /root/WEB-PANEL-PROXY-V-2.6.0-GITHUB.zip -d /root/wpp-260-release && cd /root/wpp-260-release && chmod +x ./*.sh && bash ./install-final.sh
 ```
 
 ### После установки
@@ -83,12 +78,11 @@ apt-get -o DPkg::Lock::Timeout=600 install -y unzip && rm -rf /root/wpp-254-rele
 
 | Назначение | Порт |
 |---|---:|
-| HTTP, выпуск сертификата и перенаправление на HTTPS | `80/tcp` |
-| HTTPS, панель и защищённые подключения | `443/tcp` |
+| HTTPS, панель, защищённые подключения и продление сертификата | `443/tcp` |
 | Hysteria2 по умолчанию | `8443/udp` |
 | MTProto | выбранный порт, обычно `2399–2430/tcp` |
 
-Caddy постоянно использует `80/tcp` и `443/tcp`. Не запускайте на этих портах другой веб-сервер. Если используется UFW, панель добавит свои правила, но firewall у VPS-провайдера необходимо настроить отдельно.
+Caddy использует `443/tcp`; сертификат выпускается и продлевается через TLS-ALPN без постоянного HTTP-слушателя. Порт `80/tcp` остаётся свободным. Если используется UFW, панель добавит свои правила, но firewall у VPS-провайдера необходимо настроить отдельно.
 
 ## Проверка состояния
 

@@ -25,7 +25,7 @@ ROOTS = {
 }
 PANEL_FILES = {
     "api.key", "custom-presets.json", "data.json", "location.json",
-    "nodes.json", "site-draft.html", "site-source.html",
+    "nodes.json", "routing.json", "site-draft.html", "site-source.html",
 }
 CONFIG_FILES = {"connections.json", "mtproxy-secrets", "primary-secret",
                 "users.json", "xray-path"}

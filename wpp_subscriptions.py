@@ -126,7 +126,7 @@ def mutate(data, request):
         specs=connection_specs(request.get('connections'),request.get('protocols'))
         sub = {'id': secrets.token_hex(8), 'token': secrets.token_hex(32),
                'name': clean_name(request.get('name', '')), 'enabled': True,
-               'max_devices': limits(request.get('max_devices', 1)),
+               'max_devices': limits(request.get('max_devices', 0)),
                'connections':specs,
                'protocols':list(dict.fromkeys(item['protocol'] for item in specs)), 'devices': [],
                'created_at': int(time.time())}

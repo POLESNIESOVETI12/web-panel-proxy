@@ -1,7 +1,7 @@
 """Strict validation and routing helpers for per-profile VLESS XHTTP CDN."""
 import re
 
-PROVIDERS = {"yandex", "vk", "beget", "selectel", "custom"}
+PROVIDERS = {"yandex", "vk", "beget", "selectel", "timeweb", "custom"}
 MODES = {"packet-up", "stream-up", "auto"}
 UPLINK_METHODS = {"post", "get", "delete"}
 FINGERPRINTS = {"chrome", "firefox", "safari", "edge", "random", "randomized"}
@@ -22,9 +22,24 @@ def defaults():
         "sni": "",
         "host_header": "",
         "mode": "packet-up",
-        "uplink_method": "post",
+        "uplink_method": "get",
         "fingerprint": "chrome",
     }
+
+
+def transport_defaults(provider):
+    """Return the tested transport for a managed CDN provider.
+
+    Selectel forwards a normal POST body and can therefore use XHTTP's
+    streaming uplink.  The other managed profiles are retrieval-only at the
+    edge and must keep packet-up over GET.  Keeping this decision in one place
+    prevents saved connections, generated links and server inbounds from
+    silently drifting apart.
+    """
+    provider = str(provider or "custom").strip().lower()
+    if provider == "selectel":
+        return {"mode": "stream-up", "uplink_method": "post"}
+    return {"mode": "packet-up", "uplink_method": "get"}
 
 
 def valid_path_root(value):
@@ -39,7 +54,7 @@ def endpoint_path(root, variant="direct"):
     if not valid_path_root(root):
         raise CDNError("Некорректный локальный путь XHTTP.")
     variant = str(variant or "direct")
-    if variant not in {"direct", "cdn", "vk", "beget", "selectel"}:
+    if variant not in {"direct", "cdn", "vk", "beget", "selectel", "timeweb"}:
         raise CDNError("Неизвестный вариант пути XHTTP.")
     if LEGACY_PATH_RE.fullmatch(root):
         suffixes = {
@@ -48,6 +63,7 @@ def endpoint_path(root, variant="direct"):
             "vk": "-vk/media/hls/playlist.m3u8",
             "beget": "-beget/segment0.ts",
             "selectel": "-selectel/upload.m3u8",
+            "timeweb": "-timeweb/api/v2/sync/stream",
         }
     else:
         suffixes = {
@@ -56,6 +72,7 @@ def endpoint_path(root, variant="direct"):
             "vk": "/media/hls/playlist.m3u8",
             "beget": "/segment0.ts",
             "selectel": "/upload.m3u8",
+            "timeweb": "/api/v2/sync/stream",
         }
     return root + suffixes[variant]
 
@@ -70,6 +87,7 @@ def rewrite_caddy_xhttp_routes(source, root):
         "web_panel_vless_beget": "beget",
         "web_panel_vless_vk": "vk",
         "web_panel_vless_selectel": "selectel",
+        "web_panel_vless_timeweb": "timeweb",
     }
     updated = source
     for matcher, variant in routes.items():
@@ -104,16 +122,20 @@ def normalize(value):
     if result["provider"] not in PROVIDERS:
         raise CDNError("Неизвестный CDN-провайдер.")
     result["public_host"] = _host(source.get("public_host"), "Публичный домен CDN", result["enabled"])
+    if result["provider"] == "custom" and result["public_host"].endswith(".cdn.twcstorage.ru"):
+        result["provider"] = "timeweb"
     result["sni"] = _host(source.get("sni"), "TLS SNI") or result["public_host"]
     result["host_header"] = _host(source.get("host_header"), "HTTP Host") or result["public_host"]
-    result["mode"] = str(source.get("mode", "packet-up")).strip().lower()
+    preferred = transport_defaults(result["provider"])
+    result["mode"] = str(source.get("mode", preferred["mode"])).strip().lower()
     if result["mode"] not in MODES:
         raise CDNError("Неизвестный режим XHTTP.")
-    result["uplink_method"] = str(source.get("uplink_method", "post")).strip().lower()
+    result["uplink_method"] = str(source.get("uplink_method", preferred["uplink_method"])).strip().lower()
     if result["uplink_method"] not in UPLINK_METHODS:
         raise CDNError("Неизвестный HTTP-метод XHTTP.")
-    if result["uplink_method"] in {"get", "delete"}:
-        result["mode"] = "packet-up"
+    # Managed presets are intentionally automatic.  This also migrates old
+    # Selectel DELETE/packet-up profiles to the tested POST/stream-up pair.
+    result.update(preferred)
     result["fingerprint"] = str(source.get("fingerprint", "chrome")).strip().lower()
     if result["fingerprint"] not in FINGERPRINTS:
         raise CDNError("Неизвестный TLS fingerprint.")
@@ -121,12 +143,35 @@ def normalize(value):
 
 
 def _get_only_extra():
+    """Yandex CDN profile with the XHTTP uplink carried in HTTP headers.
+
+    Keep this object shared by the server inbound and generated client links:
+    XHTTP requires the placement/key/session fields to match at both ends.
+    """
     return {
         "mode": "packet-up",
+        "seqKey": "page",
+        "xPaddingKey": "_rupl",
+        "seqPlacement": "query",
+        "sessionIDKey": "X-Auth-Token",
+        "sessionIDTable": "base36",
+        "xPaddingHeader": "X-Cache",
+        "xPaddingMethod": "tokenish",
+        "sessionIDLength": "8-12",
+        # Header placement base64-encodes the entire packet.  Keep the whole
+        # request comfortably below common 16 KiB CDN header limits; the
+        # chunk range only controls how that payload is split across fields.
+        "uplinkChunkSize": "3000-4000",
         "uplinkHTTPMethod": "GET",
+        "xPaddingObfsMode": True,
+        "xPaddingPlacement": "queryInHeader",
+        "scMaxEachPostBytes": 8192,
+        "scMaxBufferedPosts": 64,
+        "sessionIDPlacement": "header",
         "uplinkDataPlacement": "header",
         "uplinkDataKey": "X-Data",
-        "uplinkChunkSize": 2048,
+        "serverMaxHeaderBytes": 32768,
+        "xPaddingBytes": "100-1000",
     }
 
 
@@ -140,7 +185,11 @@ def _vk_extra():
         "sessionIDKey": "session",
         "seqPlacement": "query",
         "seqKey": "part",
+        # Conservative values tested with GET-only CDN edges: large enough
+        # for useful upload, but below the buffering/rate-limit threshold
+        # seen with half-megabyte GET bodies.
         "scMaxEachPostBytes": "100000-300000",
+        "scMaxBufferedPosts": 64,
         "scMinPostsIntervalMs": "20-45",
         "xPaddingBytes": "550-1450",
         "xPaddingObfsMode": True,
@@ -160,7 +209,9 @@ def _beget_extra():
         "xPaddingHeader": "X-Client-Version",
         "xPaddingPlacement": "query",
         "xPaddingMethod": "tokenish",
-        "sessionIDPlacement": "path",
+        # A session in the path turns segment0.ts into a directory-like URL.
+        # Several Beget edges reject that form before it reaches Caddy.
+        "sessionIDPlacement": "query",
         "sessionIDKey": "sid",
         "sessionIDTable": "kdleowms............",
         "sessionIDLength": "16-24",
@@ -168,14 +219,14 @@ def _beget_extra():
         "seqKey": "offset",
         "uplinkDataPlacement": "body",
         "uplinkDataKey": "",
-        "scMaxEachPostBytes": "500000-1000000",
+        "scMaxEachPostBytes": "131072-262144",
         "noSSEHeader": False,
-        "scMaxBufferedPosts": 50,
+        "scMaxBufferedPosts": 64,
         "scStreamUpServerSecs": "20-80",
         "serverMaxHeaderBytes": 0,
         "uplinkHTTPMethod": "GET",
         "headers": {},
-        "scMinPostsIntervalMs": "50-150",
+        "scMinPostsIntervalMs": "20-40",
         "uplinkChunkSize": 0,
         "noGRPCHeader": False,
         "xmux": {
@@ -194,28 +245,23 @@ def _beget_extra():
 
 
 def _selectel_extra():
-    """XHTTP profile for Selectel CDN with DELETE forwarding enabled."""
+    """Fast XHTTP profile for Selectel CDN using a streamed POST body."""
     return {
-        "mode": "packet-up",
+        "mode": "stream-up",
         "xPaddingBytes": "80-240",
         "xPaddingObfsMode": True,
         "xPaddingKey": "q",
         "xPaddingHeader": "X-Client-Version",
         "xPaddingPlacement": "query",
         "xPaddingMethod": "tokenish",
-        "sessionPlacement": "header",
-        "sessionKey": "X-Upload-Token",
         "seqPlacement": "query",
         "seqKey": "page",
         "noSSEHeader": False,
-        "scMaxBufferedPosts": 30,
         "scStreamUpServerSecs": "20-80",
         "serverMaxHeaderBytes": 0,
-        "uplinkHTTPMethod": "DELETE",
-        "uplinkChunkSize": 0,
+        "uplinkHTTPMethod": "POST",
         "noGRPCHeader": False,
         "enableXmux": True,
-        "uplinkDataPlacement": "body",
         "xmux": {
             "maxConcurrency": "16-32",
             "maxConnections": 0,
@@ -229,6 +275,49 @@ def _selectel_extra():
     }
 
 
+def _timeweb_extra():
+    """Packet-up profile tuned for Timeweb's GET-capable CDN edge."""
+    return {
+        "mode": "packet-up",
+        "uplinkHTTPMethod": "GET",
+        "uplinkDataPlacement": "body",
+        "sessionIDPlacement": "query",
+        "sessionIDKey": "session",
+        "seqPlacement": "query",
+        "seqKey": "part",
+        "scMaxEachPostBytes": "400000-800000",
+        "scMaxBufferedPosts": 48,
+        "scMinPostsIntervalMs": "50-100",
+        "xPaddingBytes": "550-1450",
+        "xPaddingObfsMode": True,
+        "xPaddingHeader": "X-Request-ID",
+        "xPaddingPlacement": "header",
+        "xPaddingMethod": "tokenish",
+        "xmux": {
+            "maxConcurrency": "4-8",
+            "maxConnections": 0,
+            "cMaxReuseTimes": 0,
+            "hMaxRequestTimes": "600-900",
+            "hMaxReusableSecs": "1800-3000",
+            "hKeepAlivePeriod": 0,
+        },
+        "enableXmux": True,
+    }
+
+
+def _selectel_server_extra():
+    """Accept new stream-up links and cached legacy packet-up links.
+
+    The client still receives the fast POST/stream-up preset.  Keeping the
+    inbound in auto mode avoids an outage between the panel update and the
+    next subscription refresh on end-user devices.
+    """
+    result = _selectel_extra()
+    result["mode"] = "auto"
+    result.pop("uplinkHTTPMethod", None)
+    return result
+
+
 def server_xhttp(path, preset="direct"):
     result = {"path": path, "mode": "auto"}
     if preset is True or preset == "get":
@@ -238,7 +327,9 @@ def server_xhttp(path, preset="direct"):
     elif preset == "beget":
         result.update(_beget_extra())
     elif preset == "selectel":
-        result.update(_selectel_extra())
+        result.update(_selectel_server_extra())
+    elif preset == "timeweb":
+        result.update(_timeweb_extra())
     return result
 
 
@@ -251,7 +342,7 @@ def profile_from_request(request):
     if route != "cdn":
         raise CDNError("Неизвестный маршрут VLESS.")
     provider = str(source.get("vless_cdn_provider", "yandex")).strip().lower()
-    default_method = "delete" if provider == "selectel" else "get"
+    default_method = transport_defaults(provider)["uplink_method"]
     return normalize({
         "enabled": True,
         "provider": provider,
@@ -284,14 +375,15 @@ def vless_route(origin_domain, profile=None):
     beget = value["provider"] == "beget"
     selectel = value["provider"] == "selectel"
     vk = value["provider"] == "vk"
+    timeweb = value["provider"] == "timeweb"
     return {
         "enabled": True,
         "address": value["public_host"],
         "sni": value["sni"],
         "host": value["host_header"],
         "mode": value["mode"],
-        "extra": _beget_extra() if beget else (_selectel_extra() if selectel else (_vk_extra() if vk else (_get_only_extra() if value["uplink_method"] == "get" else None))),
+        "extra": _beget_extra() if beget else (_selectel_extra() if selectel else (_vk_extra() if vk else (_timeweb_extra() if timeweb else (_get_only_extra() if value["uplink_method"] == "get" else None)))),
         "fingerprint": value["fingerprint"],
-        "path_suffix": "-beget/segment0.ts" if beget else ("-selectel/upload.m3u8" if selectel else ("-vk/media/hls/playlist.m3u8" if vk else "-cdn")),
-        "path_variant": "beget" if beget else ("selectel" if selectel else ("vk" if vk else "cdn")),
+        "path_suffix": "-beget/segment0.ts" if beget else ("-selectel/upload.m3u8" if selectel else ("-vk/media/hls/playlist.m3u8" if vk else ("-timeweb/api/v2/sync/stream" if timeweb else "-cdn"))),
+        "path_variant": "beget" if beget else ("selectel" if selectel else ("vk" if vk else ("timeweb" if timeweb else "cdn"))),
     }
