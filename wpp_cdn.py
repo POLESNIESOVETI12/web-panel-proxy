@@ -30,15 +30,14 @@ def defaults():
 def transport_defaults(provider):
     """Return the tested transport for a managed CDN provider.
 
-    Selectel forwards a normal POST body and can therefore use XHTTP's
-    streaming uplink.  The other managed profiles are retrieval-only at the
-    edge and must keep packet-up over GET.  Keeping this decision in one place
-    prevents saved connections, generated links and server inbounds from
-    silently drifting apart.
+    Selectel accepts POST bodies, but its edge buffers long-lived stream-up
+    requests.  Use bounded packet-up POST requests so upload completes instead
+    of stalling after the HTTP/2 tunnel is established.  The other managed
+    profiles are retrieval-only at the edge and keep packet-up over GET.
     """
     provider = str(provider or "custom").strip().lower()
     if provider == "selectel":
-        return {"mode": "stream-up", "uplink_method": "post"}
+        return {"mode": "packet-up", "uplink_method": "post"}
     return {"mode": "packet-up", "uplink_method": "get"}
 
 
@@ -122,7 +121,12 @@ def normalize(value):
     if result["provider"] not in PROVIDERS:
         raise CDNError("Неизвестный CDN-провайдер.")
     result["public_host"] = _host(source.get("public_host"), "Публичный домен CDN", result["enabled"])
-    if result["provider"] == "custom" and result["public_host"].endswith(".cdn.twcstorage.ru"):
+    # Provider-specific paths and XHTTP framing must never be mixed.  Detect
+    # unmistakable managed CDN hostnames even if an older form saved the
+    # connection as the generic/Yandex profile.
+    if result["public_host"].endswith(".selcdn.net"):
+        result["provider"] = "selectel"
+    elif result["provider"] == "custom" and result["public_host"].endswith(".cdn.twcstorage.ru"):
         result["provider"] = "timeweb"
     result["sni"] = _host(source.get("sni"), "TLS SNI") or result["public_host"]
     result["host_header"] = _host(source.get("host_header"), "HTTP Host") or result["public_host"]
@@ -134,7 +138,7 @@ def normalize(value):
     if result["uplink_method"] not in UPLINK_METHODS:
         raise CDNError("Неизвестный HTTP-метод XHTTP.")
     # Managed presets are intentionally automatic.  This also migrates old
-    # Selectel DELETE/packet-up profiles to the tested POST/stream-up pair.
+    # Selectel DELETE and stream-up profiles to the tested POST/packet-up pair.
     result.update(preferred)
     result["fingerprint"] = str(source.get("fingerprint", "chrome")).strip().lower()
     if result["fingerprint"] not in FINGERPRINTS:
@@ -245,9 +249,9 @@ def _beget_extra():
 
 
 def _selectel_extra():
-    """Fast XHTTP profile for Selectel CDN using a streamed POST body."""
+    """Reliable XHTTP profile for Selectel CDN using bounded POST bodies."""
     return {
-        "mode": "stream-up",
+        "mode": "packet-up",
         "xPaddingBytes": "80-240",
         "xPaddingObfsMode": True,
         "xPaddingKey": "q",
@@ -256,12 +260,11 @@ def _selectel_extra():
         "xPaddingMethod": "tokenish",
         "seqPlacement": "query",
         "seqKey": "page",
-        "noSSEHeader": False,
-        "scStreamUpServerSecs": "20-80",
-        "serverMaxHeaderBytes": 0,
         "uplinkHTTPMethod": "POST",
-        "noGRPCHeader": False,
-        "enableXmux": True,
+        "uplinkDataPlacement": "body",
+        "scMaxEachPostBytes": "100000-300000",
+        "scMaxBufferedPosts": 64,
+        "scMinPostsIntervalMs": "20-50",
         "xmux": {
             "maxConcurrency": "16-32",
             "maxConnections": 0,
@@ -306,9 +309,9 @@ def _timeweb_extra():
 
 
 def _selectel_server_extra():
-    """Accept new stream-up links and cached legacy packet-up links.
+    """Accept new packet-up links and cached legacy stream-up links.
 
-    The client still receives the fast POST/stream-up preset.  Keeping the
+    The client receives the reliable POST/packet-up preset.  Keeping the
     inbound in auto mode avoids an outage between the panel update and the
     next subscription refresh on end-user devices.
     """

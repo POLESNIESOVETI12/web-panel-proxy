@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Safe in-place updater for WEB PANEL PROXY V 2.6.0.
+# Safe in-place updater for WEB PANEL PROXY V 2.7.0.
 set -Eeuo pipefail
 umask 077
 
@@ -56,8 +56,8 @@ if [[ $# == 0 && -s "$SCRIPT_DIR/install-panel.sh" && -s "$SCRIPT_DIR/wpp_ui.py"
 fi
 if [[ "${1:-}" == "--local" || "$AUTO_LOCAL" == 1 ]]; then
     LOCAL_SOURCE="$SCRIPT_DIR"
-    RELEASE_REF="v2.6.0"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
+    RELEASE_REF="v2.7.0"
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
         [[ -s "$LOCAL_SOURCE/$file" ]] || { echo "Incomplete local archive: $file is missing." >&2; exit 1; }
     done
     [[ -s "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" || -s "$LOCAL_SOURCE/OpenFlux-linux-amd64" ]] || {
@@ -71,7 +71,7 @@ if [[ "${1:-}" == "--local" || "$AUTO_LOCAL" == 1 ]]; then
     [[ -s "$LOCAL_SOURCE/wpp-panel/flags.tar.gz" ]] || {
         echo "Incomplete local archive: wpp-panel/flags.tar.gz is missing." >&2; exit 1;
     }
-    for file in preset-cars.webp preset-car-graphite.webp preset-car-silver.webp preset-car-white.webp preset-car-blue.webp preset-car-red.webp preset-car-black.webp preset-coffee.webp; do
+    for file in preset-cars.webp preset-car-graphite.webp preset-car-silver.webp preset-car-white.webp preset-car-blue.webp preset-car-red.webp preset-car-black.webp preset-coffee.webp awg-routing-guide.mp4; do
         [[ -s "$LOCAL_SOURCE/assets/$file" ]] || {
             echo "Incomplete local archive: assets/$file is missing." >&2; exit 1;
         }
@@ -91,7 +91,7 @@ exec 9>/run/lock/web-panel-proxy.lock
 flock -n 9 || die "Another WEB PANEL PROXY install, update or removal is already running."
 
 echo "============================================================"
-echo "     WEB PANEL PROXY V 2.6.0 — SAFE UPDATE"
+echo "     WEB PANEL PROXY V 2.7.0 — SAFE UPDATE"
 echo "============================================================"
 echo "Users, administrator password, panel URL and site HTML will be retained."
 wpp_progress_start "Проверка установленной версии"
@@ -366,7 +366,7 @@ wpp_progress 25 "Получение файлов обновления"
 if [[ -n "$LOCAL_SOURCE" ]]; then
     install -d -m 0700 "$TEMP_DIR/source"
     install -d -m 0700 "$TEMP_DIR/source/assets"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
         cp -a "$LOCAL_SOURCE/$file" "$TEMP_DIR/source/$file"
     done
     if [[ -s "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" ]]; then
@@ -377,7 +377,7 @@ if [[ -n "$LOCAL_SOURCE" ]]; then
     for file in amneziawg-go-linux-amd64 awg-linux-amd64 awg-quick-linux-amd64; do
         cp -a "$LOCAL_SOURCE/assets/$file" "$TEMP_DIR/source/assets/$file"
     done
-    for file in preset-cars.webp preset-car-graphite.webp preset-car-silver.webp preset-car-white.webp preset-car-blue.webp preset-car-red.webp preset-car-black.webp preset-coffee.webp; do
+    for file in preset-cars.webp preset-car-graphite.webp preset-car-silver.webp preset-car-white.webp preset-car-blue.webp preset-car-red.webp preset-car-black.webp preset-coffee.webp awg-routing-guide.mp4; do
         cp -a "$LOCAL_SOURCE/assets/$file" "$TEMP_DIR/source/assets/$file"
     done
     install -d -m 0700 "$TEMP_DIR/source/wpp-panel"

@@ -10,6 +10,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+import base64
+import zlib
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -27,9 +29,10 @@ PROFILES_DIR = CONFIG_DIR / "profiles"
 VERSION = "1.0.0"
 MAX_OPENFLUX_PROFILES = 32
 TRANSPORT = "yandex"
-TRANSPORTS = {"yandex", "mailru", "oneme"}
+TRANSPORTS = {"yandex", "mailru", "telemost", "oneme"}
 CODEC = "batched"
 MODE = "l4"
+_LINK_CACHE = {}
 
 
 class OpenFluxError(RuntimeError):
@@ -44,7 +47,7 @@ def _codec_for(config):
 def _clean_transport(value):
     value = str(value or TRANSPORT).strip().lower()
     if value not in TRANSPORTS:
-        raise OpenFluxError("Выберите Яндекс Документы, Mail.ru Документы или MAX.")
+        raise OpenFluxError("Выберите Яндекс Документы, Яндекс Телемост, Mail.ru Документы или MAX.")
     return value
 
 
@@ -59,6 +62,59 @@ def _run(args, *, check=True, timeout=20):
     except (OSError, subprocess.SubprocessError) as exc:
         detail = getattr(exc, "stderr", "") or getattr(exc, "stdout", "") or str(exc)
         raise OpenFluxError(detail.strip()[-1200:] or "OpenFlux command failed") from exc
+
+
+def _share_payload(config):
+    """Return the official OpenFlux share.Config for document transports."""
+    transport = _transport_for(config)
+    if transport not in {"yandex", "mailru", "telemost"}:
+        return None
+    url = str(config.get("url") or "").strip()
+    if not url:
+        return None
+    payload = {
+        "name": str(config.get("name") or "OpenFlux"),
+        "transports": [{"type": transport, "url": url}],
+    }
+    ios = config.get("platform") == "ios" or bool(config.get("ios_compatible", False))
+    if not ios:
+        secret = str(config.get("key") or "")
+        if secret:
+            payload.update({"secret": secret, "context": url})
+    return payload
+
+
+def _python_share_link(payload):
+    """Compatibility fallback for an installed core predating --make-link."""
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    packed = zlib.compress(raw, 9)
+    return "openflux://v1/" + base64.urlsafe_b64encode(packed).decode("ascii").rstrip("=")
+
+
+def make_import_uri(config):
+    """Build the same openflux://v1 link consumed by the current iOS core."""
+    payload = _share_payload(config)
+    if payload is None:
+        return ""
+    cache_key = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    cached = _LINK_CACHE.get(cache_key)
+    if cached:
+        return cached
+    link = ""
+    try:
+        result = _run([str(BIN), "--make-link", json.dumps(payload, ensure_ascii=False)], timeout=12)
+        answer = json.loads(result.stdout)
+        candidate = str(answer.get("link") or "") if isinstance(answer, dict) else ""
+        if candidate.startswith("openflux://v1/"):
+            link = candidate
+    except (OpenFluxError, ValueError, TypeError):
+        pass
+    if not link:
+        link = _python_share_link(payload)
+    if len(_LINK_CACHE) >= 128:
+        _LINK_CACHE.clear()
+    _LINK_CACHE[cache_key] = link
+    return link
 
 
 def _atomic(path, value, mode, uid=0, gid=0):
@@ -84,7 +140,8 @@ def validate_document_url(value, transport=TRANSPORT):
     transport = _clean_transport(transport)
     value = str(value or "").strip()
     if not value or len(value) > 2048 or any(ord(char) < 32 for char in value):
-        raise OpenFluxError("Укажите корректную ссылку на документ Яндекса.")
+        label = "конференцию Телемоста" if transport == "telemost" else "публичный документ"
+        raise OpenFluxError(f"Укажите корректную ссылку на {label}.")
     try:
         parsed = urlsplit(value)
         port = parsed.port
@@ -94,6 +151,9 @@ def validate_document_url(value, transport=TRANSPORT):
     if transport == "mailru":
         allowed = host == "cloud.mail.ru" and bool(re.fullmatch(r"/public/[^/]+/[^/]+/?", parsed.path))
         provider = "Mail.ru"
+    elif transport == "telemost":
+        allowed = host == "telemost.yandex.ru" and parsed.path not in ("", "/")
+        provider = "Яндекс Телемоста"
     else:
         allowed = host in {"yandex.ru", "yandex.com"} or host.endswith(".yandex.ru") or host.endswith(".yandex.com")
         provider = "Яндекса"
@@ -573,6 +633,7 @@ def profile_states():
     if main["configured"]:
         main.update({"id": "main", "name": _load().get("name", "OpenFlux"),
                      "platform": "ios" if main["ios_compatible"] else "android"})
+        main["import_uri"] = make_import_uri({**_load(), **main})
         result.append(main)
     configs = _extra_configs()
     activity = _extra_activity(configs)
@@ -585,7 +646,7 @@ def profile_states():
             created_at = int(config.get("created_at", 0) or 0)
         except (TypeError, ValueError):
             created_at = 0
-        result.append({
+        item = {
             "id": config["id"], "name": config.get("name", "OpenFlux"),
             "platform": config.get("platform", "android"), "url": config.get("url", ""),
             "key": config.get("key", ""), "configured": True,
@@ -593,9 +654,12 @@ def profile_states():
             "encrypted": config.get("platform") != "ios", "transport": _transport_for(config),
             "codec": _codec_for(config), "version": VERSION,
             "max_client_token": config.get("max_client_token", ""),
+            "has_max_server_token": bool(config.get("max_server_token")),
             "max_uid": max_uid,
             "created_at": created_at,
-        })
+        }
+        item["import_uri"] = make_import_uri(config)
+        result.append(item)
     return result
 
 
@@ -627,7 +691,8 @@ def create_profile(name, document_url, platform, transport=TRANSPORT,
         existing_urls = {item.get("url") for item in _extra_configs()}
         existing_urls.add(_load().get("url"))
         if document_url in existing_urls:
-            raise OpenFluxError("Этот документ уже используется другим профилем OpenFlux.")
+            item_name = "Эта конференция" if transport == "telemost" else "Этот документ"
+            raise OpenFluxError(f"{item_name} уже используется другим профилем OpenFlux.")
     config = {"id": profile_id, "name": _clean_profile_name(name),
               "url": document_url, "platform": platform,
               "key": secrets.token_urlsafe(32), "enabled": True, "transport": transport,
@@ -674,6 +739,103 @@ def profile_set_enabled(profile_id, enabled):
             raise
     else:
         _run(["systemctl", "stop", _extra_service(config["id"])], check=False)
+
+
+def profile_update(profile_id, name, document_url, platform, transport=TRANSPORT,
+                   max_server_token="", max_client_token="", max_uid=""):
+    """Update an existing profile in place and restore it on startup failure."""
+    name = _clean_profile_name(name)
+    platform = _clean_platform(platform)
+    transport = _clean_transport(transport)
+    if profile_id == "main":
+        if transport == "oneme":
+            raise OpenFluxError("Для основного профиля MAX недоступен. Создайте отдельный профиль OpenFlux.")
+        document_url = validate_document_url(document_url, transport)
+        previous = _load()
+        if not previous.get("url") or not previous.get("key"):
+            raise OpenFluxError("Профиль OpenFlux не найден.")
+        config = dict(previous)
+        config.update({"name": name, "url": document_url, "transport": transport,
+                       "ios_compatible": platform == "ios", "enabled": bool(previous.get("enabled", True)),
+                       "codec": CODEC, "mode": MODE, "version": VERSION,
+                       "updated_at": int(time.time())})
+        _write_private_files(config)
+        try:
+            install_service()
+            if config["enabled"]:
+                _start()
+            else:
+                _run(["systemctl", "stop", SERVICE], check=False)
+        except Exception:
+            _write_private_files(previous)
+            try:
+                install_service()
+                if previous.get("enabled", True):
+                    _start()
+            except Exception:
+                pass
+            raise
+        return config
+
+    profile_id = _extra_id(profile_id)
+    current = next((item for item in _extra_configs() if item["id"] == profile_id), None)
+    if current is None:
+        raise OpenFluxError("Профиль OpenFlux не найден.")
+    previous = dict(current)
+    config = dict(current)
+    config.update({"name": name, "platform": platform, "transport": transport,
+                   "codec": CODEC, "mode": MODE, "version": VERSION,
+                   "updated_at": int(time.time())})
+    if transport == "oneme":
+        server_token = str(max_server_token or current.get("max_server_token", ""))
+        client_token = str(max_client_token or current.get("max_client_token", ""))
+        server_token = _clean_max_token(server_token, "токен серверного аккаунта")
+        client_token = _clean_max_token(client_token, "токен клиентского аккаунта")
+        max_uid = _clean_max_uid(max_uid or current.get("max_uid", ""))
+        if server_token == client_token:
+            raise OpenFluxError("Для сервера и клиента нужны разные аккаунты MAX.")
+        for item in _extra_configs():
+            if item.get("id") == profile_id:
+                continue
+            try:
+                item_uid = int(item.get("max_uid", 0) or 0)
+            except (TypeError, ValueError):
+                item_uid = 0
+            if item.get("transport") == "oneme" and (
+                    item.get("max_server_token") == server_token or item_uid == max_uid):
+                raise OpenFluxError("Этот серверный аккаунт MAX уже используется другим профилем.")
+        config.update({"url": "", "max_server_token": server_token,
+                       "max_client_token": client_token, "max_uid": max_uid})
+    else:
+        document_url = validate_document_url(document_url, transport)
+        for item in _extra_configs():
+            if item.get("id") != profile_id and item.get("url") == document_url:
+                label = "Эта конференция" if transport == "telemost" else "Этот документ"
+                raise OpenFluxError(f"{label} уже используется другим профилем OpenFlux.")
+        if _load().get("url") == document_url:
+            raise OpenFluxError("Этот документ уже используется основным профилем OpenFlux.")
+        config["url"] = document_url
+        config.pop("max_server_token", None)
+        config.pop("max_client_token", None)
+        config.pop("max_uid", None)
+    _run(["systemctl", "stop", _extra_service(profile_id)], check=False)
+    _write_extra_files(config)
+    try:
+        if config.get("enabled", True):
+            _start_extra(config)
+        else:
+            _install_extra_service(config)
+    except Exception:
+        _run(["systemctl", "stop", _extra_service(profile_id)], check=False)
+        _write_extra_files(previous)
+        try:
+            _install_extra_service(previous)
+            if previous.get("enabled", True):
+                _start_extra(previous)
+        except Exception:
+            pass
+        raise
+    return config
 
 
 def profile_rotate(profile_id):

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Independent AmneziaWG 2.0 and 3.1 profiles for WEB PANEL PROXY.
 
-Every WPP profile owns a userspace interface, UDP port, address block, key set
-and obfuscation fingerprint.  Keeping device-level AWG parameters per profile
-avoids the shared-fingerprint limitation of a conventional multi-peer server.
+Every WPP profile owns a userspace interface, address block, key set and
+obfuscation fingerprint. The selected server connection supplies its stable
+UDP port, so the same connection name always means the same port.
 """
 
 import ipaddress
@@ -66,9 +66,17 @@ def _occupied_udp_ports():
     return {int(m.group(1)) for m in re.finditer(r"[:.](\d{1,5})\s", proc.stdout or "")}
 
 
-def _allocate_port(users):
+def _allocate_port(users, requested_port=None):
     used = {int(u.get("backend_port", 0)) for u in users if u.get("protocol") in PROTOCOLS}
     occupied = _occupied_udp_ports()
+    if requested_port not in (None, "", 0, "0"):
+        try: port = int(requested_port)
+        except (TypeError, ValueError): raise RuntimeError("Invalid AWG UDP port")
+        if port < PORT_FIRST or port > PORT_LAST:
+            raise RuntimeError("AWG UDP port must be between 52000 and 52999")
+        if port in used or port in occupied:
+            raise RuntimeError("AWG UDP port %d is already in use" % port)
+        return port
     for port in range(PORT_FIRST, PORT_LAST + 1):
         if port not in used and port not in occupied:
             return port
@@ -135,7 +143,7 @@ def _parameters(protocol):
     return values
 
 
-def new_user(protocol, users, uid):
+def new_user(protocol, users, uid, requested_port=None):
     if protocol not in PROTOCOLS:
         raise RuntimeError("Unsupported AWG protocol")
     network = ipaddress.ip_network(_allocate_network(users))
@@ -154,7 +162,7 @@ def new_user(protocol, users, uid):
         "preshared_key": _key("genpsk"),
         "server_private_key": server_private,
         "server_public_key": _public(server_private),
-        "backend_port": _allocate_port(users),
+        "backend_port": _allocate_port(users, requested_port),
         "awg_network": str(network),
         "address": str(list(network.hosts())[1]) + "/32",
         "server_address": str(list(network.hosts())[0]) + "/30",
@@ -351,15 +359,28 @@ def sync(users):
             raise RuntimeError("AWG interface started with an unsafe MTU")
 
 
-def client_config(user, endpoint, name="AWG"):
+def client_config(user, endpoint, name="AWG", allowed_ips=None):
     _validate_user(user)
+    # Amnezia enables its site-based split tunnelling controls only for a
+    # complete dual-stack route written with this exact separator.
+    routes = allowed_ips if isinstance(allowed_ips, list) and allowed_ips else ["0.0.0.0/0", "::/0"]
+    normalized = []
+    for value in routes:
+        try:
+            network = str(ipaddress.ip_network(str(value), strict=False))
+        except ValueError as exc:
+            raise RuntimeError("Invalid AWG route") from exc
+        if network not in normalized:
+            normalized.append(network)
+    if len(normalized) > 400:
+        raise RuntimeError("Too many AWG routes")
     lines = ["# " + str(name), "[Interface]", "PrivateKey = " + user["secret"],
              "Address = " + user["address"], "DNS = 1.1.1.1, 1.0.0.1", "MTU = " + str(_mtu(user))]
     lines.extend(_parameter_lines(user["awg_parameters"]))
     lines.extend(["", "[Peer]", "PublicKey = " + user["server_public_key"],
                   "PresharedKey = " + user["preshared_key"],
                   "Endpoint = %s:%d" % (endpoint, int(user["backend_port"])),
-                  "AllowedIPs = 0.0.0.0/0", "PersistentKeepalive = 25", ""])
+                  "AllowedIPs = " + ", ".join(normalized), "PersistentKeepalive = 25", ""])
     return "\n".join(lines)
 
 

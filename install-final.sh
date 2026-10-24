@@ -51,6 +51,8 @@ for file in amneziawg-go-linux-amd64 awg-linux-amd64 awg-quick-linux-amd64; do
     [[ -s "$BASE/assets/$file" ]] ||
         die "Package is incomplete: missing assets/$file. Extract the complete archive."
 done
+[[ -s "$BASE/assets/awg-routing-guide.mp4" ]] ||
+    die "Package is incomplete: missing assets/awg-routing-guide.mp4. Extract the complete archive."
 [[ -s "$BASE/wpp-panel/flags.tar.gz" ]] ||
     die "Package is incomplete: wpp-panel/flags.tar.gz is missing. Extract the complete archive."
 command -v flock >/dev/null 2>&1 || die "flock is required (package: util-linux)."
@@ -68,7 +70,7 @@ trap finish_install EXIT
 wpp_progress_start "Проверка пакета"
 wpp_progress 5 "Подготовка сервера"
 
-echo "WEB PANEL PROXY V 2.6.0: preparing server..."
+echo "WEB PANEL PROXY V 2.7.0: preparing server..."
 
 PANEL_UPDATE=0
 if [[ -s /var/lib/tproxy-panel/data.json ]] &&
@@ -90,7 +92,7 @@ install -o root -g root -m 0755 \
 
 echo "Installing proxy services..."
 wpp_progress 10 "Установка прокси-служб"
-WEB_PANEL_PROXY_PACKAGE_VERSION="2.6.0" bash "$BASE/install-webproxy-core.sh"
+WEB_PANEL_PROXY_PACKAGE_VERSION="2.7.0" bash "$BASE/install-webproxy-core.sh"
 wpp_progress 55 "Прокси-службы установлены"
 
 echo "Installing control panel..."
@@ -129,5 +131,5 @@ if ! systemctl start web-panel-proxy-component-auto-update.service; then
 fi
 echo "Installation complete."
 wpp_progress 100 "Установка завершена"
-printf '%s\n' '2.6.0' > /etc/web-proxy-panel/version
+printf '%s\n' '2.7.0' > /etc/web-proxy-panel/version
 chmod 0600 /etc/web-proxy-panel/version

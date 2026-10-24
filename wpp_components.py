@@ -211,7 +211,7 @@ def _tags(component):
                    "--connect-timeout", "15", "--max-time", "45", spec["releases"]],
                   timeout=55)
     if result.returncode:
-        raise ValueError("Страница релизов GitHub недоступна. Повторите позже.")
+        raise ValueError("Страница релизов GitLab недоступна. Повторите позже.")
     release_link = re.compile(
         r'href="/' + re.escape(spec["release_path"]) + r'/releases/tag/([^"?#<]+)"', re.I
     )
@@ -292,7 +292,7 @@ def start(component, tag):
             raise ValueError("Другая операция с компонентами уже выполняется.")
         info = _catalog()
         if tag not in info["catalog"].get(component, []):
-            raise ValueError("Эта версия отсутствует среди опубликованных релизов GitHub.")
+            raise ValueError("Эта версия отсутствует среди опубликованных релизов GitLab.")
         state = read_state(STATUS)
         label = COMPONENT_LABELS[component]
         state.update(phase="queued", component=component, target=tag, started=int(time.time()),

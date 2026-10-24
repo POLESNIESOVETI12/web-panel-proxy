@@ -83,6 +83,9 @@ def normalize_account(sub):
     specs=connection_specs(sub.get('connections'),sub.get('protocols',['vless','hysteria']))
     sub['connections']=specs
     sub['protocols']=list(dict.fromkeys(item['protocol'] for item in specs))
+    # Existing subscriptions gain seamless client-side failover without a
+    # token/key rotation.  It can be disabled in the client editor.
+    sub['failover_enabled']=bool(sub.get('failover_enabled',True))
     return sub
 
 
@@ -127,6 +130,7 @@ def mutate(data, request):
         sub = {'id': secrets.token_hex(8), 'token': secrets.token_hex(32),
                'name': clean_name(request.get('name', '')), 'enabled': True,
                'max_devices': limits(request.get('max_devices', 0)),
+               'failover_enabled': bool(request.get('failover_enabled',True)),
                'connections':specs,
                'protocols':list(dict.fromkeys(item['protocol'] for item in specs)), 'devices': [],
                'created_at': int(time.time())}
@@ -148,6 +152,8 @@ def mutate(data, request):
                 raise SubscriptionError('Сначала отзовите лишние устройства, затем уменьшите лимит.')
             sub['name'] = clean_name(request.get('name', sub['name']))
             sub['max_devices'] = limit
+            if 'failover_enabled' in request:
+                sub['failover_enabled'] = bool(request['failover_enabled'])
             specs=connection_specs(request.get('connections'),sub.get('protocols')) if 'connections' in request else connection_specs(sub.get('connections'),request.get('protocols',sub.get('protocols')))
             sub['connections']=specs
             sub['protocols']=list(dict.fromkeys(item['protocol'] for item in specs))
@@ -172,10 +178,16 @@ def mutate(data, request):
             sub['token'] = secrets.token_hex(32)
             sub['devices'] = []
             drop_profiles(data, sub['id'])
-        elif operation in ('revoke', 'allow'):
+        elif operation in ('revoke', 'allow', 'rename-device'):
             device = next((d for d in sub['devices'] if d['id'] == request.get('device_id')), None)
             if device is None:
                 raise SubscriptionError('Устройство не найдено.', 404, 'not_found')
+            if operation == 'rename-device':
+                device['name'] = clean_name(request.get('name',''),40)
+                for user in data['users']:
+                    if user.get('subscription_id') == sub['id'] and user.get('device_id') == device['id']:
+                        user['name'] = sub['name'] + ' / ' + device['name']
+                return data, {'ok': True, 'id': sub['id']}
             drop_profiles(data, sub['id'], device['id'])
             if operation == 'revoke':
                 device['revoked'] = True
@@ -215,8 +227,11 @@ def issue(data, request):
         if len(sub['devices']) >= 100:
             raise SubscriptionError('Нужна ротация подписки: слишком много отозванных устройств.', 403, 'device_limit')
         did = secrets.token_hex(8)
+        suggested=str(request.get('device_name','')).strip()
+        if not suggested or len(suggested)>40 or any(ord(c)<32 for c in suggested):
+            suggested='Устройство ' + did[:6]
         device = {'id': did, 'hwid_hash': digest,
-                  'name': 'Общий профиль' if digest == 'shared' else 'Устройство ' + did[:6],
+                  'name': 'Общий профиль' if digest == 'shared' else suggested,
                   'created_at': int(time.time()), 'last_seen': 0, 'revoked': False}
         sub['devices'].append(device)
         provision(data, sub, device)

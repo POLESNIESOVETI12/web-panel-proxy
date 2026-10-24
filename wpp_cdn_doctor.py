@@ -301,8 +301,8 @@ def run(profile, origin_domain, xray_path, timeout=7):
     except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
         results.append(_result("method", f"Метод {method}", "fail", str(exc), f"Проверьте поддержку метода {method} у CDN."))
 
-    if transport["mode"] == "stream-up":
-        results.append(_result("uplink", "Режим исходящего трафика", "pass", "stream-up · потоковый POST без дробления upload"))
+    if method == "POST":
+        results.append(_result("uplink", "Режим исходящего трафика", "pass", "packet-up · POST короткими порциями без зависания потокового запроса"))
     else:
         results.append(_result(
             "uplink", "Режим исходящего трафика", "warn",

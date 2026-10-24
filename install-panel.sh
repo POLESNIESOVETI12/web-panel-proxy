@@ -11,6 +11,8 @@ FIREWALL_SERVICE_FILE="/etc/systemd/system/web-proxy-panel-firewall.service"
 APP_FILE="${APP_DIR}/panel.py"
 LOGO_SOURCE="${BASE}/panel-logo.png"
 LOGO_FILE="${APP_DIR}/panel-logo.png"
+AWG_GUIDE_SOURCE="${BASE}/assets/awg-routing-guide.mp4"
+AWG_GUIDE_FILE="${APP_DIR}/awg-routing-guide.mp4"
 PRESET_ASSETS=(preset-cars.webp preset-car-graphite.webp preset-car-silver.webp preset-car-white.webp preset-car-blue.webp preset-car-red.webp preset-car-black.webp preset-coffee.webp)
 PORT=8090
 DOMAIN="${WEB_PANEL_PROXY_DOMAIN:-$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' /etc/systemd/system/caddy.service.d/tproxy.conf 2>/dev/null | head -n1 || true)}"
@@ -110,7 +112,8 @@ fi
 MTPROTO_HOST="${MTPROTO_HOST:-$DOMAIN}"
 [[ -s "$PRIMARY_SECRET" ]] || die "Primary install-time secret not found."
 [[ -s "$LOGO_SOURCE" ]] || die "Panel logo file is missing: panel-logo.png"
-for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
+[[ -s "$AWG_GUIDE_SOURCE" ]] || die "AWG video guide is missing: assets/awg-routing-guide.mp4"
+for module in wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
     [[ -s "$BASE/$module" ]] || die "Missing panel module: $module; extract the complete archive."
 done
 FLAG_ARCHIVE="$BASE/wpp-panel/flags.tar.gz"
@@ -295,6 +298,7 @@ fi
 install -d -m 0755 "$APP_DIR" /etc/web-proxy-panel
 install -d -m 0700 "$DATA_DIR"
 install -o root -g root -m 0644 "$LOGO_SOURCE" "$LOGO_FILE"
+install -o root -g root -m 0644 "$AWG_GUIDE_SOURCE" "$AWG_GUIDE_FILE"
 chmod 0600 "$PRIMARY_SECRET"
 
 echo "      Preparing Xray ${XRAY_VERSION}..."
@@ -409,9 +413,9 @@ XRAY_PATH="$(cat "$XRAY_PATH_FILE")"
 [[ "$XRAY_PATH" =~ ^/vless-[a-f0-9]{24}$ || "$XRAY_PATH" =~ ^/assets/[a-f0-9]{12}/[a-f0-9]{12}$ ]] || die "Stored VLESS path is invalid."
 
 if [[ "$UPDATING" == "1" ]]; then
-    echo "Updating WEB PANEL PROXY V 2.6.0..."
+    echo "Updating WEB PANEL PROXY V 2.7.0..."
 else
-    echo "Configuring WEB PANEL PROXY V 2.6.0..."
+    echo "Configuring WEB PANEL PROXY V 2.7.0..."
 fi
 INSTALL_CREDENTIALS="/etc/web-proxy-panel/install-credentials"
 if [[ "$UPDATING" == "1" ]]; then
@@ -444,7 +448,7 @@ fi
 
 echo "[1/6] Writing manager..."
 
-for module in wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
+for module in wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
     [[ -s "$BASE/$module" ]] || die "Package is incomplete: $module is missing."
     install -o root -g root -m 0644 "$BASE/$module" "$APP_DIR/$module"
 done
@@ -1285,6 +1289,10 @@ def add(protocol,name,requested_port=None,device_count=1,options=None):
     connection_id=str(options.get("connection_id","")).strip()
     if connection_id:
         if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{2,63}",connection_id): raise ValueError("Некорректное подключение.")
+        if protocol in wpp_awg.PROTOCOLS and any(
+                other.get("protocol") in wpp_awg.PROTOCOLS and other.get("connection_id")==connection_id
+                for other in d["users"]):
+            raise ValueError("Это AWG-подключение уже занято другим пользователем. Создайте или скопируйте отдельное AWG-подключение.")
         u["connection_id"]=connection_id
     if protocol in ("web","mtproto"):
         port,stats=alloc_ports(d,requested_port if protocol=="mtproto" else None)
@@ -1303,7 +1311,7 @@ def add(protocol,name,requested_port=None,device_count=1,options=None):
         if tls.returncode:
             raise RuntimeError("Hysteria 2 TLS certificate is not ready: "+(tls.stderr or tls.stdout)[-1500:])
     elif protocol in wpp_awg.PROTOCOLS:
-        u.update(wpp_awg.new_user(protocol,d["users"],u["id"]))
+        u.update(wpp_awg.new_user(protocol,d["users"],u["id"],requested_port))
     d["users"].append(u)
     save(d)
     try:
@@ -1948,6 +1956,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 from collections import defaultdict, deque
 from wpp_subscriptions import PREFIX as SUB_PREFIX
+from wpp_subscription_dashboard import render as subscription_dashboard
 from wpp_panel_extras import preview_document
 from wpp_ui import CSS as PANEL_CSS, COMMON_JS as PANEL_COMMON_JS, page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, openflux_ui, client_records, nodes_ui, updates_ui, openflux_import_uri, cdn_doctor_ui, connections_ui, routing_ui
 from wpp_presets import presets as preset_library
@@ -1975,6 +1984,7 @@ PROFILES="/etc/tproxy-server/profiles.json"
 USERS="/etc/web-proxy-panel/users.json"
 CONNECTIONS_FILE="/etc/web-proxy-panel/connections.json"
 ROUTING_FILE="/var/lib/tproxy-panel/routing.json"
+OPENCCK_RU_CACHE="/var/lib/tproxy-panel/opencck-ru-amnezia.json"
 XRAY_RUNTIME_CONFIG="/etc/web-panel-proxy-xray/config.json"
 TRAFFIC="/var/lib/tproxy-panel/traffic.json"
 XRAY_PATH_FILE="/etc/web-proxy-panel/xray-path"
@@ -1985,6 +1995,7 @@ AWG_AVAILABLE=True
 MANAGER="/usr/local/sbin/web-proxy-panelctl"
 QR="/usr/bin/qrencode"
 LOGO="/opt/tproxy-panel/panel-logo.png"
+AWG_GUIDE="/opt/tproxy-panel/awg-routing-guide.mp4"
 FLAGS="/opt/tproxy-panel/flags"
 SITE_INDEX="/srv/tproxy-site/index.html"
 SITE_BACKUP="/var/lib/tproxy-panel/index.html.bak"
@@ -2437,6 +2448,16 @@ def subscription_registry():
             return json.load(f).get("subscriptions",[])
     except FileNotFoundError:
         return []
+def subscription_dashboard_token(token):
+    return hmac.new(SESSION_KEY,b"subscription-dashboard:"+str(token).encode(),hashlib.sha256).hexdigest()
+def subscription_device_name(user_agent):
+    value=str(user_agent or "").lower()
+    if "android" in value: return "Android"
+    if any(x in value for x in ("iphone","ipad","ios")): return "iPhone / iPad"
+    if "windows" in value: return "Windows"
+    if any(x in value for x in ("macintosh","mac os")): return "macOS"
+    if "linux" in value: return "Linux"
+    return "Устройство"
 def ctl_subscription(request):
     # Tokens and hardware identifiers never appear in process arguments.
     try:
@@ -2522,6 +2543,8 @@ def connections_with_runtime(connections):
         with open(XRAY_RUNTIME_CONFIG,encoding="utf-8") as stream: runtime=json.load(stream)
         by_tag={str(item.get("tag","")):item for item in runtime.get("inbounds",[]) if isinstance(item,dict)}
     except (OSError,ValueError): by_tag={}
+    try: routing_profiles=routing_store.load(ROUTING_FILE).get("profiles",{})
+    except routing_store.RoutingError: routing_profiles={}
     for item in result:
         protocol=item.get("protocol")
         cfg=item.get("config") if isinstance(item.get("config"),dict) else {}
@@ -2532,6 +2555,14 @@ def connections_with_runtime(connections):
                  "vk":"vless-xhttp-vk","timeweb":"vless-xhttp-timeweb"}.get(provider,"vless-xhttp-cdn")
         else: tag=""
         if tag and tag in by_tag: item["runtime_inbound"]=copy.deepcopy(by_tag[tag])
+        profile=routing_profiles.get(str(item.get("id","")))
+        if isinstance(profile,dict) and profile.get("enabled",True):
+            try:
+                item["runtime_routing"]={"dns":routing_store.dns_config(profile),
+                                         "routing":routing_store.routing_config(profile)}
+            except routing_store.RoutingError:
+                item["runtime_routing"]={}
+        else: item["runtime_routing"]={}
     return result
 def proxy_link(protocol,secret,port=443,name="Proxy",username=""):
     if protocol=="mtproto": return mtproto_link(secret,port)
@@ -2558,7 +2589,10 @@ def proxy_link(protocol,secret,port=443,name="Proxy",username=""):
     if protocol in awg.PROTOCOLS:
         user=next((u for u in users() if u.get("protocol")==protocol and secrets.compare_digest(str(u.get("secret","")),str(secret))),None)
         if user is None: raise RuntimeError("Профиль AWG не найден")
-        return awg.client_config(user,DOMAIN,name)
+        try: route_state=routing_store.load(ROUTING_FILE)
+        except routing_store.RoutingError: route_state={"profiles":{},"awg_profiles":{}}
+        routes=routing_store.awg_allowed_ips(route_state,user.get("connection_id",""))
+        return awg.client_config(user,DOMAIN,name,routes)
     raise RuntimeError("Неизвестный протокол")
 def qr_png_bytes(link):
     return subprocess.run([QR,"-o","-","-t","PNG","-s","8","-m","2",link],
@@ -2573,7 +2607,7 @@ class Handler(BaseHTTPRequestHandler):
         b=s.encode(); self.send_response(code); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Content-Length",str(len(b))); self.send_header("Cache-Control","no-store"); self.send_header("X-Frame-Options","DENY"); self.send_header("X-Content-Type-Options","nosniff"); self.send_header("Referrer-Policy","no-referrer")
         # srcdoc is inline content. Deny network frame navigations as well as
         # requests from within the sandbox, including location/meta refresh.
-        self.send_header("Content-Security-Policy","default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+        self.send_header("Content-Security-Policy","default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self'; connect-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
         self.end_headers(); self.wfile.write(b)
     def send_data(self,body,code=200,mime="text/plain; charset=utf-8",headers=None):
         raw=body.encode("utf-8")
@@ -2608,6 +2642,34 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers(); self.wfile.write(b)
     def send_logo(self,b):
         self.send_response(200); self.send_header("Content-Type","image/png"); self.send_header("Cache-Control","public, max-age=86400"); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
+    def send_mp4(self,path):
+        try: size=os.path.getsize(path)
+        except OSError:
+            self.send_html("Video not found",404); return
+        start,end=0,size-1
+        partial=False
+        value=self.headers.get("Range","")
+        if value:
+            match=re.fullmatch(r"bytes=(\d*)-(\d*)",value.strip())
+            if not match:
+                self.send_response(416); self.send_header("Content-Range",f"bytes */{size}"); self.end_headers(); return
+            if match.group(1): start=int(match.group(1))
+            elif match.group(2): start=max(0,size-int(match.group(2)))
+            if match.group(2) and match.group(1): end=min(size-1,int(match.group(2)))
+            if start<0 or start>=size or end<start:
+                self.send_response(416); self.send_header("Content-Range",f"bytes */{size}"); self.end_headers(); return
+            partial=True
+        length=end-start+1
+        with open(path,"rb") as stream:
+            stream.seek(start); data=stream.read(length)
+        self.send_response(206 if partial else 200)
+        self.send_header("Content-Type","video/mp4")
+        self.send_header("Accept-Ranges","bytes")
+        if partial: self.send_header("Content-Range",f"bytes {start}-{end}/{size}")
+        self.send_header("Cache-Control","public, max-age=86400")
+        self.send_header("Content-Length",str(len(data)))
+        self.send_header("X-Content-Type-Options","nosniff")
+        self.end_headers(); self.wfile.write(data)
     def send_svg(self,b):
         self.send_response(200); self.send_header("Content-Type","image/svg+xml"); self.send_header("Cache-Control","public, max-age=604800, immutable"); self.send_header("Content-Length",str(len(b))); self.send_header("X-Content-Type-Options","nosniff"); self.end_headers(); self.wfile.write(b)
     def redirect(self,p):
@@ -2657,7 +2719,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.api_auth(): return
             if path==node_api.API_PREFIX+"/status":
                 loc=node_api.load_location(LOCATION_FILE)
-                self.send_json({"ok":True,"api_version":1,"version":"2.6.0","domain":DOMAIN,
+                self.send_json({"ok":True,"api_version":1,"version":"2.7.0","domain":DOMAIN,
                     "location":loc,"capabilities":["vless","hysteria","federation"]}); return
             if path==node_api.API_PREFIX+"/profiles":
                 result=[]
@@ -2677,6 +2739,9 @@ class Handler(BaseHTTPRequestHandler):
             if script.startswith("<script>"): script=script[8:]
             if script.endswith("</script>"): script=script[:-9]
             self.send_static_text(script,"application/javascript; charset=utf-8")
+            return
+        if path==PANEL_PATH+"/__assets/awg-routing-guide.mp4":
+            self.send_mp4(AWG_GUIDE)
             return
         if path==PANEL_PATH+"/__health":
             self.send_response(200)
@@ -2758,7 +2823,7 @@ class Handler(BaseHTTPRequestHandler):
             current_users=users()
             registry=connection_store.ensure(CONNECTIONS_FILE,current_users)
             try: routing_state=routing_store.load(ROUTING_FILE)
-            except routing_store.RoutingError: routing_state={"schema":1,"profiles":{}}
+            except routing_store.RoutingError: routing_state={"schema":1,"profiles":{},"awg_profiles":{}}
             body=routing_ui(registry["connections"],routing_state,PANEL_PATH,self.csrf())
             self.send_html(layout("Маршрутизация",body,"routing")); return
         if path==PANEL_PATH+"/cdn-doctor":
@@ -2825,11 +2890,24 @@ class Handler(BaseHTTPRequestHandler):
             user=next((u for u in users() if u.get("id")==uid and u.get("protocol") in awg.PROTOCOLS),None)
             if user is None: self.send_html("Not found",404); return
             try:
-                config=awg.client_config(user,DOMAIN,user.get("name","AWG"))
+                try: route_state=routing_store.load(ROUTING_FILE)
+                except routing_store.RoutingError: route_state={"profiles":{},"awg_profiles":{}}
+                routes=routing_store.awg_allowed_ips(route_state,user.get("connection_id",""))
+                config=awg.client_config(user,DOMAIN,user.get("name","AWG"),routes)
                 self.send_data(config,mime="text/plain; charset=utf-8",
                     headers={"Content-Disposition":"attachment; filename=\"wpp-%s.conf\""%uid})
             except Exception:
                 self.send_html("Не удалось сформировать конфигурацию AWG.",503)
+            return
+
+        if path==PANEL_PATH+"/awg-ru-direct-list":
+            try:
+                payload=routing_store.opencck_amnezia_list(OPENCCK_RU_CACHE)
+                self.send_data(payload,mime="application/json; charset=utf-8",headers={
+                    "Content-Disposition":"attachment; filename=\"wpp-russian-sites-direct-amnezia.json\""
+                })
+            except routing_store.RoutingError as exc:
+                self.send_html("Не удалось подготовить список российских сайтов: "+esc(str(exc)),503)
             return
 
         if path==PANEL_PATH+"/backup-download":
@@ -2848,17 +2926,6 @@ class Handler(BaseHTTPRequestHandler):
 
         if path==PANEL_PATH+"/settings":
             token=esc(self.csrf())
-            try: economy=ctl_manager_json("mtproxy-economy-status",{})
-            except Exception: economy={"enabled":False,"direct_users":0,"unavailable":True}
-            economy_enabled=bool(economy.get("enabled"))
-            economy_status=("Экономия включена" if economy_enabled else
-                            "Службы запущены")
-            economy_action=("Запустить WEB Proxy / MTProto" if economy_enabled else
-                            "Включить экономию CPU")
-            economy_note=("Службы остановлены. VLESS, Hysteria2, AWG, OpenFlux и панель продолжают работать."
-                          if economy_enabled else
-                          "Останавливает только WEB Proxy и MTProto. При создании или включении такого клиента службы запустятся автоматически.")
-            economy_card=f'''<div class="card"><div class="card-title"><div><h2>Экономия CPU для MTProxy</h2><p class="muted">{economy_note}</p></div><span class="pill {'on' if economy_enabled else ''}">{economy_status}</span></div><form method="post" action="{PANEL_PATH}/mtproxy-economy" onsubmit="return confirm('{'Запустить WEB Proxy и MTProto?' if economy_enabled else 'Остановить WEB Proxy и MTProto? Старые ссылки не будут работать до отключения экономии.'}')"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="enabled" value="{'0' if economy_enabled else '1'}"><div class="actions" style="margin-top:14px"><button class="btn {'primary' if economy_enabled else ''}"{' disabled' if economy.get('unavailable') else ''}>{economy_action}</button><small>Активных клиентских WEB/MTProto-подключений: {int(economy.get('direct_users',0))}</small></div></form></div>'''
             has_draft=os.path.exists(SITE_DRAFT)
             try:
                 if has_draft:
@@ -2867,7 +2934,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception: site_html="<!-- Не удалось прочитать исходник -->"
             editor=editor_ui(site_html,PANEL_PATH,self.csrf(),all_presets(),has_draft)
             body=f'''<div class="page-head"><div><span class="eyebrow">WPP / STUDIO</span><h1>Настройки</h1><p>Оформление сайта, резервная копия и доступ к панели</p></div></div>
-{economy_card}{editor}
+{editor}
 <div class="card"><div class="card-title"><div><h2>Резервная копия настроек</h2><p class="muted">Клиенты, подписки, ключи, подключения, ноды, OpenFlux, сайт и учётная запись панели</p></div><span class="pill">Хранится на вашем компьютере</span></div><div class="note"><b>Архив содержит пароль и секретные ключи.</b> Храните его в безопасном месте. После восстановления действуют логин и пароль из архива. На VPS постоянные копии не создаются.</div><div class="actions" style="margin-top:16px"><a class="btn primary" href="{PANEL_PATH}/backup-download">Скачать резервную копию</a><label class="btn" for="backupFile">Выбрать архив</label><input id="backupFile" type="file" accept=".zip,application/zip" hidden><button type="button" id="restoreBackup" disabled>Установить копию</button><small id="backupStatus" role="status"></small></div></div>
 <div class=card><h2>Пароль администратора</h2><form method=post action="{PANEL_PATH}/password"><input type=hidden name=csrf value="{token}"><label for="adminNewPassword">Новый пароль</label><input id="adminNewPassword" type=password name=a minlength=3 required autocomplete=new-password><div class="actions" style="margin-top:16px"><button class="btn primary">Сохранить пароль</button><small>Минимум 3 символа · смена пароля завершит все сессии панели</small></div></form></div>'''
             body+=f'''<script>(()=>{{const input=document.getElementById('backupFile'),button=document.getElementById('restoreBackup'),status=document.getElementById('backupStatus');input.addEventListener('change',()=>{{button.disabled=!input.files.length;status.textContent=input.files.length?'Выбран: '+input.files[0].name:''}});button.addEventListener('click',async()=>{{const file=input.files[0];if(!file||!confirm('Заменить текущие настройки данными из резервной копии? Подключения кратковременно перезапустятся.'))return;button.disabled=true;status.textContent='Проверяем и устанавливаем резервную копию…';try{{const response=await fetch('{PANEL_PATH}/backup-restore',{{method:'POST',headers:{{'Content-Type':'application/zip','X-WPP-CSRF':'{token}'}},body:file}});let result;try{{result=await response.json()}}catch(e){{throw new Error('Панель вернула некорректный ответ.')}}if(!response.ok||!result.ok)throw new Error(result.message||'Не удалось установить резервную копию.');status.textContent='Готово. Восстановлено файлов: '+result.files+'. Перезагружаем страницу…';setTimeout(()=>location.reload(),1200)}}catch(error){{status.textContent=error.message;button.disabled=false}}}})}})();</script>'''
@@ -2947,6 +3014,33 @@ class Handler(BaseHTTPRequestHandler):
 <style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#060910;color:#fff;font:15px system-ui}.b{width:min(420px,90vw);padding:28px;border:1px solid #223148;border-radius:22px;background:#0d1520}a{color:#8edcff}</style>
 <div class=b><h2>Неверный логин или пароль</h2><p>Попробуйте войти ещё раз.</p><a href="%s/login">Вернуться</a></div>""" % esc(PANEL_PATH),401)
             return
+
+        public_device=re.fullmatch(re.escape(SUB_PREFIX)+r"([a-f0-9]{64})/device-action",path)
+        if public_device:
+            token=public_device.group(1)
+            if self.headers.get("X-WPP-Dashboard","")!="1" or self.headers.get("Sec-Fetch-Site","") not in ("","none","same-origin"):
+                self.send_json({"ok":False,"message":"Недействительный запрос. Обновите страницу."},403); return
+            try: form=self.form(4096)
+            except (ValueError,UnicodeDecodeError):
+                self.send_json({"ok":False,"message":"Некорректный запрос."},400); return
+            if not secrets.compare_digest(form.get("token",""),subscription_dashboard_token(token)):
+                self.send_json({"ok":False,"message":"Срок действия страницы завершён. Обновите её."},403); return
+            subscription=next((s for s in subscription_registry()
+                               if s.get("enabled") and secrets.compare_digest(str(s.get("token","")),token)),None)
+            if subscription is None:
+                self.send_json({"ok":False,"message":"Подписка недоступна."},404); return
+            if not int(subscription.get("max_devices",0) or 0):
+                self.send_json({"ok":False,"message":"У общей подписки нет отдельных устройств."},400); return
+            operation=form.get("operation","")
+            if operation not in ("rename-device","revoke"):
+                self.send_json({"ok":False,"message":"Недопустимая операция."},400); return
+            request={"operation":operation,"id":subscription.get("id",""),"device_id":form.get("device_id","")}
+            if operation=="rename-device": request["name"]=form.get("name","")
+            result=ctl_subscription(request)
+            if result.get("ok"):
+                if operation=="revoke": purge_remote_profiles_async(subscription,request["device_id"])
+                self.send_json({"ok":True}); return
+            self.send_json({"ok":False,"message":result.get("message","Изменение не применено.")},int(result.get("status",400))); return
 
         # Everything below requires an authenticated session.
         if not self.auth():
@@ -3078,6 +3172,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path==PANEL_PATH+"/connection-action":
             previous_registry=None
+            async_request=self.headers.get("X-WPP-Async","")=="1"
+            result_enabled=None
             try:
                 operation=form.get("operation","")
                 if operation=="save":
@@ -3087,8 +3183,12 @@ class Handler(BaseHTTPRequestHandler):
                     existing=connection_store.get(previous_registry,connection_id) if connection_id else None
                     existing_config=dict(existing.get("config",{})) if isinstance(existing,dict) and isinstance(existing.get("config"),dict) else {}
                     existing_advanced=dict(existing.get("advanced",{})) if isinstance(existing,dict) and isinstance(existing.get("advanced"),dict) else {}
+                    advanced_value=form.get("advanced",json.dumps(existing_advanced,ensure_ascii=False))
+                    if protocol in ("vless","hysteria") and form.get("xray_json","").strip():
+                        advanced_value=connection_store.advanced_from_inbound(
+                            form.get("xray_json",""),protocol,existing_advanced.get("client",{}))
                     raw={"id":form.get("id","").strip(),"name":form.get("name",""),"protocol":protocol,
-                         "enabled":True,"config":{},"advanced":form.get("advanced",json.dumps(existing_advanced,ensure_ascii=False))}
+                         "enabled":True,"config":{},"advanced":advanced_value}
                     if not raw["id"]: raw.pop("id")
                     if protocol=="vless":
                         provider=form.get("provider","custom")
@@ -3102,22 +3202,42 @@ class Handler(BaseHTTPRequestHandler):
                             "no_sse_header":bool(existing_config.get("no_sse_header",False))}
                     else:
                         raw["config"]={**existing_config,"port":form.get("port",existing_config.get("port",0))}
-                    connection_store.upsert(CONNECTIONS_FILE,raw)
+                    saved_connection=connection_store.upsert(CONNECTIONS_FILE,raw)
+                    if protocol in ("awg20","awg31"):
+                        connection_store.claim_awg_port(CONNECTIONS_FILE,saved_connection["id"],users())
                     ctl_manager_json("connections-refresh",{})
-                elif operation=="clone": connection_store.clone(CONNECTIONS_FILE,form.get("id",""))
+                elif operation=="clone": connection_store.clone(CONNECTIONS_FILE,form.get("id",""),users())
+                elif operation=="toggle":
+                    previous_registry=connection_store.load(CONNECTIONS_FILE)
+                    connection_id=form.get("id","").strip()
+                    existing=connection_store.get(previous_registry,connection_id)
+                    if not isinstance(existing,dict):
+                        raise connection_store.ConnectionError("Подключение не найдено.")
+                    updated=dict(existing)
+                    updated["enabled"]=not bool(existing.get("enabled",True))
+                    result_enabled=updated["enabled"]
+                    connection_store.upsert(CONNECTIONS_FILE,updated)
+                    ctl_manager_json("connections-refresh",{})
                 elif operation=="delete":
                     deleted_id=form.get("id","")
                     ctl_manager_json("connections-delete",{"id":deleted_id})
                     routing_store.delete_profile(ROUTING_FILE,deleted_id)
                 else: raise connection_store.ConnectionError("Неизвестная операция с подключением.")
-                self.redirect("/connections")
-            except (connection_store.ConnectionError,ValueError) as exc: self.send_html(esc(str(exc)),400)
+                if async_request:
+                    self.send_json({"ok":True,"operation":operation,"enabled":result_enabled})
+                else:
+                    self.redirect("/connections")
+            except (connection_store.ConnectionError,ValueError) as exc:
+                if async_request: self.send_json({"ok":False,"message":str(exc)},400)
+                else: self.send_html(esc(str(exc)),400)
             except Exception as exc:
                 if previous_registry is not None:
                     try: connection_store.save(CONNECTIONS_FILE,previous_registry)
                     except Exception: pass
                 print("connection action failed:",type(exc).__name__,file=sys.stderr,flush=True)
-                self.send_html("Не удалось применить подключение. Предыдущая рабочая конфигурация сохранена.",503)
+                message="Не удалось применить подключение. Предыдущая рабочая конфигурация сохранена."
+                if async_request: self.send_json({"ok":False,"message":message},503)
+                else: self.send_html(message,503)
             return
 
         if path==PANEL_PATH+"/routing-action":
@@ -3125,13 +3245,16 @@ class Handler(BaseHTTPRequestHandler):
                 connection_id=form.get("connection_id","")
                 registry=connection_store.ensure(CONNECTIONS_FILE,users())
                 selected=connection_store.get(registry,connection_id)
-                if selected is None or not connection_store.selectable(selected) or selected.get("protocol") not in ("vless","hysteria"):
-                    raise routing_store.RoutingError("Выбранное подключение VLESS или Hysteria2 не найдено.")
-                operation=form.get("operation","save")
-                if operation=="delete": routing_store.delete_profile(ROUTING_FILE,connection_id)
-                elif operation=="save": routing_store.save_profile(ROUTING_FILE,connection_id,form)
+                if selected is None or not connection_store.selectable(selected) or selected.get("protocol") not in ("vless","hysteria","awg20","awg31"):
+                    raise routing_store.RoutingError("Выбранное подключение не поддерживает маршрутизацию.")
+                operation=form.get("operation","")
+                is_awg=selected.get("protocol") in ("awg20","awg31")
+                if operation=="add-selected" and is_awg: routing_store.update_awg_selected(ROUTING_FILE,connection_id,form)
+                elif operation=="remove-selected" and is_awg: routing_store.update_awg_selected(ROUTING_FILE,connection_id,form,remove=True)
+                elif operation=="add-selected": routing_store.update_selected(ROUTING_FILE,connection_id,form)
+                elif operation=="remove-selected": routing_store.update_selected(ROUTING_FILE,connection_id,form,remove=True)
                 else: raise routing_store.RoutingError("Неизвестная операция маршрутизации.")
-                self.redirect("/routing")
+                self.redirect("/routing#routing-"+connection_id)
             except (routing_store.RoutingError,connection_store.ConnectionError) as exc:
                 self.send_html(esc(str(exc)),400)
             except OSError:
@@ -3208,6 +3331,8 @@ class Handler(BaseHTTPRequestHandler):
                         selected=connection_store.get(registry,connection_id)
                         if selected is None or not connection_store.selectable(selected):
                             raise connection_store.ConnectionError("Выбранное подключение не найдено.")
+                        if selected.get("protocol") in ("awg20","awg31"):
+                            selected=connection_store.claim_awg_port(CONNECTIONS_FILE,connection_id,users())
                         common={**connection_store.request_for_connection(selected),"name":name,
                             "devices":form.get("direct_devices","1"),"traffic_limit_gb":form.get("traffic_limit_gb","0")}
                         kind=common["protocol"]
@@ -3259,6 +3384,13 @@ class Handler(BaseHTTPRequestHandler):
                         form.get("name",""), form.get("url",""), form.get("platform",""),
                         form.get("transport","yandex"), form.get("max_server_token",""),
                         form.get("max_client_token",""), form.get("max_uid","")
+                    )
+                elif operation=="update":
+                    openflux.profile_update(
+                        form.get("id",""), form.get("name",""), form.get("url",""),
+                        form.get("platform",""), form.get("transport","yandex"),
+                        form.get("max_server_token",""), form.get("max_client_token",""),
+                        form.get("max_uid","")
                     )
                 elif operation=="enable": openflux.profile_set_enabled(form.get("id",""),True)
                 elif operation=="disable": openflux.profile_set_enabled(form.get("id",""),False)
@@ -3319,6 +3451,8 @@ class Handler(BaseHTTPRequestHandler):
             if request.get("operation") not in ("create","update","toggle","rotate","delete","revoke","allow"):
                 self.send_html("Недопустимая операция",400); return
             if request["operation"] in ("create","update"):
+                if request["operation"]=="create" or form.get("failover_present")=="1":
+                    request["failover_enabled"]=form.get("failover_enabled","1" if request["operation"]=="create" else "0")=="1"
                 previous=next((s for s in subscription_registry() if s.get("id")==request.get("id")),None)
                 if request["operation"]=="update" and form.get("connections_present")=="1":
                     try: request["connections"]=selected_connection_specs(form)
@@ -3408,9 +3542,9 @@ class Handler(BaseHTTPRequestHandler):
         if path==PANEL_PATH+"/delete-user":
             async_action=self.headers.get("X-WPP-Async","")=="1"
             uid=form.get("id","")
-            if not uid or uid=="primary":
-                if async_action: self.send_json({"ok":False,"message":"Нельзя удалить основной профиль."},400)
-                else: self.send_html("Нельзя удалить основной профиль.",400)
+            if not uid:
+                if async_action: self.send_json({"ok":False,"message":"Пользователь не найден."},400)
+                else: self.send_html("Пользователь не найден.",400)
                 return
             try:
                 ctl("delete",uid)
@@ -3479,11 +3613,46 @@ class Handler(BaseHTTPRequestHandler):
             self.send_data("Сервис занят. Повторите позже.",503,headers={"Retry-After":"15"}); return
         try:
             # Reject unknown URLs before spawning any privileged helper.
-            if not any(s.get("enabled") and secrets.compare_digest(s["token"],token) for s in subscription_registry()):
+            subscription=next((s for s in subscription_registry()
+                               if s.get("enabled") and secrets.compare_digest(str(s.get("token","")),token)),None)
+            if subscription is None:
                 self.send_data("Not found",404); return
             if "text/html" in self.headers.get("Accept",""):
-                self.send_data("Добавьте эту ссылку как подписку в клиент. Для ограниченной подписки нужен X-HWID (Happ).",200); return
-            result=ctl_subscription({"operation":"fetch","token":token,"hwid":self.headers.get("X-HWID","")})
+                subscription_url="https://"+DOMAIN+SUB_PREFIX+token
+                try:
+                    qr_data="data:image/png;base64,"+base64.b64encode(qr_png_bytes(subscription_url)).decode()
+                except Exception:
+                    qr_data=""
+                dashboard_profiles=users()
+                config_items=[]
+                if not int(subscription.get("max_devices",0) or 0):
+                    labels={"vless":"VLESS","hysteria":"Hysteria2"}
+                    local_name=node_api.location_prefix(node_api.load_location(LOCATION_FILE))
+                    seen_connections=set()
+                    for profile in dashboard_profiles:
+                        connection_id=str(profile.get("connection_id",""))
+                        protocol=profile.get("protocol")
+                        if (profile.get("subscription_id")!=subscription.get("id") or not profile.get("enabled",True)
+                                or protocol not in labels or not connection_id or connection_id in seen_connections):
+                            continue
+                        try:
+                            name=local_name+" · "+proxy_connection_name(profile,labels[protocol])
+                            link=proxy_link(protocol,profile["secret"],profile["backend_port"],name,profile.get("username",""))
+                            config_qr="data:image/png;base64,"+base64.b64encode(qr_png_bytes(link)).decode()
+                            config_items.append({"connection_id":connection_id,"link":link,"qr":config_qr})
+                            seen_connections.add(connection_id)
+                        except Exception:
+                            continue
+                try:
+                    with open(LOGO,"rb") as logo_stream:
+                        logo_data="data:image/png;base64,"+base64.b64encode(logo_stream.read()).decode()
+                except OSError:
+                    logo_data=""
+                action_url=SUB_PREFIX+token+"/device-action"
+                action_token=subscription_dashboard_token(token)
+                self.send_html(subscription_dashboard(subscription,dashboard_profiles,traffic(),subscription_url,qr_data,config_items,logo_data,action_url,action_token)); return
+            result=ctl_subscription({"operation":"fetch","token":token,"hwid":self.headers.get("X-HWID",""),
+                                     "device_name":subscription_device_name(self.headers.get("User-Agent",""))})
             if not result.get("ok"):
                 headers={"X-Hwid-Active":"true","subscription-always-hwid-enable":"true"}
                 if result.get("code")=="hwid_required": headers["X-Hwid-Not-Supported"]="true"
@@ -3507,6 +3676,7 @@ class Handler(BaseHTTPRequestHandler):
             up=sum(int(state.get(u["id"],{}).get("up",0)) for u in result["users"])
             down=sum(int(state.get(u["id"],{}).get("down",0)) for u in result["users"])
             headers={"profile-title":"base64:"+base64.b64encode(result["name"].encode()).decode(),"profile-update-interval":"6",
+                     "profile-web-page-url":"https://"+DOMAIN+SUB_PREFIX+token,
                      "subscription-userinfo":f"upload={up}; download={down}; total=0; expire=0"}
             if result["limited"]: headers.update({"X-Hwid-Active":"true","subscription-always-hwid-enable":"true"})
             try: routing_profiles=routing_store.load(ROUTING_FILE).get("profiles",{})
@@ -3516,17 +3686,31 @@ class Handler(BaseHTTPRequestHandler):
             local_routing=[routing_profiles.get(str(user.get("connection_id",""))) for user in result["users"]]
             local_routing=[item if isinstance(item,dict) and item.get("enabled",True) else None for item in local_routing]
             selected_routing=[item for item in local_routing if item is not None]
-            happ="happ" in self.headers.get("User-Agent","").lower()
+            subscription_agent=self.headers.get("User-Agent","").lower()
+            happ="happ" in subscription_agent
+            hiddify="hiddify" in subscription_agent
             requested_format=parse_qs(urlparse(self.path).query).get("format",[""])[0].lower()
             local_count=len(result["users"])
             merged_remote=routing_store.merge_profiles(selected_routing)
             routing_entries=list(zip(lines[:local_count],local_routing))
             routing_entries.extend((line,merged_remote) for line in lines[local_count:])
             xray_configs=routing_store.subscription_xray_configs_by_link(routing_entries,result["name"])
-            if requested_format in ("xray","xray-json","json") or (happ and selected_routing):
+            failover=bool(subscription.get("failover_enabled",True)) and len(lines)>1
+            if failover:
+                try:
+                    auto_config=routing_store.failover_xray_config(lines,merged_remote,result["name"]+" · Автовыбор")
+                    xray_configs.insert(0,auto_config)
+                except routing_store.RoutingError: pass
+            if requested_format in ("xray","xray-json","json") or (happ and (selected_routing or failover)):
                 if not xray_configs:
                     self.send_data("В подписке нет VLESS или Hysteria2 для Xray-маршрутизации.",409,headers=headers); return
                 self.send_data(json.dumps(xray_configs,ensure_ascii=False,separators=(",",":")),mime="application/json; charset=utf-8",headers=headers); return
+            if hiddify:
+                compatible_lines=routing_store.hiddify_compatible_links(lines)
+                if not compatible_lines:
+                    self.send_data("В этой подписке нет подключений, совместимых с Hiddify. Добавьте Hysteria2 или используйте Happ для VLESS XHTTP.",409,headers=headers); return
+                lines=compatible_lines
+                headers["X-WPP-Compatibility"]="hiddify-safe"
             self.send_data(base64.b64encode(("\n".join(lines)+"\n").encode()).decode(),headers=headers)
         except Exception:
             self.send_data("Подписка временно недоступна.",503)
@@ -3566,7 +3750,7 @@ PY
 fi
 
 python3 -m py_compile "$APP_FILE"
-python3 -m py_compile "$APP_DIR/wpp_subscriptions.py" "$APP_DIR/wpp_panel_extras.py" "$APP_DIR/wpp_ui.py" "$APP_DIR/wpp_metrics.py" "$APP_DIR/wpp_update.py" "$APP_DIR/wpp_nodes.py" "$APP_DIR/wpp_openflux.py" "$APP_DIR/wpp_awg.py" "$APP_DIR/wpp_firewall.py" "$APP_DIR/wpp_components.py" "$APP_DIR/wpp_cdn.py" "$APP_DIR/wpp_cdn_doctor.py" "$APP_DIR/wpp_connections.py" "$APP_DIR/wpp_backup.py" "$APP_DIR/wpp_routing.py"
+python3 -m py_compile "$APP_DIR/wpp_subscriptions.py" "$APP_DIR/wpp_subscription_dashboard.py" "$APP_DIR/wpp_panel_extras.py" "$APP_DIR/wpp_ui.py" "$APP_DIR/wpp_metrics.py" "$APP_DIR/wpp_update.py" "$APP_DIR/wpp_nodes.py" "$APP_DIR/wpp_openflux.py" "$APP_DIR/wpp_awg.py" "$APP_DIR/wpp_firewall.py" "$APP_DIR/wpp_components.py" "$APP_DIR/wpp_cdn.py" "$APP_DIR/wpp_cdn_doctor.py" "$APP_DIR/wpp_connections.py" "$APP_DIR/wpp_backup.py" "$APP_DIR/wpp_routing.py"
 
 
 # ---- Finish installation: service, Caddy route, permissions, start ----
@@ -3606,7 +3790,7 @@ fi
 echo "[4/6] Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=WEB PANEL PROXY V 2.6.0
+Description=WEB PANEL PROXY V 2.7.0
 After=network-online.target caddy.service tproxy-server.service mtproxy.service web-proxy-panel-firewall.service
 Wants=network-online.target
 Requires=web-proxy-panel-firewall.service
@@ -3770,7 +3954,7 @@ unlock_changes(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 show_info(){
     local d p version
-    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.6.0')"
+    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.7.0')"
     echo
     echo "============================================================"
     echo "                 WEB PANEL PROXY"
@@ -4349,9 +4533,9 @@ fi
 echo
 echo "============================================================"
 if [[ "$UPDATING" == "1" ]]; then
-echo "          WEB PANEL PROXY V 2.6.0 UPDATED"
+echo "          WEB PANEL PROXY V 2.7.0 UPDATED"
 else
-echo "         WEB PANEL PROXY V 2.6.0 IS READY"
+echo "         WEB PANEL PROXY V 2.7.0 IS READY"
 fi
 echo "============================================================"
 echo

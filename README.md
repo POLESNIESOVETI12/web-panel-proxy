@@ -2,7 +2,7 @@
   <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
 </p>
 
-<h1 align="center">WEB PANEL PROXY 2.6.0</h1>
+<h1 align="center">WEB PANEL PROXY 2.7.0</h1>
 
 <p align="center">WEB Proxy, MTProto, VLESS XHTTP, Hysteria2, OpenFlux и аккуратная панель управления для собственного VPS</p>
 
@@ -40,15 +40,15 @@ sudo -i
 ### Установка
 
 ```bash
-sudo -i bash -c 'curl -4fsSL "https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.6.0/install.sh" -o /tmp/wpp-install.sh && bash /tmp/wpp-install.sh; code=$?; rm -f /tmp/wpp-install.sh; exit $code'
+sudo -i bash -c 'curl -4fsSL "https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.7.0/install.sh" -o /tmp/wpp-install.sh && bash /tmp/wpp-install.sh; code=$?; rm -f /tmp/wpp-install.sh; exit $code'
 ```
 
-Команда доступна после публикации тега `v2.6.0` в GitHub. Установщик запросит домен, email для HTTPS-сертификата, логин и пароль панели. После установки он покажет адрес панели и данные для входа.
+Команда доступна после публикации тега `v2.7.0` в GitLab. Установщик запросит домен, email для HTTPS-сертификата, логин и пароль панели. После установки он покажет адрес панели и данные для входа.
 
 Локальная установка из ZIP:
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=600 install -y unzip && rm -rf /root/wpp-260-release && mkdir -p /root/wpp-260-release && unzip -q /root/WEB-PANEL-PROXY-V-2.6.0-GITHUB.zip -d /root/wpp-260-release && cd /root/wpp-260-release && chmod +x ./*.sh && bash ./install-final.sh
+apt-get -o DPkg::Lock::Timeout=600 install -y unzip && rm -rf /root/wpp-270-release && mkdir -p /root/wpp-270-release && unzip -q /root/WEB-PANEL-PROXY-V-2.7.0-GITLAB.zip -d /root/wpp-270-release && cd /root/wpp-270-release && chmod +x ./*.sh && bash ./install-final.sh
 ```
 
 ### После установки

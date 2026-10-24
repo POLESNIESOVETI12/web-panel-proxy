@@ -17,6 +17,9 @@ import wpp_cdn
 
 SCHEMA = 1
 PROTOCOLS = {"vless", "hysteria", "mtproto", "web", "awg20", "awg31"}
+AWG_PROTOCOLS = {"awg20", "awg31"}
+AWG_PORT_FIRST = 52000
+AWG_PORT_LAST = 52999
 PROVIDERS = {"yandex", "vk", "beget", "selectel", "timeweb", "custom"}
 FINGERPRINTS = {"chrome", "firefox", "safari", "edge", "random", "randomized"}
 MODES = {"packet-up", "stream-up", "auto"}
@@ -171,6 +174,46 @@ def normalize_advanced(value, protocol="vless"):
     return copy.deepcopy(value)
 
 
+def advanced_from_inbound(value, protocol="vless", client=None):
+    """Convert an editable, complete Xray inbound into safe stored overrides.
+
+    Operators edit the same JSON they see in the active Xray configuration.
+    WPP-owned identity and listener fields are deliberately discarded here;
+    they are regenerated from the panel database on every apply.
+    """
+    if isinstance(value, str):
+        try: value = json.loads(value or "{}")
+        except json.JSONDecodeError as exc:
+            raise ConnectionError("Код Xray: ошибка JSON в строке "+str(exc.lineno)+".")
+    if not isinstance(value, dict):
+        raise ConnectionError("Код Xray должен быть JSON-объектом inbound.")
+    expected = "vless" if protocol == "vless" else "hysteria"
+    supplied = str(value.get("protocol", expected)).lower()
+    if supplied != expected:
+        raise ConnectionError("Протокол в коде Xray должен оставаться "+expected+".")
+    server = {}
+    for section in SERVER_SECTIONS:
+        if section in value:
+            if not isinstance(value[section], dict):
+                raise ConnectionError(section+" должен быть JSON-объектом.")
+            server[section] = copy.deepcopy(value[section])
+    settings = server.get("settings")
+    if isinstance(settings, dict):
+        settings.pop("clients", None)
+        if not settings: server.pop("settings", None)
+    stream = server.get("streamSettings")
+    if isinstance(stream, dict):
+        stream.pop("network", None)
+        stream.pop("security", None)
+        xhttp = stream.get("xhttpSettings")
+        if isinstance(xhttp, dict):
+            xhttp.pop("path", None)
+            if not xhttp: stream.pop("xhttpSettings", None)
+        if not stream: server.pop("streamSettings", None)
+    current_client = client if isinstance(client, dict) else {}
+    return normalize_advanced({"server": server, "client": copy.deepcopy(current_client)}, protocol)
+
+
 def _deep_merge(base, patch):
     result=copy.deepcopy(base) if isinstance(base,dict) else {}
     for key,value in (patch.items() if isinstance(patch,dict) else []):
@@ -226,7 +269,9 @@ def validate(raw, existing=None):
         provider = str(config.get("provider", "custom"))
         if provider not in PROVIDERS: raise ConnectionError("Неизвестный CDN-провайдер.")
         public_host = _host(config.get("public_host"), "публичный домен CDN", route == "cdn")
-        if provider == "custom" and public_host.endswith(".cdn.twcstorage.ru"):
+        if public_host.endswith(".selcdn.net"):
+            provider = "selectel"
+        elif provider == "custom" and public_host.endswith(".cdn.twcstorage.ru"):
             provider = "timeweb"
         fingerprint = str(config.get("fingerprint", "chrome"))
         if fingerprint not in FINGERPRINTS: raise ConnectionError("Неизвестный TLS fingerprint.")
@@ -300,6 +345,10 @@ def ensure(path, users=None, persist=True):
         if base["id"] not in current and base["id"] not in deleted: current[base["id"]] = base; changed = True
     for user in users or []:
         if user.get("subscription_id"): continue
+        existing_cid = str(user.get("connection_id", ""))
+        existing_connection = current.get(existing_cid)
+        if existing_connection and existing_connection.get("protocol") == user.get("protocol"):
+            continue
         connection = _from_user(user)
         if not connection: continue
         if connection["id"] in deleted: continue
@@ -334,9 +383,54 @@ def request_for_connection(connection):
             "vless_cdn_public_host": cfg.get("public_host", ""), "vless_cdn_sni": cfg.get("sni", ""),
             "vless_cdn_host_header": cfg.get("host_header", ""), "vless_cdn_fingerprint": cfg.get("fingerprint", "chrome"),
             "vless_cdn_mode": cfg.get("mode", "packet-up"), "vless_cdn_uplink_method": cfg.get("uplink_method", "GET")})
+    elif connection["protocol"] in AWG_PROTOCOLS:
+        if not cfg.get("port"):
+            raise ConnectionError("Для AWG-подключения ещё не назначен UDP-порт.")
+        request["port"] = cfg["port"]
     elif connection["protocol"] == "mtproto" and cfg.get("port"):
         request["port"] = cfg["port"]
     return request
+
+
+def claim_awg_port(path, cid, users=None):
+    """Assign one stable UDP port to an AWG connection, not to a client."""
+    data = load(path)
+    item = get(data, cid)
+    if not item or item.get("protocol") not in AWG_PROTOCOLS:
+        raise ConnectionError("AWG-подключение не найдено.")
+    config = item.get("config") if isinstance(item.get("config"), dict) else {}
+    current = _integer(config.get("port"), "Порт", 0, 65535)
+    if AWG_PORT_FIRST <= current <= AWG_PORT_LAST:
+        return item
+
+    linked = []
+    for user in users or []:
+        if user.get("protocol") not in AWG_PROTOCOLS or str(user.get("connection_id", "")) != str(cid):
+            continue
+        try: port = int(user.get("backend_port", 0))
+        except (TypeError, ValueError): continue
+        if AWG_PORT_FIRST <= port <= AWG_PORT_LAST and port not in linked: linked.append(port)
+
+    used = set()
+    for row in data.get("connections", []):
+        if row.get("id") == cid or row.get("protocol") not in AWG_PROTOCOLS: continue
+        cfg = row.get("config") if isinstance(row.get("config"), dict) else {}
+        try: port = int(cfg.get("port", 0))
+        except (TypeError, ValueError): continue
+        if AWG_PORT_FIRST <= port <= AWG_PORT_LAST: used.add(port)
+    for user in users or []:
+        if user.get("protocol") not in AWG_PROTOCOLS or str(user.get("connection_id", "")) == str(cid): continue
+        try: port = int(user.get("backend_port", 0))
+        except (TypeError, ValueError): continue
+        if AWG_PORT_FIRST <= port <= AWG_PORT_LAST: used.add(port)
+
+    port = next((value for value in linked if value not in used), None)
+    if port is None:
+        port = next((value for value in range(AWG_PORT_FIRST, AWG_PORT_LAST + 1) if value not in used), None)
+    if port is None: raise ConnectionError("Нет свободных UDP-портов для AWG.")
+    item["config"] = {**config, "port": port}
+    save(path, data)
+    return item
 
 
 def apply_to_user(user, connection):
@@ -400,6 +494,18 @@ def sync_subscriptions(data, subscriptions):
     return changed
 
 
+def _xray_bucket(connection):
+    """Return the shared runtime inbound used by a connection template."""
+    if not isinstance(connection, dict): return None
+    protocol = str(connection.get("protocol", ""))
+    if protocol == "hysteria": return "hysteria"
+    if protocol != "vless": return None
+    config = connection.get("config") if isinstance(connection.get("config"), dict) else {}
+    if config.get("route") != "cdn": return "direct"
+    provider = str(config.get("provider", "custom"))
+    return provider if provider in ("beget", "selectel", "vk", "timeweb") else "cdn"
+
+
 def upsert(path, raw):
     data = load(path); cid = str(raw.get("id", "")); old = get(data, cid) if cid else None
     item = validate(raw, existing=old)
@@ -407,6 +513,14 @@ def upsert(path, raw):
         raise ConnectionError("Подключение с таким идентификатором уже существует.")
     if old: data["connections"] = [item if row.get("id") == item["id"] else row for row in data["connections"]]
     else: data["connections"].append(item)
+    # Several templates can share one physical Xray inbound. Keep their
+    # editable JSON synchronized so saving one connection cannot create
+    # conflicting runtime settings for another connection in the same bucket.
+    bucket = _xray_bucket(item)
+    if bucket:
+        for row in data["connections"]:
+            if row.get("id") != item["id"] and _xray_bucket(row) == bucket:
+                row["advanced"] = copy.deepcopy(item.get("advanced", {}))
     data["deleted"]=[value for value in data.get("deleted",[]) if value!=item["id"]]
     save(path, data); return item
 
@@ -439,8 +553,10 @@ def remove(path, cid, users, subscriptions=None):
     return {"ok":True,"removed_users":len(removed_users),"removed_subscriptions":len(removed_subscriptions)}
 
 
-def clone(path, cid):
+def clone(path, cid, users=None):
     data = load(path); source = get(data, cid)
     if not source: raise ConnectionError("Подключение не найдено.")
     item = copy.deepcopy(source); item["id"] = secrets.token_hex(8); item["name"] += " · копия"; item["created_at"] = int(time.time())
-    data["connections"].append(item); save(path, data); return item
+    if item.get("protocol") in AWG_PROTOCOLS: item["config"] = {**item.get("config", {}), "port": 0}
+    data["connections"].append(item); save(path, data)
+    return claim_awg_port(path, item["id"], users) if item.get("protocol") in AWG_PROTOCOLS else item
