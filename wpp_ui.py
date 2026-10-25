@@ -772,7 +772,7 @@ def routing_ui(connections, state, path, csrf):
         status_title='Маршрутизация включена' if status_on else 'Маршрутизация не подключена'
         forms.append(f'''<form class="routing-form" data-routing-form="{esc(item['id'])}" method="post" action="{esc(path)}/routing-action" {'hidden' if index else ''}>
 <input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="connection_id" value="{esc(item['id'])}">
-<aside class="routing-client-notice"><span aria-hidden="true">!</span><div><b>Обновите подключение после изменения маршрутизации</b><small>Если используется подписка — обновите её в VPN-приложении. Отдельное подключение нужно удалить и добавить заново.</small></div></aside>
+<aside class="routing-client-notice"><span aria-hidden="true">!</span><div><b>Обновите подключение после изменения маршрутизации</b><small>Обновите подписку в VPN-приложении.</small></div></aside>
 <section class="routing-hero"><div><span class="connection-protocol">{esc(protocol_title)}</span><h2>{esc(item.get('name','Подключение'))}</h2><p>Отметьте только те правила, которые нужно добавить или убрать.</p></div><div class="routing-status {'on' if status_on else ''}"><i></i><span><b>{status_title}</b><small>Изменения применяются только к выбранным пунктам</small></span></div></section>
 <div class="routing-layout"><section class="routing-main"><div class="routing-switches">
 <label class="routing-toggle{active('ru_direct')}"><input type="checkbox" name="select_ru_direct" value="1"><span><b>Российские сайты напрямую {active_mark('ru_direct')}</b><small>GeoSite RU, GeoIP RU, .ru, .su, .рф и популярные сервисы</small></span></label>
