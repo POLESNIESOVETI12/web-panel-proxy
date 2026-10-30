@@ -109,6 +109,31 @@ def _managed_routes(xray_path):
     )
 
 
+def connection_routes(text, xray_path, registry):
+    """Reconcile edited XHTTP paths/listeners with WPP's Caddy routes."""
+    import wpp_connections
+    value = repair_caddy_text(text, xray_path)
+    overrides = {}
+    for item in registry.get("connections", []):
+        if item.get("protocol") != "vless": continue
+        inbound = item.get("advanced", {}).get("inbound")
+        if inbound: overrides[wpp_connections._xray_bucket(item)] = inbound
+    paths = set()
+    ports = set()
+    for bucket, default_port in (("direct",10000),("cdn",10001),("beget",10002),("selectel",10003),("vk",10004),("timeweb",10005)):
+        inbound = overrides.get(bucket, {})
+        path = inbound.get("streamSettings", {}).get("xhttpSettings", {}).get("path", wpp_cdn.endpoint_path(xray_path,bucket))
+        port = int(inbound.get("port", default_port))
+        if path in paths or port in ports or port in (443,8080,10085):
+            raise ValueError("Путь или локальный порт XHTTP уже используется другим подключением/службой.")
+        paths.add(path); ports.add(port)
+        matcher = "web_panel_vless_" + bucket
+        value = re.sub(r"(?m)^(\s*@"+matcher+r" path )[^\n]+", lambda m: m[1]+path+" "+path+"/*", value)
+        pattern = r"(?s)(handle @"+matcher+r" \{.*?reverse_proxy 127\.0\.0\.1:)\d+"
+        value = re.sub(pattern, lambda m: m[1]+str(port), value)
+    return value
+
+
 def repair_caddy_text(text, xray_path):
     """Return an idempotently repaired Caddyfile without changing external CDN settings."""
     value = str(text or "")
@@ -151,12 +176,12 @@ def _atomic_write(path, content, source_stat=None):
             pass
 
 
-def repair_caddyfile(path, xray_path):
+def repair_caddyfile(path, xray_path, registry=None):
     """Repair only WPP-owned probe/XHTTP routes and return the previous contents."""
     source_stat = os.stat(path)
     with open(path, encoding="utf-8") as stream:
         original = stream.read()
-    repaired = repair_caddy_text(original, xray_path)
+    repaired = connection_routes(original, xray_path, registry) if registry is not None else repair_caddy_text(original, xray_path)
     if repaired != original:
         _atomic_write(path, repaired, source_stat)
     return original, repaired != original
@@ -226,7 +251,7 @@ def _local_port(port, timeout):
         return True
 
 
-def run(profile, origin_domain, xray_path, timeout=7):
+def run(profile, origin_domain, xray_path, timeout=7, connection=None):
     """Return a user-facing report without accepting arbitrary probe targets."""
     provider = str(profile.get("provider", "custom")).strip().lower()
     cdn_host = _host(profile.get("public_host"))
@@ -234,7 +259,10 @@ def run(profile, origin_domain, xray_path, timeout=7):
     variant = "beget" if provider == "beget" else ("selectel" if provider == "selectel" else ("vk" if provider == "vk" else ("timeweb" if provider == "timeweb" else "cdn")))
     transport = wpp_cdn.transport_defaults(provider)
     method = transport["uplink_method"].upper()
-    expected_path = wpp_cdn.endpoint_path(xray_path, variant)
+    expected_path = wpp_cdn.client_endpoint_path(xray_path, variant)
+    if connection:
+        import wpp_connections
+        expected_path = wpp_connections.client_path(connection, xray_path)
     results = []
 
     try:
@@ -316,6 +344,7 @@ def run(profile, origin_domain, xray_path, timeout=7):
         results.append(_result("cache", "Кеширование CDN", "pass", cache or "Признаков кеширования диагностического запроса нет."))
 
     port = PROVIDER_PORTS.get(provider, 10001)
+    if connection: port = int(connection.get("advanced", {}).get("inbound", {}).get("port", port))
     try:
         _local_port(port, min(timeout, 3))
         results.append(_result("xray", "Локальный Xray inbound", "pass", f"127.0.0.1:{port} принимает соединения"))

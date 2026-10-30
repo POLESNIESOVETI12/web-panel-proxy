@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Safe in-place updater for WEB PANEL PROXY V 2.7.0.
+# Safe in-place updater for WEB PANEL PROXY V 2.8.0.
 set -Eeuo pipefail
 umask 077
 
@@ -56,8 +56,8 @@ if [[ $# == 0 && -s "$SCRIPT_DIR/install-panel.sh" && -s "$SCRIPT_DIR/wpp_ui.py"
 fi
 if [[ "${1:-}" == "--local" || "$AUTO_LOCAL" == 1 ]]; then
     LOCAL_SOURCE="$SCRIPT_DIR"
-    RELEASE_REF="v2.7.0"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
+    RELEASE_REF="v2.8.0"
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png THIRD-PARTY-NOTICES.md wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_extra_protocols.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
         [[ -s "$LOCAL_SOURCE/$file" ]] || { echo "Incomplete local archive: $file is missing." >&2; exit 1; }
     done
     [[ -s "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" || -s "$LOCAL_SOURCE/OpenFlux-linux-amd64" ]] || {
@@ -67,6 +67,9 @@ if [[ "${1:-}" == "--local" || "$AUTO_LOCAL" == 1 ]]; then
         [[ -s "$LOCAL_SOURCE/assets/$file" ]] || {
             echo "Incomplete local archive: assets/$file is missing." >&2; exit 1;
         }
+    done
+    for file in caddy-forwardproxy-naive-v2.11.7-naive2.tar.xz mita-v3.39.0-linux-amd64.tar.gz mieru-v3.39.0-source.tar.gz; do
+        [[ -s "$LOCAL_SOURCE/assets/$file" ]] || { echo "Incomplete local archive: assets/$file is missing." >&2; exit 1; }
     done
     [[ -s "$LOCAL_SOURCE/wpp-panel/flags.tar.gz" ]] || {
         echo "Incomplete local archive: wpp-panel/flags.tar.gz is missing." >&2; exit 1;
@@ -91,7 +94,7 @@ exec 9>/run/lock/web-panel-proxy.lock
 flock -n 9 || die "Another WEB PANEL PROXY install, update or removal is already running."
 
 echo "============================================================"
-echo "     WEB PANEL PROXY V 2.7.0 — SAFE UPDATE"
+echo "     WEB PANEL PROXY V 2.8.0 — SAFE UPDATE"
 echo "============================================================"
 echo "Users, administrator password, panel URL and site HTML will be retained."
 wpp_progress_start "Проверка установленной версии"
@@ -161,6 +164,11 @@ for item in /opt/tproxy-panel /opt/web-panel-proxy /opt/MTProxy /usr/local/bin/c
     [[ -e "$item" ]] && BACKUP_ITEMS+=("$item")
     [[ -e "$item" ]] && cp -a --parents "$item" "$BACKUP"
 done
+for item in /usr/local/bin/caddy-naive /usr/local/bin/mita-wpp /etc/systemd/system/web-panel-proxy-naive.service /etc/systemd/system/web-panel-proxy-mieru.service /etc/systemd/system/web-panel-proxy-mieru@.service; do
+    [[ -e "$item" ]] || continue
+    BACKUP_ITEMS+=("$item")
+    cp -a --parents "$item" "$BACKUP"
+done
 shopt -s nullglob
 for item in /etc/systemd/system/web-proxy-user-*.service /etc/systemd/system/web-panel-proxy-web-update.service /etc/systemd/system/web-panel-proxy-auto-update.service /etc/systemd/system/web-panel-proxy-auto-update.timer /etc/systemd/system/web-panel-proxy-metrics.service /etc/systemd/system/web-panel-proxy-metrics.timer; do
     [[ -e "$item" ]] || continue
@@ -208,9 +216,12 @@ HAD_PANEL_STATE_DIR=0
 HAD_XRAY_STATE=0
 HAD_XRAY_USER=0
 HAD_XRAY_GROUP=0
+HAD_MITA_USER=0
+HAD_MITA_GROUP=0
 HAD_OPENFLUX_UNIT=0
 HAD_OPENFLUX_USER=0
 HAD_AWG=0
+HAD_EXTRA_PROTOCOLS=0
 HAD_WPP_MENU=0
 HAD_WEB_UPDATE_UNIT=0
 [[ -e /etc/systemd/system/web-panel-proxy-web-update.service ]] && HAD_WEB_UPDATE_UNIT=1
@@ -226,17 +237,21 @@ HAD_COMPONENT_UPDATE_UNIT=0
 { [[ -e /opt/web-panel-proxy ]] || [[ -e /etc/web-panel-proxy-xray ]] || [[ -e /etc/systemd/system/web-panel-proxy-xray.service ]]; } && HAD_XRAY_STATE=1
 id xray >/dev/null 2>&1 && HAD_XRAY_USER=1
 getent group xray >/dev/null 2>&1 && HAD_XRAY_GROUP=1
+id mita >/dev/null 2>&1 && HAD_MITA_USER=1
+getent group mita >/dev/null 2>&1 && HAD_MITA_GROUP=1
 [[ -e /etc/systemd/system/web-panel-proxy-openflux.service ]] && HAD_OPENFLUX_UNIT=1
 id wpp-openflux >/dev/null 2>&1 && HAD_OPENFLUX_USER=1
 [[ -e /etc/systemd/system/web-panel-proxy-awg@.service || -x /usr/local/bin/amneziawg-go ]] && HAD_AWG=1
+[[ -e /etc/systemd/system/web-panel-proxy-naive.service || -e /etc/systemd/system/web-panel-proxy-mieru.service || -e /etc/systemd/system/web-panel-proxy-mieru@.service ]] && HAD_EXTRA_PROTOCOLS=1
 [[ -e /usr/local/sbin/WPP ]] && HAD_WPP_MENU=1
 UPDATE_COMMITTED=0
 rollback_update() {
     local code="$1"
     [[ "$UPDATE_COMMITTED" == 1 || "$code" == 0 ]] && return 0
     echo "Update failed; restoring the previous working state..." >&2
-    systemctl stop tproxy-panel.service web-proxy-panel-firewall.service web-proxy-panel-traffic.timer web-proxy-panel-traffic.service web-panel-proxy-metrics.timer web-panel-proxy-metrics.service web-panel-proxy-xray.service web-panel-proxy-openflux.service web-panel-proxy-sync-tls.timer web-panel-proxy-auto-update.timer web-panel-proxy-auto-update.service 2>/dev/null || true
+    systemctl stop tproxy-panel.service web-proxy-panel-firewall.service web-proxy-panel-traffic.timer web-proxy-panel-traffic.service web-panel-proxy-metrics.timer web-panel-proxy-metrics.service web-panel-proxy-xray.service web-panel-proxy-openflux.service web-panel-proxy-naive.service web-panel-proxy-mieru.service web-panel-proxy-sync-tls.timer web-panel-proxy-auto-update.timer web-panel-proxy-auto-update.service 2>/dev/null || true
     for unit in $(systemctl list-units --all 'web-panel-proxy-awg@*.service' --no-legend 2>/dev/null | awk '{print $1}'); do systemctl stop "$unit" 2>/dev/null || true; done
+    for unit in $(systemctl list-units --all 'web-panel-proxy-mieru@*.service' --no-legend 2>/dev/null | awk '{print $1}'); do systemctl stop "$unit" 2>/dev/null || true; done
     tar --numeric-owner -xpf "$BACKUP/state.tar" -C / 2>/dev/null || true
     if [[ "$HAD_FIREWALL_SERVICE" == 0 ]]; then
         rm -f /etc/systemd/system/web-proxy-panel-firewall.service
@@ -294,6 +309,15 @@ rollback_update() {
     if [[ "$HAD_XRAY_GROUP" == 0 ]]; then
         groupdel xray 2>/dev/null || true
     fi
+    if [[ "$HAD_MITA_USER" == 0 ]]; then
+        rm -rf -- /var/lib/mita
+        userdel mita 2>/dev/null || true
+        rm -f /etc/web-proxy-panel/mita-user-owned
+    fi
+    if [[ "$HAD_MITA_GROUP" == 0 ]]; then
+        groupdel mita 2>/dev/null || true
+        rm -f /etc/web-proxy-panel/mita-group-owned
+    fi
     if [[ "$HAD_OPENFLUX_UNIT" == 0 ]]; then
         systemctl disable --now web-panel-proxy-openflux.service 2>/dev/null || true
         rm -f /etc/systemd/system/web-panel-proxy-openflux.service
@@ -309,6 +333,14 @@ rollback_update() {
         rm -f /etc/systemd/system/multi-user.target.wants/web-panel-proxy-awg@*.service
         nft delete table ip web_proxy_awg 2>/dev/null || true
     fi
+    if [[ "$HAD_EXTRA_PROTOCOLS" == 0 ]]; then
+        rm -f /usr/local/bin/caddy-naive /usr/local/bin/mita-wpp \
+            /etc/systemd/system/web-panel-proxy-naive.service /etc/systemd/system/web-panel-proxy-mieru.service /etc/systemd/system/web-panel-proxy-mieru@.service
+        rm -f /etc/systemd/system/multi-user.target.wants/web-panel-proxy-naive.service \
+            /etc/systemd/system/multi-user.target.wants/web-panel-proxy-mieru.service \
+            /etc/systemd/system/multi-user.target.wants/web-panel-proxy-mieru@*.service
+        rm -rf -- /etc/web-proxy-panel/extra-protocols
+    fi
     systemctl daemon-reload
     systemctl restart mtproxy.service tproxy-server.service caddy.service tproxy-panel.service 2>/dev/null || true
     [[ -e /etc/web-proxy-panel/openflux/enabled ]] && systemctl restart web-panel-proxy-openflux.service 2>/dev/null || true
@@ -316,6 +348,13 @@ rollback_update() {
     [[ "$HAD_XRAY_STATE" == 1 ]] && systemctl restart web-panel-proxy-xray.service 2>/dev/null || true
     if [[ "$HAD_AWG" == 1 ]]; then
         for unit in $(systemctl list-unit-files 'web-panel-proxy-awg@*.service' --no-legend 2>/dev/null | awk '$2=="enabled" {print $1}'); do
+            systemctl restart "$unit" 2>/dev/null || true
+        done
+    fi
+    if [[ "$HAD_EXTRA_PROTOCOLS" == 1 ]]; then
+        systemctl is-enabled --quiet web-panel-proxy-naive.service 2>/dev/null && systemctl restart web-panel-proxy-naive.service 2>/dev/null || true
+        systemctl is-enabled --quiet web-panel-proxy-mieru.service 2>/dev/null && systemctl restart web-panel-proxy-mieru.service 2>/dev/null || true
+        for unit in $(systemctl list-unit-files 'web-panel-proxy-mieru@*.service' --no-legend 2>/dev/null | awk '$2=="enabled" {print $1}'); do
             systemctl restart "$unit" 2>/dev/null || true
         done
     fi
@@ -366,7 +405,7 @@ wpp_progress 25 "Получение файлов обновления"
 if [[ -n "$LOCAL_SOURCE" ]]; then
     install -d -m 0700 "$TEMP_DIR/source"
     install -d -m 0700 "$TEMP_DIR/source/assets"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png THIRD-PARTY-NOTICES.md wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_extra_protocols.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
         cp -a "$LOCAL_SOURCE/$file" "$TEMP_DIR/source/$file"
     done
     if [[ -s "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" ]]; then
@@ -375,6 +414,9 @@ if [[ -n "$LOCAL_SOURCE" ]]; then
         cp -a "$LOCAL_SOURCE/OpenFlux-linux-amd64" "$TEMP_DIR/source/assets/OpenFlux-linux-amd64"
     fi
     for file in amneziawg-go-linux-amd64 awg-linux-amd64 awg-quick-linux-amd64; do
+        cp -a "$LOCAL_SOURCE/assets/$file" "$TEMP_DIR/source/assets/$file"
+    done
+    for file in caddy-forwardproxy-naive-v2.11.7-naive2.tar.xz mita-v3.39.0-linux-amd64.tar.gz mieru-v3.39.0-source.tar.gz; do
         cp -a "$LOCAL_SOURCE/assets/$file" "$TEMP_DIR/source/assets/$file"
     done
     for file in preset-cars.webp preset-car-graphite.webp preset-car-silver.webp preset-car-white.webp preset-car-blue.webp preset-car-red.webp preset-car-black.webp preset-coffee.webp awg-routing-guide.mp4; do

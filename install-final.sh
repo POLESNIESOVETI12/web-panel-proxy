@@ -42,7 +42,7 @@ wpp_progress_finish() {
 }
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-for file in install-panel.sh install-webproxy-core.sh uninstall-web-proxy.sh update.sh panel-logo.png wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py; do
+for file in install-panel.sh install-webproxy-core.sh uninstall-web-proxy.sh update.sh panel-logo.png THIRD-PARTY-NOTICES.md wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_extra_protocols.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py; do
     [[ -s "$BASE/$file" ]] || die "Package is incomplete: missing $file. Extract the complete archive."
 done
 [[ -s "$BASE/assets/OpenFlux-linux-amd64" || -s "$BASE/OpenFlux-linux-amd64" ]] ||
@@ -51,6 +51,11 @@ for file in amneziawg-go-linux-amd64 awg-linux-amd64 awg-quick-linux-amd64; do
     [[ -s "$BASE/assets/$file" ]] ||
         die "Package is incomplete: missing assets/$file. Extract the complete archive."
 done
+for file in caddy-forwardproxy-naive-v2.11.7-naive2.tar.xz mita-v3.39.0-linux-amd64.tar.gz mieru-v3.39.0-source.tar.gz; do
+    [[ -s "$BASE/assets/$file" ]] || die "Package is incomplete: missing assets/$file. Extract the complete archive."
+done
+echo "434198ea0558bc440379e9a0a97f6904ba8dd6b213dd6fb9d578388eba7d2f12  $BASE/assets/mieru-v3.39.0-source.tar.gz" | sha256sum -c - >/dev/null ||
+    die "Bundled Mieru source archive is damaged."
 [[ -s "$BASE/assets/awg-routing-guide.mp4" ]] ||
     die "Package is incomplete: missing assets/awg-routing-guide.mp4. Extract the complete archive."
 [[ -s "$BASE/wpp-panel/flags.tar.gz" ]] ||
@@ -70,7 +75,7 @@ trap finish_install EXIT
 wpp_progress_start "Проверка пакета"
 wpp_progress 5 "Подготовка сервера"
 
-echo "WEB PANEL PROXY V 2.7.0: preparing server..."
+echo "WEB PANEL PROXY V 2.8.0: preparing server..."
 
 PANEL_UPDATE=0
 if [[ -s /var/lib/tproxy-panel/data.json ]] &&
@@ -92,7 +97,7 @@ install -o root -g root -m 0755 \
 
 echo "Installing proxy services..."
 wpp_progress 10 "Установка прокси-служб"
-WEB_PANEL_PROXY_PACKAGE_VERSION="2.7.0" bash "$BASE/install-webproxy-core.sh"
+WEB_PANEL_PROXY_PACKAGE_VERSION="2.8.0" bash "$BASE/install-webproxy-core.sh"
 wpp_progress 55 "Прокси-службы установлены"
 
 echo "Installing control panel..."
@@ -116,6 +121,12 @@ nft list table ip web_proxy_awg >/dev/null 2>&1 ||
 for file in /usr/local/bin/amneziawg-go /usr/local/bin/awg /usr/local/bin/awg-quick; do
     [[ -x "$file" ]] || die "AmneziaWG component was not installed: $file"
 done
+for file in /usr/local/bin/caddy-naive /usr/local/bin/mita-wpp; do
+    [[ -x "$file" ]] || die "Additional proxy component was not installed: $file"
+done
+for file in /etc/systemd/system/web-panel-proxy-naive.service /etc/systemd/system/web-panel-proxy-mieru.service; do
+    [[ -s "$file" ]] || die "Additional proxy service was not installed: $file"
+done
 [[ -s /etc/systemd/system/web-panel-proxy-awg@.service ]] ||
     die "AmneziaWG service template was not installed."
 [[ -x /opt/web-panel-proxy/xray/xray ]] || die "Xray binary was not installed."
@@ -131,5 +142,5 @@ if ! systemctl start web-panel-proxy-component-auto-update.service; then
 fi
 echo "Installation complete."
 wpp_progress 100 "Установка завершена"
-printf '%s\n' '2.7.0' > /etc/web-proxy-panel/version
+printf '%s\n' '2.8.0' > /etc/web-proxy-panel/version
 chmod 0600 /etc/web-proxy-panel/version

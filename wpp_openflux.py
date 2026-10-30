@@ -87,7 +87,10 @@ def _share_payload(config):
 def _python_share_link(payload):
     """Compatibility fallback for an installed core predating --make-link."""
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    packed = zlib.compress(raw, 9)
+    # share.Encode/Decode in OpenFlux use raw DEFLATE, not a zlib envelope.
+    # A wrapped stream produces code=damaged in the official clients.
+    compressor = zlib.compressobj(level=9, wbits=-zlib.MAX_WBITS)
+    packed = compressor.compress(raw) + compressor.flush()
     return "openflux://v1/" + base64.urlsafe_b64encode(packed).decode("ascii").rstrip("=")
 
 

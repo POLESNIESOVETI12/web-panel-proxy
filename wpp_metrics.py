@@ -15,7 +15,9 @@ TRAFFIC = Path('/var/lib/tproxy-panel/traffic.json')
 ERROR = Path('/var/lib/tproxy-panel/metrics-error.json')
 PROC = Path('/proc')
 SERVICES = {'xray': 'web-panel-proxy-xray.service', 'panel': 'tproxy-panel.service',
-            'caddy': 'caddy.service', 'relay': 'tproxy-server.service'}
+            'caddy': 'caddy.service', 'relay': 'tproxy-server.service',
+            'naive': 'web-panel-proxy-naive.service',
+            'mieru': 'web-panel-proxy-mieru.service'}
 OPENFLUX_PROFILES = Path('/etc/web-proxy-panel/openflux/profiles')
 MTPROXY_ECONOMY = Path('/etc/web-proxy-panel/mtproxy-economy')
 

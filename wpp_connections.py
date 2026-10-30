@@ -16,15 +16,16 @@ import time
 import wpp_cdn
 
 SCHEMA = 1
-PROTOCOLS = {"vless", "hysteria", "mtproto", "web", "awg20", "awg31"}
+PROTOCOLS = {"vless", "hysteria", "mtproto", "web", "awg20", "awg31", "naive", "mieru"}
 AWG_PROTOCOLS = {"awg20", "awg31"}
+EXTERNAL_PROTOCOLS = {"naive", "mieru"}
 AWG_PORT_FIRST = 52000
 AWG_PORT_LAST = 52999
 PROVIDERS = {"yandex", "vk", "beget", "selectel", "timeweb", "custom"}
 FINGERPRINTS = {"chrome", "firefox", "safari", "edge", "random", "randomized"}
 MODES = {"packet-up", "stream-up", "auto"}
 METHODS = {"GET", "POST", "DELETE"}
-ADVANCED_TOP = {"server", "client"}
+ADVANCED_TOP = {"server", "client", "inbound"}
 SERVER_SECTIONS = {"settings", "streamSettings", "sniffing", "allocate"}
 CLIENT_SECTIONS = {"mode", "extra", "alpn", "fingerprint"}
 HOST_RE = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", re.I)
@@ -47,6 +48,8 @@ def defaults():
         _base("web-primary", "Web Proxy · HTTPS", "web", port=0),
         _base("awg20-primary", "AmneziaWG 2.0 · отдельный профиль", "awg20", port=0),
         _base("awg31-primary", "AmneziaWG 3.1 · отдельный профиль", "awg31", port=0),
+        _base("naive-primary", "NaiveProxy · отдельный TLS-порт", "naive", port=53000),
+        _base("mieru-primary", "Mieru · TCP", "mieru", port=54000, transport="TCP"),
     ]
 
 
@@ -132,6 +135,34 @@ def normalize_advanced(value, protocol="vless"):
     if not isinstance(value, dict): raise ConnectionError("Расширенные настройки должны быть JSON-объектом.")
     unknown=set(value)-ADVANCED_TOP
     if unknown: raise ConnectionError("Неизвестный раздел Xray: "+", ".join(sorted(unknown))+".")
+    if "inbound" in value:
+        inbound = value["inbound"]
+        if protocol not in ("vless", "hysteria") or not isinstance(inbound, dict):
+            raise ConnectionError("Редактор inbound доступен для VLESS и Hysteria2.")
+        if inbound.get("protocol") != protocol:
+            raise ConnectionError("Протокол JSON должен совпадать с протоколом подключения.")
+        if not isinstance(inbound.get("settings", {}), dict):
+            raise ConnectionError("settings должен быть JSON-объектом.")
+        if "clients" in inbound.get("settings", {}):
+            raise ConnectionError("UUID и пароли клиентов изменяются во вкладке «Пользователи».")
+        port = inbound.get("port")
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ConnectionError("port: укажите целый порт от 1 до 65535.")
+        stream = inbound.get("streamSettings", {})
+        if not isinstance(stream, dict) or not isinstance(inbound.get("settings", {}), dict):
+            raise ConnectionError("settings и streamSettings должны быть JSON-объектами.")
+        if protocol == "vless":
+            if inbound.get("listen") != "127.0.0.1" or stream.get("network") != "xhttp" or stream.get("security", "none") != "none":
+                raise ConnectionError("Это подключение XHTTP за Caddy: listen должен быть 127.0.0.1, network — xhttp, security — none. TLS работает на Caddy.")
+            if not isinstance(stream.get("xhttpSettings"), dict):
+                raise ConnectionError("xhttpSettings должен быть JSON-объектом.")
+            path = stream.get("xhttpSettings", {}).get("path", "")
+            if not isinstance(path, str) or not re.fullmatch(r"/[A-Za-z0-9_./%~-]+", path) or "//" in path or "/../" in path:
+                raise ConnectionError("Укажите путь XHTTP: / и латинские буквы, цифры, -, _, ., %, ~. Без пробелов и параметров запроса.")
+        elif stream.get("network") != "hysteria" or stream.get("security") != "tls":
+            raise ConnectionError("Для Hysteria2 необходимы network hysteria и security tls.")
+        if not isinstance(inbound.get("tag"), str) or not inbound["tag"].strip():
+            raise ConnectionError("Укажите непустой tag подключения.")
     server=value.get("server",{})
     client=value.get("client",{})
     if not isinstance(server,dict) or not isinstance(client,dict):
@@ -169,17 +200,17 @@ def normalize_advanced(value, protocol="vless"):
         if not isinstance(alpn,list) or not alpn or len(alpn)>3 or any(item not in ("h2","h3","http/1.1") for item in alpn):
             raise ConnectionError("client.alpn: используйте список из h2, h3 или http/1.1.")
     _json_tree(value,"Расширенные настройки")
-    encoded=json.dumps(value,ensure_ascii=False,separators=(",",":"))
+    try: encoded=json.dumps(value,ensure_ascii=False,separators=(",",":"),allow_nan=False)
+    except (ValueError,TypeError): raise ConnectionError("Недопустимое значение JSON.")
     if len(encoded)>32768: raise ConnectionError("Расширенные настройки слишком большие.")
     return copy.deepcopy(value)
 
 
-def advanced_from_inbound(value, protocol="vless", client=None):
-    """Convert an editable, complete Xray inbound into safe stored overrides.
+def advanced_from_inbound(value, protocol="vless", client=None, current=None):
+    """Keep the edited inbound intact; only credentials remain panel-managed.
 
-    Operators edit the same JSON they see in the active Xray configuration.
-    WPP-owned identity and listener fields are deliberately discarded here;
-    they are regenerated from the panel database on every apply.
+    Never silently discard an edit to a managed field. The server compares
+    credentials with the live inbound, not with a client-supplied baseline.
     """
     if isinstance(value, str):
         try: value = json.loads(value or "{}")
@@ -191,27 +222,20 @@ def advanced_from_inbound(value, protocol="vless", client=None):
     supplied = str(value.get("protocol", expected)).lower()
     if supplied != expected:
         raise ConnectionError("Протокол в коде Xray должен оставаться "+expected+".")
-    server = {}
-    for section in SERVER_SECTIONS:
-        if section in value:
-            if not isinstance(value[section], dict):
-                raise ConnectionError(section+" должен быть JSON-объектом.")
-            server[section] = copy.deepcopy(value[section])
-    settings = server.get("settings")
-    if isinstance(settings, dict):
-        settings.pop("clients", None)
-        if not settings: server.pop("settings", None)
-    stream = server.get("streamSettings")
-    if isinstance(stream, dict):
-        stream.pop("network", None)
-        stream.pop("security", None)
-        xhttp = stream.get("xhttpSettings")
-        if isinstance(xhttp, dict):
-            xhttp.pop("path", None)
-            if not xhttp: stream.pop("xhttpSettings", None)
-        if not stream: server.pop("streamSettings", None)
+    value = copy.deepcopy(value)
+    if "inbounds" in value or "outbounds" in value:
+        raise ConnectionError("Здесь редактируется inbound выбранного подключения, а не конфигурация всей службы Xray.")
+    if "dns" in value or "routing" in value:
+        raise ConnectionError("DNS и routing настраиваются во вкладке «Маршрутизация», отдельно от серверного inbound.")
+    settings = value.get("settings", {})
+    if not isinstance(settings, dict): raise ConnectionError("settings должен быть JSON-объектом.")
+    current_clients = (current or {}).get("settings", {}).get("clients", [])
+    if settings.get("clients", []) != current_clients:
+        raise ConnectionError("Список clients изменён. UUID и пароли редактируются во вкладке «Пользователи», чтобы переключатели доступа продолжали работать. Откройте подключение заново, если список клиентов обновился.")
+    settings.pop("clients", None)
+    value["settings"] = settings
     current_client = client if isinstance(client, dict) else {}
-    return normalize_advanced({"server": server, "client": copy.deepcopy(current_client)}, protocol)
+    return normalize_advanced({"inbound": value, "client": copy.deepcopy(current_client)}, protocol)
 
 
 def _deep_merge(base, patch):
@@ -224,10 +248,38 @@ def _deep_merge(base, patch):
 def apply_server_advanced(inbound, advanced, protocol="vless"):
     """Merge validated overrides into an inbound without replacing WPP keys."""
     result=copy.deepcopy(inbound)
-    server=normalize_advanced(advanced,protocol).get("server",{})
+    clean=normalize_advanced(advanced,protocol)
+    if "inbound" in clean:
+        result=copy.deepcopy(clean["inbound"])
+        result.setdefault("settings",{})["clients"]=copy.deepcopy(inbound.get("settings",{}).get("clients",[]))
+        return result
+    server=clean.get("server",{})
     for section in SERVER_SECTIONS:
         if section in server: result[section]=_deep_merge(result.get(section),server[section])
     return result
+
+
+def inbound_tag(connection):
+    override = connection.get("advanced", {}).get("inbound", {})
+    if override.get("tag"): return override["tag"]
+    bucket = _xray_bucket(connection)
+    return "hysteria2" if bucket == "hysteria" else "vless-xhttp" + ("-" + bucket if bucket and bucket != "direct" else "")
+
+
+def hysteria_port(data, default=8443):
+    for item in data.get("connections", []):
+        if item.get("protocol") == "hysteria":
+            return int(item.get("advanced", {}).get("inbound", {}).get("port", default))
+    return default
+
+
+def client_path(connection, root):
+    bucket = _xray_bucket(connection)
+    path = connection.get("advanced", {}).get("inbound", {}).get("streamSettings", {}).get("xhttpSettings", {}).get("path")
+    if not path: return wpp_cdn.client_endpoint_path(root, bucket)
+    if bucket == "timeweb" and not path.endswith("/index.json"):
+        return path.rstrip("/") + "/index.json"
+    return path
 
 
 def client_advanced(advanced, protocol="vless"):
@@ -297,6 +349,12 @@ def validate(raw, existing=None):
             "no_sse_header": bool(config.get("no_sse_header", False))}
     else:
         result["config"] = {"port": _integer(config.get("port"), "Порт", 0, 65535)}
+        if protocol in EXTERNAL_PROTOCOLS and result["config"]["port"] and result["config"]["port"] < 1025:
+            raise ConnectionError("Порт Naive/Mieru должен быть от 1025 до 65535.")
+        if protocol == "mieru":
+            transport = str(config.get("transport", "TCP")).upper()
+            if transport not in ("TCP", "UDP"): raise ConnectionError("Mieru поддерживает TCP или UDP.")
+            result["config"]["transport"] = transport
     result["advanced"] = normalize_advanced(raw.get("advanced", old.get("advanced", {})), protocol)
     return result
 
@@ -325,7 +383,8 @@ def _from_user(user):
             padding=cdn.get("padding", "100-1000"), xmux=cdn.get("xmux", provider in ("beget", "selectel", "timeweb")),
             no_sse_header=cdn.get("no_sse_header", False))
     mapping = {"vless": "vless-direct", "hysteria": "hysteria-primary", "mtproto": "mtproto-primary", "web": "web-primary",
-               "awg20": "awg20-primary", "awg31": "awg31-primary"}
+               "awg20": "awg20-primary", "awg31": "awg31-primary",
+               "naive": "naive-primary", "mieru": "mieru-primary"}
     return next((item for item in defaults() if item["id"] == mapping.get(protocol)), None)
 
 
@@ -383,9 +442,9 @@ def request_for_connection(connection):
             "vless_cdn_public_host": cfg.get("public_host", ""), "vless_cdn_sni": cfg.get("sni", ""),
             "vless_cdn_host_header": cfg.get("host_header", ""), "vless_cdn_fingerprint": cfg.get("fingerprint", "chrome"),
             "vless_cdn_mode": cfg.get("mode", "packet-up"), "vless_cdn_uplink_method": cfg.get("uplink_method", "GET")})
-    elif connection["protocol"] in AWG_PROTOCOLS:
+    elif connection["protocol"] in AWG_PROTOCOLS | EXTERNAL_PROTOCOLS:
         if not cfg.get("port"):
-            raise ConnectionError("Для AWG-подключения ещё не назначен UDP-порт.")
+            raise ConnectionError("Для подключения ещё не назначен порт.")
         request["port"] = cfg["port"]
     elif connection["protocol"] == "mtproto" and cfg.get("port"):
         request["port"] = cfg["port"]
@@ -433,12 +492,41 @@ def claim_awg_port(path, cid, users=None):
     return item
 
 
+def claim_external_port(path, cid):
+    """Assign a stable non-conflicting port to a Naive or Mieru connection."""
+    data = load(path)
+    item = get(data, cid)
+    if not item or item.get("protocol") not in EXTERNAL_PROTOCOLS:
+        raise ConnectionError("Подключение Naive/Mieru не найдено.")
+    config = item.get("config") if isinstance(item.get("config"), dict) else {}
+    try: current = int(config.get("port", 0))
+    except (TypeError, ValueError): current = 0
+    used = set()
+    for row in data.get("connections", []):
+        if row.get("id") == cid: continue
+        cfg = row.get("config") if isinstance(row.get("config"), dict) else {}
+        try: port = int(cfg.get("port", 0))
+        except (TypeError, ValueError): continue
+        if port: used.add(port)
+    if 1025 <= current <= 65535 and current not in used:
+        return item
+    first = 53000 if item.get("protocol") == "naive" else 54000
+    port = next((value for value in range(first, first + 1000) if value not in used), None)
+    if port is None: raise ConnectionError("Нет свободных портов для подключения.")
+    item["config"] = {**config, "port": port}
+    save(path, data)
+    return item
+
+
 def apply_to_user(user, connection):
     """Apply mutable transport settings without touching client credentials."""
     connection = validate(connection, existing=connection)
     if user.get("protocol") != connection.get("protocol"):
         raise ConnectionError("Протокол подключения не совпадает с протоколом пользователя.")
     user["connection_id"] = connection["id"]
+    if user.get("protocol") in EXTERNAL_PROTOCOLS:
+        user["backend_port"] = int(connection["config"]["port"])
+        user["transport"] = str(connection["config"].get("transport", "TCP")).upper()
     if user.get("protocol") == "vless":
         cfg = connection["config"]
         if cfg.get("route") == "direct":
@@ -511,6 +599,14 @@ def upsert(path, raw):
     item = validate(raw, existing=old)
     if any(row.get("id") == item["id"] and row is not old for row in data["connections"]):
         raise ConnectionError("Подключение с таким идентификатором уже существует.")
+    if item.get("protocol") in EXTERNAL_PROTOCOLS and item.get("config", {}).get("port"):
+        port = int(item["config"]["port"])
+        for row in data["connections"]:
+            if row.get("id") == item["id"]: continue
+            try: occupied = int((row.get("config") or {}).get("port", 0) or 0)
+            except (TypeError, ValueError): continue
+            if occupied == port:
+                raise ConnectionError(f"Порт {port} уже закреплён за другим подключением.")
     if old: data["connections"] = [item if row.get("id") == item["id"] else row for row in data["connections"]]
     else: data["connections"].append(item)
     # Several templates can share one physical Xray inbound. Keep their
@@ -518,6 +614,9 @@ def upsert(path, raw):
     # conflicting runtime settings for another connection in the same bucket.
     bucket = _xray_bucket(item)
     if bucket:
+        if not old and not item.get("advanced"):
+            shared=next((row for row in data["connections"] if row.get("id")!=item["id"] and _xray_bucket(row)==bucket),None)
+            if shared: item["advanced"]=copy.deepcopy(shared.get("advanced",{}))
         for row in data["connections"]:
             if row.get("id") != item["id"] and _xray_bucket(row) == bucket:
                 row["advanced"] = copy.deepcopy(item.get("advanced", {}))
@@ -556,7 +655,14 @@ def remove(path, cid, users, subscriptions=None):
 def clone(path, cid, users=None):
     data = load(path); source = get(data, cid)
     if not source: raise ConnectionError("Подключение не найдено.")
+    previous = copy.deepcopy(data)
     item = copy.deepcopy(source); item["id"] = secrets.token_hex(8); item["name"] += " · копия"; item["created_at"] = int(time.time())
-    if item.get("protocol") in AWG_PROTOCOLS: item["config"] = {**item.get("config", {}), "port": 0}
+    if item.get("protocol") in AWG_PROTOCOLS | EXTERNAL_PROTOCOLS: item["config"] = {**item.get("config", {}), "port": 0}
     data["connections"].append(item); save(path, data)
-    return claim_awg_port(path, item["id"], users) if item.get("protocol") in AWG_PROTOCOLS else item
+    try:
+        if item.get("protocol") in AWG_PROTOCOLS: return claim_awg_port(path, item["id"], users)
+        if item.get("protocol") in EXTERNAL_PROTOCOLS: return claim_external_port(path, item["id"])
+    except Exception:
+        save(path, previous)
+        raise
+    return item

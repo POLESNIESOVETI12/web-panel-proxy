@@ -52,6 +52,8 @@ CADDY_OWNED=0
 CADDY_SHARED=0
 XRAY_USER_OWNED=0
 XRAY_GROUP_OWNED=0
+MITA_USER_OWNED=0
+MITA_GROUP_OWNED=0
 HYSTERIA_UFW_OWNED=0
 HYSTERIA_UFW_PORTS=""
 MTPROTO_UFW_PORTS=""
@@ -65,6 +67,8 @@ NAIVE_CADDY_OWNED=0
 [[ "$CADDY_MARKER" == "WEB_PANEL_PROXY_V2_CADDY_SHARED" ]] && CADDY_SHARED=1
 [[ -e /etc/web-proxy-panel/xray-user-owned ]] && XRAY_USER_OWNED=1
 [[ -e /etc/web-proxy-panel/xray-group-owned ]] && XRAY_GROUP_OWNED=1
+[[ -e /etc/web-proxy-panel/mita-user-owned ]] && MITA_USER_OWNED=1
+[[ -e /etc/web-proxy-panel/mita-group-owned ]] && MITA_GROUP_OWNED=1
 [[ -e /etc/web-proxy-panel/mieru-ufw-owned ]] && MIERU_UFW_OWNED=1
 [[ -e /etc/web-proxy-panel/mita-package-owned ]] && MIERU_PACKAGE_OWNED=1
 [[ -e /etc/web-proxy-panel/naive-caddy-owned ]] && NAIVE_CADDY_OWNED=1
@@ -93,12 +97,16 @@ for unit in \
   web-proxy-panel-firewall.service web-proxy-panel-firewall-maintenance.timer web-proxy-panel-firewall-maintenance.service \
   web-proxy-panel-traffic.timer web-proxy-panel-traffic.service web-panel-proxy-xray.service \
   web-panel-proxy-sync-tls.timer web-panel-proxy-sync-tls.service \
+  web-panel-proxy-naive.service web-panel-proxy-mieru.service \
   tproxy-firewall.service refresh-mtproxy-config.timer refresh-mtproxy-config.service \
   tproxy-server.service mtproxy.service
 do
   systemctl disable --now "$unit" 2>/dev/null || true
 done
 for unit in $(systemctl list-units --all 'web-panel-proxy-awg@*.service' --no-legend 2>/dev/null | awk '{print $1}'); do
+  systemctl disable --now "$unit" 2>/dev/null || true
+done
+for unit in $(systemctl list-units --all 'web-panel-proxy-mieru@*.service' --no-legend 2>/dev/null | awk '{print $1}'); do
   systemctl disable --now "$unit" 2>/dev/null || true
 done
 mita stop >/dev/null 2>&1 || true
@@ -263,6 +271,9 @@ rm -f -- \
   /etc/systemd/system/web-panel-proxy-xray.service \
   /etc/systemd/system/web-panel-proxy-openflux.service \
   /etc/systemd/system/web-panel-proxy-awg@.service \
+  /etc/systemd/system/web-panel-proxy-naive.service \
+  /etc/systemd/system/web-panel-proxy-mieru.service \
+  /etc/systemd/system/web-panel-proxy-mieru@.service \
   /etc/systemd/system/web-panel-proxy-sync-tls.service \
   /etc/systemd/system/web-panel-proxy-sync-tls.timer \
   /etc/systemd/system/tproxy-firewall.service \
@@ -273,6 +284,8 @@ rm -f -- \
   /usr/local/bin/tproxy-server \
   /usr/local/bin/tproxy-server.previous \
   /usr/local/bin/tproxy-server.next \
+  /usr/local/bin/caddy-naive \
+  /usr/local/bin/mita-wpp \
   /usr/local/sbin/web-proxy-panelctl \
   /usr/local/sbin/web-proxy-panel-user-firewall \
   /usr/local/sbin/web-panel-proxy-sync-tls \
@@ -350,6 +363,9 @@ id tproxy >/dev/null 2>&1 && userdel tproxy 2>/dev/null || true
 id wpp-openflux >/dev/null 2>&1 && userdel wpp-openflux 2>/dev/null || true
 [[ "$XRAY_USER_OWNED" == 1 ]] && id xray >/dev/null 2>&1 && userdel xray 2>/dev/null || true
 [[ "$XRAY_GROUP_OWNED" == 1 ]] && getent group xray >/dev/null 2>&1 && groupdel xray 2>/dev/null || true
+[[ "$MITA_USER_OWNED" == 1 ]] && rm -rf -- /var/lib/mita
+[[ "$MITA_USER_OWNED" == 1 ]] && id mita >/dev/null 2>&1 && userdel mita 2>/dev/null || true
+[[ "$MITA_GROUP_OWNED" == 1 ]] && getent group mita >/dev/null 2>&1 && groupdel mita 2>/dev/null || true
 
 systemctl daemon-reload
 systemctl reset-failed 2>/dev/null || true

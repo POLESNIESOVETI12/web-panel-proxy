@@ -56,6 +56,10 @@ AWG_BIN_BUNDLED="${BASE}/assets/awg-linux-amd64"
 AWG_BIN_SHA256="23d29323258166183eeeb288c1f9f08b879f3707e54591b1bfb2402413f6d8d8"
 AWG_QUICK_BUNDLED="${BASE}/assets/awg-quick-linux-amd64"
 AWG_QUICK_SHA256="f4bb0f5d63665ade87f0cb9f2185c43515cff09868637eb311f98f65a318722c"
+NAIVE_BUNDLED="${BASE}/assets/caddy-forwardproxy-naive-v2.11.7-naive2.tar.xz"
+NAIVE_SHA256="c273dc07dd79c5919f97639cbdcb559d40ce90475dbd8aac80641b0a8c8065ff"
+MIERU_BUNDLED="${BASE}/assets/mita-v3.39.0-linux-amd64.tar.gz"
+MIERU_SHA256="ea35fdef84bef1378f32b74a2d5a883d508a49dd4e64dba9a3a8363beed5798c"
 
 die(){ echo "ERROR: $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "Run as root."
@@ -113,7 +117,7 @@ MTPROTO_HOST="${MTPROTO_HOST:-$DOMAIN}"
 [[ -s "$PRIMARY_SECRET" ]] || die "Primary install-time secret not found."
 [[ -s "$LOGO_SOURCE" ]] || die "Panel logo file is missing: panel-logo.png"
 [[ -s "$AWG_GUIDE_SOURCE" ]] || die "AWG video guide is missing: assets/awg-routing-guide.mp4"
-for module in wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
+for module in wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_extra_protocols.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
     [[ -s "$BASE/$module" ]] || die "Missing panel module: $module; extract the complete archive."
 done
 FLAG_ARCHIVE="$BASE/wpp-panel/flags.tar.gz"
@@ -268,6 +272,90 @@ chmod 0644 /etc/sysctl.d/90-web-panel-proxy-awg.conf
 /usr/sbin/sysctl -p /etc/sysctl.d/90-web-panel-proxy-awg.conf >/dev/null
 systemctl daemon-reload
 
+echo "      Preparing NaiveProxy and Mieru..."
+if ! command -v tar >/dev/null 2>&1 || ! command -v xz >/dev/null 2>&1; then
+    apt-get -o DPkg::Lock::Timeout=600 update
+    apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends tar xz-utils
+fi
+echo "${NAIVE_SHA256}  ${NAIVE_BUNDLED}" | sha256sum -c - >/dev/null || die "Bundled NaiveProxy component is missing or damaged."
+echo "${MIERU_SHA256}  ${MIERU_BUNDLED}" | sha256sum -c - >/dev/null || die "Bundled Mieru component is missing or damaged."
+EXTRA_TMP="$(mktemp -d /tmp/wpp-extra.XXXXXX)"
+tar -xJf "$NAIVE_BUNDLED" -C "$EXTRA_TMP"
+tar -xzf "$MIERU_BUNDLED" -C "$EXTRA_TMP"
+install -o root -g root -m 0755 "$EXTRA_TMP/caddy-forwardproxy-naive/caddy" /usr/local/bin/caddy-naive
+install -o root -g root -m 0755 "$EXTRA_TMP/mita" /usr/local/bin/mita-wpp
+rm -rf -- "$EXTRA_TMP"
+if ! getent group mita >/dev/null 2>&1; then
+    groupadd --system mita
+    touch /etc/web-proxy-panel/mita-group-owned
+fi
+if ! id -u mita >/dev/null 2>&1; then
+    useradd --system --gid mita --home-dir /var/lib/mita --create-home --shell /usr/sbin/nologin mita
+    touch /etc/web-proxy-panel/mita-user-owned
+fi
+install -d -o root -g root -m 0755 /etc/web-proxy-panel/extra-protocols
+cat > /etc/systemd/system/web-panel-proxy-naive.service <<'EOF'
+[Unit]
+Description=WEB PANEL PROXY NaiveProxy
+After=network-online.target web-proxy-panel-firewall.service
+Wants=network-online.target
+Requires=web-proxy-panel-firewall.service
+
+[Service]
+Type=simple
+User=caddy
+Group=caddy
+ExecStart=/usr/local/bin/caddy-naive run --config /etc/web-proxy-panel/extra-protocols/Caddyfile.naive --adapter caddyfile
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=1048576
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target
+EOF
+cat > /etc/systemd/system/web-panel-proxy-mieru.service <<'EOF'
+[Unit]
+Description=WEB PANEL PROXY Mieru
+After=network-online.target web-proxy-panel-firewall.service
+Wants=network-online.target
+Requires=web-proxy-panel-firewall.service
+
+[Service]
+Type=simple
+User=mita
+Group=mita
+UMask=0077
+Environment=MITA_CONFIG_JSON_FILE=/etc/web-proxy-panel/extra-protocols/mieru-server.json
+Environment=MITA_UDS_PATH=/run/mita-wpp/mita.sock
+Environment=MITA_LOG_NO_TIMESTAMP=true
+ExecStart=/usr/local/bin/mita-wpp run
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=1048576
+RuntimeDirectory=mita-wpp
+RuntimeDirectoryMode=0750
+StateDirectory=mita
+StateDirectoryMode=0750
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target
+EOF
+for unit in $(systemctl list-units --all 'web-panel-proxy-mieru@*.service' --no-legend 2>/dev/null | awk '{print $1}'); do
+    systemctl disable --now "$unit" 2>/dev/null || true
+done
+rm -f /etc/systemd/system/web-panel-proxy-mieru@.service \
+    /etc/systemd/system/multi-user.target.wants/web-panel-proxy-mieru@*.service
+chmod 0644 /etc/systemd/system/web-panel-proxy-naive.service /etc/systemd/system/web-panel-proxy-mieru.service
+systemctl daemon-reload
+
 if ! [[ "$ACME_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] && [[ -s /etc/caddy/Caddyfile ]]; then
     ACME_EMAIL="$(sed -n 's/^[[:space:]]*email[[:space:]][[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' /etc/caddy/Caddyfile | head -n1 || true)"
 fi
@@ -413,9 +501,9 @@ XRAY_PATH="$(cat "$XRAY_PATH_FILE")"
 [[ "$XRAY_PATH" =~ ^/vless-[a-f0-9]{24}$ || "$XRAY_PATH" =~ ^/assets/[a-f0-9]{12}/[a-f0-9]{12}$ ]] || die "Stored VLESS path is invalid."
 
 if [[ "$UPDATING" == "1" ]]; then
-    echo "Updating WEB PANEL PROXY V 2.7.0..."
+    echo "Updating WEB PANEL PROXY V 2.8.0..."
 else
-    echo "Configuring WEB PANEL PROXY V 2.7.0..."
+    echo "Configuring WEB PANEL PROXY V 2.8.0..."
 fi
 INSTALL_CREDENTIALS="/etc/web-proxy-panel/install-credentials"
 if [[ "$UPDATING" == "1" ]]; then
@@ -448,7 +536,7 @@ fi
 
 echo "[1/6] Writing manager..."
 
-for module in wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
+for module in wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_extra_protocols.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
     [[ -s "$BASE/$module" ]] || die "Package is incomplete: $module is missing."
     install -o root -g root -m 0644 "$BASE/$module" "$APP_DIR/$module"
 done
@@ -500,9 +588,11 @@ import copy, fcntl, grp, json, os, re, secrets, shutil, subprocess, sys, time, u
 sys.path.insert(0,"/opt/tproxy-panel")
 from wpp_subscriptions import mutate as mutate_subscription, issue as issue_subscription, SubscriptionError
 import wpp_awg
+import wpp_extra_protocols
 import wpp_firewall
 import wpp_cdn
 import wpp_connections
+import wpp_cdn_doctor
 
 USERS="/etc/web-proxy-panel/users.json"
 CONNECTIONS="/etc/web-proxy-panel/connections.json"
@@ -555,9 +645,6 @@ def load():
             d.setdefault("users",[])
             d.setdefault("traffic",{})
             d.setdefault("subscriptions",[])
-            # Remove the two withdrawn experimental protocols. Subscription
-            # records keep working with their stable VLESS/Hysteria2 profiles.
-            d["users"]=[u for u in d["users"] if u.get("protocol","web") not in ("mieru","naive")]
             for sub in d["subscriptions"]:
                 supported=[p for p in sub.get("protocols",[]) if p in ("vless","hysteria")]
                 sub["protocols"]=supported or ["vless","hysteria"]
@@ -576,6 +663,7 @@ def load():
                     u["backend_port"]=HYSTERIA_PORT
                     for key in ("udp_idle_timeout","masquerade"):
                         u.pop(key,None)
+            wpp_extra_protocols.upgrade_users(d["users"])
             return d
     except FileNotFoundError:
         return {"users":[],"traffic":{},"subscriptions":[]}
@@ -609,7 +697,7 @@ def normalize_proxy_secret(value):
 def port_in_use(port):
     # Do not rely solely on users.json: a stopped/old installation can still
     # have an MTProxy process listening on a port that is absent from the file.
-    sockets=run("ss","-lnt").stdout or ""
+    sockets=run("ss","-lntu").stdout or ""
     return re.search(r"[:.]%d\b" % int(port),sockets) is not None
 
 def alloc_ports(d,requested_port=None):
@@ -685,6 +773,12 @@ def sync_firewall(d):
     stats=[int(u["stats_port"]) for u in d["users"] if u.get("enabled",True) and u.get("protocol","web") in ("web","mtproto") and u.get("stats_port")]
     hysteria_enabled=any(u.get("enabled",True) and u.get("protocol")=="hysteria" for u in d["users"])
     awg_users=[u for u in d["users"] if u.get("enabled",True) and u.get("protocol") in wpp_awg.PROTOCOLS]
+    connection_registry=wpp_connections.ensure(CONNECTIONS,d["users"],persist=False)
+    hysteria_port=wpp_connections.hysteria_port(connection_registry,HYSTERIA_PORT)
+    enabled_extra_connections={str(item.get("id","")):item for item in connection_registry.get("connections",[])
+        if item.get("enabled",True) and item.get("protocol") in wpp_extra_protocols.PROTOCOLS}
+    extra_users=[u for u in d["users"] if u.get("enabled",True) and u.get("protocol") in wpp_extra_protocols.PROTOCOLS
+        and str(u.get("connection_id","")) in enabled_extra_connections]
     lines=[
         "#!/usr/bin/env bash",
         "set -e",
@@ -714,11 +808,22 @@ def sync_firewall(d):
     if stats:
         lines.append("nft 'add rule inet web_proxy_panel input iifname != \"lo\" tcp dport { %s } counter drop'" % ",".join(map(str,sorted(stats))))
     if hysteria_enabled:
-        lines.append("nft 'add rule inet web_proxy_panel input udp dport %d counter accept'" % HYSTERIA_PORT)
+        lines.append("nft 'add rule inet web_proxy_panel input udp dport %d counter accept'" % hysteria_port)
     for u in awg_users:
         uid=u["id"]; port=int(u["backend_port"])
         lines.append("nft 'add rule inet web_proxy_panel input iifname != \"lo\" udp dport %d counter accept comment \"wpp:%s:up\"'"%(port,uid))
         lines.append("nft 'add rule inet web_proxy_panel output oifname != \"lo\" udp sport %d counter accept comment \"wpp:%s:down\"'"%(port,uid))
+    # Naive/Mieru can host several credentials on one connection port. Port
+    # counters therefore cannot be attributed safely to one user.
+    extra_bindings=set()
+    for u in extra_users:
+        connection=enabled_extra_connections[str(u.get("connection_id",""))]
+        config=connection.get("config") if isinstance(connection.get("config"),dict) else {}
+        transport="udp" if u.get("protocol")=="mieru" and str(config.get("transport","TCP")).upper()=="UDP" else "tcp"
+        extra_bindings.add((transport,int(u["backend_port"])))
+    for transport,port in sorted(extra_bindings):
+        lines.append("nft 'add rule inet web_proxy_panel input iifname != \"lo\" %s dport %d counter accept comment \"wpp-extra:%s:%d:up\"'"%(transport,port,transport,port))
+        lines.append("nft 'add rule inet web_proxy_panel output oifname != \"lo\" %s sport %d counter accept comment \"wpp-extra:%s:%d:down\"'"%(transport,port,transport,port))
     lines.extend([
         "nft list table ip web_proxy_awg >/dev/null 2>&1 && nft delete table ip web_proxy_awg || true",
         "nft add table ip web_proxy_awg",
@@ -742,8 +847,8 @@ def sync_firewall(d):
     match=re.search(r"\bdev\s+([A-Za-z0-9_.:-]+)",route)
     external_if=match.group(1) if match else ""
     wpp_firewall.reconcile(
-        tcp={443,*mtproto_ports},
-        udp=({HYSTERIA_PORT} if hysteria_enabled else set()) | {int(u["backend_port"]) for u in awg_users},
+        tcp={443,*mtproto_ports} | {int(u["backend_port"]) for u in extra_users if u.get("protocol")=="naive" or str(u.get("transport","TCP")).upper()=="TCP"},
+        udp=({hysteria_port} if hysteria_enabled else set()) | {int(u["backend_port"]) for u in awg_users} | {int(u["backend_port"]) for u in extra_users if str(u.get("transport","TCP")).upper()=="UDP"},
         routes={(u["awg_interface"],external_if) for u in awg_users if external_if},
     )
 
@@ -755,6 +860,12 @@ def maintain_firewall(d):
     mtproto_ports={int(u["backend_port"]) for u in d["users"] if u.get("enabled",True) and u.get("protocol")=="mtproto"}
     hysteria_enabled=any(u.get("enabled",True) and u.get("protocol")=="hysteria" for u in d["users"])
     awg_users=[u for u in d["users"] if u.get("enabled",True) and u.get("protocol") in wpp_awg.PROTOCOLS]
+    connection_registry=wpp_connections.ensure(CONNECTIONS,d["users"],persist=False)
+    hysteria_port=wpp_connections.hysteria_port(connection_registry,HYSTERIA_PORT)
+    enabled_extra_connections={str(item.get("id","")) for item in connection_registry.get("connections",[])
+        if item.get("enabled",True) and item.get("protocol") in wpp_extra_protocols.PROTOCOLS}
+    extra_users=[u for u in d["users"] if u.get("enabled",True) and u.get("protocol") in wpp_extra_protocols.PROTOCOLS
+        and str(u.get("connection_id","")) in enabled_extra_connections]
     inet=run("nft","list","table","inet","web_proxy_panel")
     awg_table=run("nft","list","table","ip","web_proxy_awg")
     healthy=inet.returncode==0 and awg_table.returncode==0
@@ -765,8 +876,8 @@ def maintain_firewall(d):
     match=re.search(r"\bdev\s+([A-Za-z0-9_.:-]+)",route)
     external_if=match.group(1) if match else ""
     wpp_firewall.reconcile(
-        tcp={443,*mtproto_ports},
-        udp=({HYSTERIA_PORT} if hysteria_enabled else set()) | {int(u["backend_port"]) for u in awg_users},
+        tcp={443,*mtproto_ports} | {int(u["backend_port"]) for u in extra_users if u.get("protocol")=="naive" or str(u.get("transport","TCP")).upper()=="TCP"},
+        udp=({hysteria_port} if hysteria_enabled else set()) | {int(u["backend_port"]) for u in awg_users} | {int(u["backend_port"]) for u in extra_users if str(u.get("transport","TCP")).upper()=="UDP"},
         routes={(u["awg_interface"],external_if) for u in awg_users if external_if},
     )
 
@@ -794,6 +905,68 @@ def sync_profiles(d):
         raise RuntimeError("tproxy-server config check failed: "+(c.stderr or c.stdout)[-2000:])
     os.replace(tmp,PROFILES)
 
+def activate_xray_config(config, caddy_text=None, validation_inbounds=None):
+    """Validate both candidates, activate together, restore both on failure."""
+    previous=None
+    if os.path.exists(XRAY_CONFIG):
+        with open(XRAY_CONFIG,"rb") as stream: previous=stream.read()
+    with open(CADDYFILE,encoding="utf-8") as stream: old_caddy=stream.read()
+    caddy_changed=caddy_text is not None and caddy_text!=old_caddy
+    active=run("systemctl","is-active","--quiet",XRAY_SERVICE).returncode==0
+    enabled=run("systemctl","is-enabled","--quiet",XRAY_SERVICE).returncode==0
+    tmp=os.path.splitext(XRAY_CONFIG)[0]+".tmp.json"
+    caddy_tmp=CADDYFILE+".xray-tmp"
+    replaced=False
+    try:
+        candidate=copy.deepcopy(config)
+        candidate["inbounds"]=candidate.get("inbounds",[])+list(validation_inbounds or [])
+        with open(tmp,"w",encoding="utf-8") as stream: json.dump(candidate,stream,indent=2,allow_nan=False)
+        os.chown(tmp,0,grp.getgrnam("xray").gr_gid); os.chmod(tmp,0o640)
+        result=run(XRAY_BIN,"run","-test","-config",tmp,timeout=60)
+        if result.returncode: raise ValueError("Xray не принял JSON: "+(result.stderr or result.stdout)[-3000:])
+        if validation_inbounds:
+            with open(tmp,"w",encoding="utf-8") as stream: json.dump(config,stream,indent=2,allow_nan=False)
+        if caddy_changed:
+            with open(caddy_tmp,"w",encoding="utf-8") as stream: stream.write(caddy_text)
+            shutil.copystat(CADDYFILE,caddy_tmp)
+            shutil.chown(caddy_tmp,user="root",group="caddy")
+            result=run("caddy","validate","--config",caddy_tmp,"--adapter","caddyfile",timeout=30)
+            if result.returncode: raise ValueError("Caddy не принял настройки: "+(result.stderr or result.stdout)[-2000:])
+        os.replace(tmp,XRAY_CONFIG); replaced=True
+        if caddy_changed: os.replace(caddy_tmp,CADDYFILE)
+        if config.get("inbounds"):
+            run("systemctl","enable",XRAY_SERVICE,check=True)
+            run("systemctl","restart",XRAY_SERVICE,check=True,timeout=45)
+            for attempt in range(3):
+                if run("systemctl","is-active","--quiet",XRAY_SERVICE).returncode:
+                    raise RuntimeError("Xray не запустился. Возвращена предыдущая конфигурация.")
+                if attempt<2: time.sleep(0.5)
+        else: run("systemctl","disable","--now",XRAY_SERVICE,check=True)
+        # Some supported Caddy units do not define ExecReload. Let systemd
+        # restart those units instead of failing an otherwise valid update.
+        if caddy_changed: run("systemctl","reload-or-restart","caddy.service",check=True,timeout=30)
+    except Exception:
+        if replaced:
+            if previous is not None:
+                with open(tmp,"wb") as stream: stream.write(previous)
+                os.chown(tmp,0,grp.getgrnam("xray").gr_gid); os.chmod(tmp,0o640)
+                os.replace(tmp,XRAY_CONFIG)
+            else:
+                try: os.unlink(XRAY_CONFIG)
+                except FileNotFoundError: pass
+            if caddy_changed:
+                wpp_cdn_doctor.restore_caddyfile(CADDYFILE,old_caddy)
+                run("systemctl","reload-or-restart","caddy.service",timeout=30)
+            run("systemctl","enable" if enabled else "disable",XRAY_SERVICE)
+            result=run("systemctl","restart" if active and previous is not None else "stop",XRAY_SERVICE,timeout=45)
+            if result.returncode: raise RuntimeError("Конфигурация восстановлена, но службу Xray необходимо проверить через SSH.")
+        raise
+    finally:
+        for temporary in (tmp,caddy_tmp):
+            try: os.unlink(temporary)
+            except FileNotFoundError: pass
+
+
 def sync_xray(d):
     with open(XRAY_PATH_FILE,encoding="utf-8") as f:
         xray_path=f.read().strip()
@@ -820,7 +993,8 @@ def sync_xray(d):
         advanced_by_bucket[bucket]=(canonical,value)
         advanced_owner[bucket]=str(connection.get("name") or user.get("name") or bucket) if isinstance(connection,dict) else str(user.get("name") or bucket)
     def customize(inbound,bucket,protocol):
-        value=advanced_by_bucket.get(bucket,("",{}))[1]
+        template=next((item for item in registry.get("connections",[]) if wpp_connections._xray_bucket(item)==bucket),{})
+        value=advanced_by_bucket.get(bucket,("",template.get("advanced",{})))[1]
         return wpp_connections.apply_server_advanced(inbound,value,protocol)
     for u in d["users"]:
         if not u.get("enabled",True):
@@ -977,29 +1151,17 @@ def sync_xray(d):
         "inbounds":inbounds,
         "outbounds":[{"tag":"direct","protocol":"freedom"}]
     }
-    # Xray selects the configuration parser from the final extension.  A name
-    # such as config.json.tmp is rejected before JSON parsing, so keep .json
-    # as the temporary file's last suffix.
-    tmp=os.path.splitext(XRAY_CONFIG)[0]+".tmp.json"
-    with open(tmp,"w",encoding="utf-8") as f:
-        json.dump(config,f,ensure_ascii=True,indent=2)
-    os.chown(tmp,0,grp.getgrnam("xray").gr_gid)
-    os.chmod(tmp,0o640)
-    check=run(XRAY_BIN,"run","-test","-config",tmp,timeout=60)
-    if check.returncode:
-        try: os.unlink(tmp)
-        except FileNotFoundError: pass
-        raise RuntimeError("Xray config check failed: "+(check.stderr or check.stdout)[-3000:])
-    os.replace(tmp,XRAY_CONFIG)
-    if inbounds:
-        run("systemctl","enable",XRAY_SERVICE,check=True)
-        run("systemctl","restart",XRAY_SERVICE,check=True)
-        if run("systemctl","is-active","--quiet",XRAY_SERVICE).returncode:
-            st=run("systemctl","status",XRAY_SERVICE,"--no-pager","--full")
-            log=run("journalctl","-u",XRAY_SERVICE,"-n","50","--no-pager")
-            raise RuntimeError("Xray failed: "+((st.stdout or st.stderr)+"\n"+(log.stdout or log.stderr))[-4000:])
-    else:
-        run("systemctl","disable","--now",XRAY_SERVICE,check=False)
+    with open(CADDYFILE,encoding="utf-8") as stream: caddy_text=stream.read()
+    caddy_text=wpp_cdn_doctor.connection_routes(caddy_text,xray_path,registry)
+    inactive=[]
+    active_tags={item.get("tag") for item in inbounds}
+    for item in registry.get("connections",[]):
+        override=item.get("advanced",{}).get("inbound")
+        if override and override.get("tag") not in active_tags:
+            inactive.append(copy.deepcopy(override))
+            inactive[-1].setdefault("settings",{})["clients"]=[]
+            active_tags.add(override.get("tag"))
+    activate_xray_config(config,caddy_text,inactive)
 
 def _load_traffic():
     try:
@@ -1064,12 +1226,17 @@ def _collect_traffic_unlocked(d=None):
     state=_load_traffic()
     targets={"primary":{"protocol":"web","enabled":True}}
     targets.update({u["id"]:u for u in d.get("users",[])})
+    connection_registry=wpp_connections.ensure(CONNECTIONS,d.get("users",[]),persist=False)
+    enabled_extra_connections={str(item.get("id","")) for item in connection_registry.get("connections",[])
+        if item.get("enabled",True) and item.get("protocol") in wpp_extra_protocols.PROTOCOLS}
     def target_unit(uid,u):
         protocol=u.get("protocol","web")
         if uid=="primary": return "mtproxy.service"
         if protocol in ("web","mtproto"): return "web-proxy-user-"+uid+".service"
         if protocol in ("vless","hysteria"): return XRAY_SERVICE
         if protocol in wpp_awg.PROTOCOLS: return wpp_awg.service_for(u)
+        if protocol in wpp_extra_protocols.PROTOCOLS:
+            return wpp_extra_protocols.service_for(u) if str(u.get("connection_id","")) in enabled_extra_connections else ""
         return ""
     unit_by_uid={uid:target_unit(uid,u) for uid,u in targets.items()}
     units=sorted({unit for unit in unit_by_uid.values() if unit})
@@ -1207,6 +1374,7 @@ def apply(d,restart=True,previous=None):
     web_changed=protocol_changed("web")
     xray_changed=protocol_changed("vless","hysteria")
     awg_changed=protocol_changed(*wpp_awg.PROTOCOLS)
+    extra_changed=protocol_changed(*wpp_extra_protocols.PROTOCOLS)
     try:
         wake_primary_proxy_if_needed(d)
         for u in d["users"]:
@@ -1217,6 +1385,9 @@ def apply(d,restart=True,previous=None):
         if direct_changed: run("systemctl","daemon-reload",check=True)
         if xray_changed: sync_xray(d)
         if awg_changed: wpp_awg.sync(d["users"])
+        if extra_changed:
+            registry=wpp_connections.ensure(CONNECTIONS,d["users"],persist=False)
+            wpp_extra_protocols.sync(d["users"],registry.get("connections",[]),os.environ.get("WEBPROXY_DOMAIN","") or os.environ.get("TPROXY_HOSTNAME","") or "localhost",XRAY_CERT,XRAY_KEY)
         if restart:
             for u in d["users"]:
                 if (u.get("id") in changed_ids or force) and u.get("enabled",True) and u.get("protocol","web") in ("web","mtproto"):
@@ -1253,10 +1424,13 @@ def apply(d,restart=True,previous=None):
         try: shutil.chown(CADDYFILE,user="root",group="caddy")
         except Exception: pass
         os.chmod(CADDYFILE,0o640)
-        run("systemctl","reload","caddy.service",check=False)
+        run("systemctl","reload-or-restart","caddy.service",check=False)
         try:
             sync_firewall(old_users)
             if awg_changed: wpp_awg.sync(old_users.get("users",[]))
+            if extra_changed:
+                registry=wpp_connections.ensure(CONNECTIONS,old_users.get("users",[]),persist=False)
+                wpp_extra_protocols.sync(old_users.get("users",[]),registry.get("connections",[]),os.environ.get("WEBPROXY_DOMAIN","") or os.environ.get("TPROXY_HOSTNAME","") or "localhost",XRAY_CERT,XRAY_KEY)
         except Exception:
             pass
         raise
@@ -1270,7 +1444,7 @@ def add(protocol,name,requested_port=None,device_count=1,options=None):
     # orphan units before choosing ports for the next user.
     remove_old_units(d)
     run("systemctl","daemon-reload",check=True)
-    if protocol not in ("web","mtproto","vless","hysteria",*wpp_awg.PROTOCOLS):
+    if protocol not in ("web","mtproto","vless","hysteria",*wpp_awg.PROTOCOLS,*wpp_extra_protocols.PROTOCOLS):
         raise RuntimeError("Unknown proxy protocol")
     if sum(not u.get("subscription_id") for u in d["users"])>=MAX_USERS:
         raise RuntimeError("Maximum panel users reached")
@@ -1278,12 +1452,16 @@ def add(protocol,name,requested_port=None,device_count=1,options=None):
     except (TypeError,ValueError): raise ValueError("Количество устройств должно быть числом.")
     if device_count<1 or device_count>20:
         raise ValueError("Для отдельного подключения можно создать от 1 до 20 ключей устройств.")
-    if protocol in wpp_awg.PROTOCOLS and device_count != 1:
-        raise ValueError("Один профиль AWG предназначен для одного устройства. Создайте ещё один отдельный AWG-доступ.")
+    if protocol in (*wpp_awg.PROTOCOLS,*wpp_extra_protocols.PROTOCOLS) and device_count != 1:
+        raise ValueError("Для этого протокола один профиль предназначен для одного устройства.")
     try: traffic_limit_gb=float(str(options.get("traffic_limit_gb",0) or 0).replace(",","."))
     except (TypeError,ValueError): raise ValueError("Лимит трафика должен быть числом.")
     if traffic_limit_gb<0 or traffic_limit_gb>100000:
         raise ValueError("Лимит трафика должен быть от 0 до 100000 ГБ.")
+    if protocol in wpp_extra_protocols.PROTOCOLS:
+        # These listeners are shared by every credential on the selected
+        # connection, so nft cannot safely attribute bytes to one client.
+        traffic_limit_gb=0
     u={"id":secrets.token_hex(8),"name":name.strip(),"protocol":protocol,"enabled":True,"created_at":int(time.time()),
        "max_devices":device_count,"traffic_limit_bytes":int(traffic_limit_gb*1024**3)}
     connection_id=str(options.get("connection_id","")).strip()
@@ -1312,6 +1490,17 @@ def add(protocol,name,requested_port=None,device_count=1,options=None):
             raise RuntimeError("Hysteria 2 TLS certificate is not ready: "+(tls.stderr or tls.stdout)[-1500:])
     elif protocol in wpp_awg.PROTOCOLS:
         u.update(wpp_awg.new_user(protocol,d["users"],u["id"],requested_port))
+    elif protocol in wpp_extra_protocols.PROTOCOLS:
+        if not connection_id: raise ValueError("Выберите подключение Naive/Mieru.")
+        registry=wpp_connections.ensure(CONNECTIONS,d["users"],persist=False)
+        connection=wpp_connections.get(registry,connection_id)
+        if not connection or connection.get("protocol")!=protocol: raise ValueError("Подключение не найдено.")
+        connection_port=int(connection["config"]["port"])
+        if not any(other.get("connection_id")==connection_id for other in d["users"]) and port_in_use(connection_port):
+            raise ValueError("Порт %d уже занят другим сервисом. Измените порт подключения."%connection_port)
+        u.update(wpp_extra_protocols.new_user(protocol,u["id"]))
+        u["backend_port"]=connection_port
+        u["transport"]=str(connection["config"].get("transport","TCP")).upper()
     d["users"].append(u)
     save(d)
     try:
@@ -1560,6 +1749,7 @@ def init():
     run("systemctl","daemon-reload",check=True)
     sync_xray(d)
     wpp_awg.sync(d["users"])
+    wpp_extra_protocols.sync(d["users"],registry.get("connections",[]),os.environ.get("WEBPROXY_DOMAIN","") or os.environ.get("TPROXY_HOSTNAME","") or "localhost",XRAY_CERT,XRAY_KEY)
     collect_traffic(d)
 
 def refresh_connections():
@@ -1575,6 +1765,12 @@ def refresh_connections():
             try: apply(before,True,d)
             except Exception: pass
             raise
+    # Connection enable/disable may not mutate a user record, but it must
+    # still start or stop its dedicated Naive/Mieru listener immediately.
+    if not (transport_changed or subscriptions_changed or d["users"]!=before["users"]):
+        sync_xray(d)
+    wpp_extra_protocols.sync(d["users"],registry.get("connections",[]),os.environ.get("WEBPROXY_DOMAIN","") or os.environ.get("TPROXY_HOSTNAME","") or "localhost",XRAY_CERT,XRAY_KEY)
+    sync_firewall(d)
     print(json.dumps({"ok":True},ensure_ascii=True))
 
 def delete_connection(request):
@@ -1871,6 +2067,27 @@ if [[ "$changed" == 1 ]] && systemctl is-active --quiet web-panel-proxy-xray.ser
         exit 1
     }
 fi
+if [[ -s /etc/web-proxy-panel/extra-protocols/Caddyfile.naive ]]; then
+    NAIVE_TLS_DIR=/etc/web-proxy-panel/extra-protocols
+    # This directory also holds Mieru's root:mita/0640 config. Preserve
+    # traversal for both service users; individual files restrict access.
+    install -d -o root -g root -m 0755 "$NAIVE_TLS_DIR"
+    naive_changed=0
+    if ! cmp -s "$SOURCE_CERT" "$NAIVE_TLS_DIR/naive-domain.crt" 2>/dev/null; then
+        install -o root -g caddy -m 0640 "$SOURCE_CERT" "$NAIVE_TLS_DIR/naive-domain.crt"
+        naive_changed=1
+    fi
+    if ! cmp -s "$SOURCE_KEY" "$NAIVE_TLS_DIR/naive-domain.key" 2>/dev/null; then
+        install -o root -g caddy -m 0640 "$SOURCE_KEY" "$NAIVE_TLS_DIR/naive-domain.key"
+        naive_changed=1
+    fi
+    if [[ "$naive_changed" == 1 ]] && systemctl is-active --quiet web-panel-proxy-naive.service; then
+        timeout 45 systemctl try-restart web-panel-proxy-naive.service || {
+            echo "NaiveProxy did not restart with the renewed certificate" >&2
+            exit 1
+        }
+    fi
+fi
 [[ "$MODE" == "sync" ]] || echo "TLS maintenance completed."
 SH
 chmod 0750 /usr/local/sbin/web-panel-proxy-sync-tls
@@ -1959,6 +2176,7 @@ from wpp_subscriptions import PREFIX as SUB_PREFIX
 from wpp_subscription_dashboard import render as subscription_dashboard
 from wpp_panel_extras import preview_document
 from wpp_ui import CSS as PANEL_CSS, COMMON_JS as PANEL_COMMON_JS, page_layout, login_ui, dashboard_body, dashboard_page, users_ui, editor_ui, openflux_ui, client_records, nodes_ui, updates_ui, openflux_import_uri, cdn_doctor_ui, connections_ui, routing_ui
+from wpp_ui import happ_import_link
 from wpp_presets import presets as preset_library
 import wpp_metrics as server_metrics
 import wpp_update as web_updates
@@ -1966,6 +2184,7 @@ import wpp_components as components
 import wpp_nodes as node_api
 import wpp_openflux as openflux
 import wpp_awg as awg
+import wpp_extra_protocols as extra_protocols
 import wpp_cdn as cdn
 import wpp_cdn_doctor as cdn_doctor
 import wpp_connections as connection_store
@@ -2015,6 +2234,7 @@ API_KEY=node_api.ensure_api_key(API_KEY_FILE)
 SUB_FETCH_SLOTS=threading.BoundedSemaphore(4)
 SUB_RATE_LOCK=threading.Lock()
 SUB_REQUESTS={}
+DIRECT_PROFILE_PREFIX="/wpp-direct/"
 
 # Presets are deliberately standalone at authoring time: no CDN and no icon
 # font. On publication the panel moves executable CSS/JS into immutable local
@@ -2423,16 +2643,16 @@ def repair_local_cdn(xray_path):
         actions.append("TLS-сертификаты синхронизированы")
     ctl("sync")
     actions.append("конфигурация Xray и локальные inbound пересобраны")
-    original,changed=cdn_doctor.repair_caddyfile(CADDYFILE,xray_path)
+    original,changed=cdn_doctor.repair_caddyfile(CADDYFILE,xray_path,connection_store.load(CONNECTIONS_FILE))
     try:
         for command in (["caddy","validate","--config",CADDYFILE,"--adapter","caddyfile"],
-                        ["systemctl","reload","caddy.service"]):
+                        ["systemctl","reload-or-restart","caddy.service"]):
             result=subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=45)
             if result.returncode:
                 raise RuntimeError((result.stderr or result.stdout).strip() or "Не удалось применить Caddyfile.")
     except Exception:
         cdn_doctor.restore_caddyfile(CADDYFILE,original)
-        subprocess.run(["systemctl","reload","caddy.service"],stdout=subprocess.DEVNULL,
+        subprocess.run(["systemctl","reload-or-restart","caddy.service"],stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL,timeout=30)
         raise
     actions.append("маршруты Caddy восстановлены" if changed else "маршруты Caddy проверены")
@@ -2450,6 +2670,33 @@ def subscription_registry():
         return []
 def subscription_dashboard_token(token):
     return hmac.new(SESSION_KEY,b"subscription-dashboard:"+str(token).encode(),hashlib.sha256).hexdigest()
+def direct_profile_token(user_id,secret):
+    # A regular vless:// or hysteria2:// URI cannot carry Xray DNS/routing
+    # rules.  This opaque, stable URL serves one complete client profile.
+    value=str(user_id)+"\0"+str(secret)
+    return hashlib.sha256(value.encode()).hexdigest()
+def direct_profile_url(user,secret=None):
+    selected=str(secret if secret is not None else user.get("secret", ""))
+    return "https://"+DOMAIN+DIRECT_PROFILE_PREFIX+direct_profile_token(user.get("id", ""),selected)
+def direct_profile_config(user,secret):
+    # Older standalone users may lack connection_id on disk. Resolve them the
+    # same way as the users page before looking up per-connection routing.
+    selected=copy.deepcopy(user)
+    registry=connection_store.ensure(CONNECTIONS_FILE,[selected],persist=False)
+    connection=connection_store.get(registry,str(selected.get("connection_id","")))
+    if connection is None or not connection.get("enabled",True):
+        raise LookupError("Connection is unavailable")
+    labels={"vless":"VLESS","hysteria":"Hysteria2"}
+    name=str(connection.get("name") or labels[selected["protocol"]])
+    link=proxy_link(selected["protocol"],secret,selected.get("backend_port",443),name,selected.get("username",""))
+    # A broken routing store must not silently downgrade a routed profile to a
+    # plain VLESS link: surface a retryable error instead.
+    profiles=routing_store.load(ROUTING_FILE).get("profiles",{})
+    profile=profiles.get(str(connection["id"]))
+    title=str(selected.get("name") or name)
+    if isinstance(profile,dict) and profile.get("enabled",True):
+        return routing_store.xray_config(link,profile,title)
+    return routing_store.plain_xray_config(link,title)
 def subscription_device_name(user_agent):
     value=str(user_agent or "").lower()
     if "android" in value: return "Android"
@@ -2474,8 +2721,11 @@ def ctl_manager_json(command,request):
                      stderr=subprocess.PIPE,text=True,timeout=180)
     if r.returncode:
         message=r.stderr.strip() or "manager failed"
-        marker="ValueError: "
-        if marker in message: raise ValueError(message.rsplit(marker,1)[-1].strip())
+        marker="ServiceError: "
+        if marker in message:
+            raise extra_protocols.ServiceError(message.rsplit(marker,1)[-1].strip())
+        for marker in ("ValueError: ","ConnectionError: "):
+            if marker in message: raise ValueError(message.rsplit(marker,1)[-1].strip())
         raise RuntimeError(message)
     value=json.loads(r.stdout)
     if not isinstance(value,dict): raise RuntimeError("manager returned invalid JSON")
@@ -2548,13 +2798,24 @@ def connections_with_runtime(connections):
     for item in result:
         protocol=item.get("protocol")
         cfg=item.get("config") if isinstance(item.get("config"),dict) else {}
-        if protocol=="hysteria": tag="hysteria2"
-        elif protocol=="vless":
-            provider=str(cfg.get("provider","")) if cfg.get("route")=="cdn" else "direct"
-            tag={"direct":"vless-xhttp","beget":"vless-xhttp-beget","selectel":"vless-xhttp-selectel",
-                 "vk":"vless-xhttp-vk","timeweb":"vless-xhttp-timeweb"}.get(provider,"vless-xhttp-cdn")
-        else: tag=""
+        tag=connection_store.inbound_tag(item) if protocol in ("vless","hysteria") else ""
         if tag and tag in by_tag: item["runtime_inbound"]=copy.deepcopy(by_tag[tag])
+        elif tag:
+            bucket=connection_store._xray_bucket(item)
+            if protocol=="vless":
+                ports={"direct":10000,"cdn":10001,"beget":10002,"selectel":10003,"vk":10004,"timeweb":10005}
+                base={"tag":tag,"listen":"127.0.0.1","port":ports[bucket],"protocol":"vless",
+                      "settings":{"clients":[],"decryption":"none"},
+                      "streamSettings":{"network":"xhttp","security":"none","xhttpSettings":cdn.server_xhttp(cdn.endpoint_path(xray_path(),bucket),True if bucket=="cdn" else bucket)},
+                      "sniffing":{"enabled":True,"destOverride":["http","tls","quic"],"routeOnly":True}}
+            else:
+                base={"tag":tag,"listen":"0.0.0.0","port":8443,"protocol":"hysteria",
+                      "settings":{"version":2,"clients":[]},
+                      "streamSettings":{"network":"hysteria","security":"tls","tlsSettings":{"alpn":["h3"],"minVersion":"1.3","certificates":[{"certificateFile":"/etc/web-panel-proxy-xray/tls/domain.crt","keyFile":"/etc/web-panel-proxy-xray/tls/domain.key"}]},"hysteriaSettings":{"version":2,"udpIdleTimeout":60}},
+                      "sniffing":{"enabled":True,"destOverride":["http","tls","quic"],"routeOnly":True}}
+            item["runtime_inbound"]=connection_store.apply_server_advanced(base,item.get("advanced",{}),protocol)
+        item["shared_inbound_names"]=[other.get("name",other.get("id","")) for other in result
+            if other.get("id")!=item.get("id") and tag and connection_store._xray_bucket(other)==connection_store._xray_bucket(item)]
         profile=routing_profiles.get(str(item.get("id","")))
         if isinstance(profile,dict) and profile.get("enabled",True):
             try:
@@ -2577,7 +2838,14 @@ def proxy_link(protocol,secret,port=443,name="Proxy",username=""):
         connection=proxy_connection(user)
         if connection:
             route=connection_store.apply_client_advanced(route,connection.get("advanced",{}))
-        route_path=cdn.endpoint_path(xray_path(),route.get("path_variant","cdn" if route["enabled"] else "direct"))
+        route_path=cdn.client_endpoint_path(xray_path(),route.get("path_variant","cdn" if route["enabled"] else "direct"))
+        if connection:
+            xhttp=connection.get("advanced",{}).get("inbound",{}).get("streamSettings",{}).get("xhttpSettings",{})
+            route_path=connection_store.client_path(connection,xray_path())
+            if xhttp.get("mode") and xhttp["mode"]!="auto":
+                route["mode"]=xhttp["mode"]
+                if route.get("extra") and "mode" in route["extra"]: route["extra"]["mode"]=xhttp["mode"]
+            route["extra"]={**(route.get("extra") or {}),**{key:value for key,value in xhttp.items() if key not in ("path","mode","host")}}
         query_values={"encryption":"none","security":"tls","sni":route["sni"],"fp":route["fingerprint"],"type":"xhttp","host":route["host"],"path":route_path,"mode":route["mode"],"alpn":",".join(route.get("alpn") or ["h2"])}
         if route.get("extra"):
             query_values["extra"]=json.dumps(route["extra"],ensure_ascii=True,separators=(",",":"))
@@ -2585,7 +2853,9 @@ def proxy_link(protocol,secret,port=443,name="Proxy",username=""):
         return "vless://"+quote(secret,safe="-")+"@"+route["address"]+":443?"+query+"#"+label
     if protocol=="hysteria":
         query=urlencode({"sni":DOMAIN,"alpn":"h3"})
-        return "hysteria2://"+quote(secret,safe="-")+"@"+DOMAIN+":"+str(HYSTERIA_PORT)+"/?"+query+"#"+label
+        connection=proxy_connection(user)
+        port=connection.get("advanced",{}).get("inbound",{}).get("port",HYSTERIA_PORT) if connection else HYSTERIA_PORT
+        return "hysteria2://"+quote(secret,safe="-")+"@"+DOMAIN+":"+str(port)+"/?"+query+"#"+label
     if protocol in awg.PROTOCOLS:
         user=next((u for u in users() if u.get("protocol")==protocol and secrets.compare_digest(str(u.get("secret","")),str(secret))),None)
         if user is None: raise RuntimeError("Профиль AWG не найден")
@@ -2593,6 +2863,11 @@ def proxy_link(protocol,secret,port=443,name="Proxy",username=""):
         except routing_store.RoutingError: route_state={"profiles":{},"awg_profiles":{}}
         routes=routing_store.awg_allowed_ips(route_state,user.get("connection_id",""))
         return awg.client_config(user,DOMAIN,name,routes)
+    if protocol in extra_protocols.PROTOCOLS:
+        user=proxy_user(protocol,secret)
+        connection=proxy_connection(user)
+        if user is None or connection is None: raise RuntimeError("Профиль Naive/Mieru не найден")
+        return extra_protocols.client_link(user,connection,DOMAIN,name)
     raise RuntimeError("Неизвестный протокол")
 def qr_png_bytes(link):
     return subprocess.run([QR,"-o","-","-t","PNG","-s","8","-m","2",link],
@@ -2719,7 +2994,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.api_auth(): return
             if path==node_api.API_PREFIX+"/status":
                 loc=node_api.load_location(LOCATION_FILE)
-                self.send_json({"ok":True,"api_version":1,"version":"2.7.0","domain":DOMAIN,
+                self.send_json({"ok":True,"api_version":1,"version":"2.8.0","domain":DOMAIN,
                     "location":loc,"capabilities":["vless","hysteria","federation"]}); return
             if path==node_api.API_PREFIX+"/profiles":
                 result=[]
@@ -2731,6 +3006,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok":False,"message":"Not found"},404); return
         if path.startswith(SUB_PREFIX):
             self.serve_subscription(path[len(SUB_PREFIX):]); return
+        if path.startswith(DIRECT_PROFILE_PREFIX):
+            self.serve_direct_profile(path[len(DIRECT_PROFILE_PREFIX):]); return
         if path==PANEL_PATH+"/__assets/app.css":
             self.send_static_text(PANEL_CSS,"text/css; charset=utf-8")
             return
@@ -2812,7 +3089,12 @@ class Handler(BaseHTTPRequestHandler):
             current_users=users()
             registry=connection_store.ensure(CONNECTIONS_FILE,current_users)
             profiles=[{"id":"primary","name":"Основной WEB Proxy","secret":primary(),"protocol":"web","enabled":True,"backend_port":443}]+current_users
-            body=users_ui(subscription_registry(),profiles,traffic(),PANEL_PATH,DOMAIN,self.csrf(),proxy_link,openflux.profile_states(),registry["connections"],node_api.location_prefix(node_api.load_location(LOCATION_FILE)))
+            try: routing_profiles=routing_store.load(ROUTING_FILE).get("profiles",{})
+            except routing_store.RoutingError: routing_profiles={}
+            body=users_ui(subscription_registry(),profiles,traffic(),PANEL_PATH,DOMAIN,self.csrf(),proxy_link,
+                          openflux.profile_states(),registry["connections"],
+                          node_api.location_prefix(node_api.load_location(LOCATION_FILE)),
+                          routing_profiles,direct_profile_url)
             self.send_html(layout("Клиенты",body,"users")); return
         if path==PANEL_PATH+"/connections":
             current_users=users()
@@ -2857,6 +3139,23 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError,subprocess.SubprocessError): self.send_json({'message':'Не удалось сформировать QR. Проверьте qrencode на сервере.'},503)
             return
 
+        if path==PANEL_PATH+"/direct-profile-qr":
+            query=parse_qs(urlparse(self.path).query)
+            uid=query.get("id",[""])[0]; secret=query.get("secret",[""])[0]
+            matching=next((item for item in users() if item.get("id")==uid and not item.get("subscription_id")
+                           and item.get("protocol") in ("vless","hysteria") and any(
+                               secrets.compare_digest(str(candidate),secret) for candidate in
+                               (item.get("device_secrets") if isinstance(item.get("device_secrets"),list)
+                                 and item.get("device_secrets") else [item.get("secret","")]))),None)
+            if matching is None: self.send_html("Not found",404); return
+            try:
+                link=direct_profile_url(matching,secret)
+                if query.get("import",[""])[0]=="happ": link=happ_import_link(link)
+                self.send_png(qr_png_bytes(link))
+            except (OSError,subprocess.SubprocessError):
+                self.send_json({'message':'Не удалось сформировать QR. Проверьте qrencode на сервере.'},503)
+            return
+
         if path==PANEL_PATH+"/__qr":
             query=parse_qs(urlparse(self.path).query)
             q=query.get("secret",[""])[0]; protocol=query.get("protocol",["web"])[0]
@@ -2875,11 +3174,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html("Not found",404); return
             try:
                 expected=str(int(matching.get("backend_port",443)))
-                if protocol in ("mtproto","hysteria","awg20","awg31") and port!=expected:
+                if protocol in ("mtproto","hysteria","awg20","awg31","naive","mieru") and port!=expected:
                     self.send_html("Not found",404); return
                 if protocol in ("web","vless") and port!="443":
                     self.send_html("Not found",404); return
-                self.send_png(qr_png_bytes(proxy_link(protocol,q,expected,matching.get("name","Proxy"),matching.get("username",""))))
+                if protocol=="mieru" and query.get("format",[""])[0]=="native":
+                    link=extra_protocols.native_client_link(matching,proxy_connection(matching),DOMAIN)
+                else:
+                    link=proxy_link(protocol,q,expected,matching.get("name","Proxy"),matching.get("username",""))
+                self.send_png(qr_png_bytes(link))
             except Exception:self.send_json({'message':'Не удалось сформировать QR. Проверьте qrencode на сервере.'},503)
             return
 
@@ -3140,7 +3443,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with open(XRAY_PATH_FILE,encoding="utf-8") as stream: xray_path=stream.read().strip()
                 if not cdn.valid_path_root(xray_path): raise ValueError("Некорректный путь XHTTP на сервере.")
-                self.send_json(cdn_doctor.run(cdn_profile,DOMAIN,xray_path))
+                self.send_json(cdn_doctor.run(cdn_profile,DOMAIN,xray_path,connection=proxy_connection(profile)))
             except ValueError as exc:
                 self.send_json({"message":str(exc)},400)
             except Exception as exc:
@@ -3158,7 +3461,7 @@ class Handler(BaseHTTPRequestHandler):
                 with open(XRAY_PATH_FILE,encoding="utf-8") as stream: xray_path=stream.read().strip()
                 if not cdn.valid_path_root(xray_path): raise ValueError("Некорректный путь XHTTP на сервере.")
                 actions,warnings=repair_local_cdn(xray_path)
-                report=cdn_doctor.run(cdn_profile,DOMAIN,xray_path)
+                report=cdn_doctor.run(cdn_profile,DOMAIN,xray_path,connection=proxy_connection(profile))
                 report["repair_actions"]=actions
                 report["repair_warnings"]=warnings
                 report["repair_message"]="Локальная часть WPP восстановлена. Внешние настройки CDN не изменялись."
@@ -3185,10 +3488,12 @@ class Handler(BaseHTTPRequestHandler):
                     existing_advanced=dict(existing.get("advanced",{})) if isinstance(existing,dict) and isinstance(existing.get("advanced"),dict) else {}
                     advanced_value=form.get("advanced",json.dumps(existing_advanced,ensure_ascii=False))
                     if protocol in ("vless","hysteria") and form.get("xray_json","").strip():
+                        if not existing: raise connection_store.ConnectionError("Сначала создайте подключение, затем откройте его настройки карандашом.")
+                        current=connections_with_runtime([existing])[0].get("runtime_inbound",{})
                         advanced_value=connection_store.advanced_from_inbound(
-                            form.get("xray_json",""),protocol,existing_advanced.get("client",{}))
+                            form.get("xray_json",""),protocol,existing_advanced.get("client",{}),current=current)
                     raw={"id":form.get("id","").strip(),"name":form.get("name",""),"protocol":protocol,
-                         "enabled":True,"config":{},"advanced":advanced_value}
+                         "enabled":existing.get("enabled",True) if existing else True,"config":{},"advanced":advanced_value}
                     if not raw["id"]: raw.pop("id")
                     if protocol=="vless":
                         provider=form.get("provider","custom")
@@ -3202,9 +3507,16 @@ class Handler(BaseHTTPRequestHandler):
                             "no_sse_header":bool(existing_config.get("no_sse_header",False))}
                     else:
                         raw["config"]={**existing_config,"port":form.get("port",existing_config.get("port",0))}
+                        if protocol=="mieru": raw["config"]["transport"]=form.get("extra_transport",existing_config.get("transport","TCP"))
+                    if existing and protocol=="vless" and connection_store._xray_bucket(existing)!=connection_store._xray_bucket(raw):
+                        if form.get("xray_json","").strip() and json.loads(form["xray_json"])!=current:
+                            raise connection_store.ConnectionError("Измените маршрут и сохраните подключение, затем откройте карандаш заново для редактирования JSON нового маршрута.")
+                        raw["advanced"]={"client":existing_advanced.get("client",{})}
                     saved_connection=connection_store.upsert(CONNECTIONS_FILE,raw)
                     if protocol in ("awg20","awg31"):
                         connection_store.claim_awg_port(CONNECTIONS_FILE,saved_connection["id"],users())
+                    elif protocol in ("naive","mieru"):
+                        connection_store.claim_external_port(CONNECTIONS_FILE,saved_connection["id"])
                     ctl_manager_json("connections-refresh",{})
                 elif operation=="clone": connection_store.clone(CONNECTIONS_FILE,form.get("id",""),users())
                 elif operation=="toggle":
@@ -3228,11 +3540,16 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self.redirect("/connections")
             except (connection_store.ConnectionError,ValueError) as exc:
+                if previous_registry is not None:
+                    try: connection_store.save(CONNECTIONS_FILE,previous_registry)
+                    except Exception: pass
                 if async_request: self.send_json({"ok":False,"message":str(exc)},400)
                 else: self.send_html(esc(str(exc)),400)
             except Exception as exc:
                 if previous_registry is not None:
-                    try: connection_store.save(CONNECTIONS_FILE,previous_registry)
+                    try:
+                        connection_store.save(CONNECTIONS_FILE,previous_registry)
+                        ctl_manager_json("connections-refresh",{})
                     except Exception: pass
                 print("connection action failed:",type(exc).__name__,file=sys.stderr,flush=True)
                 message="Не удалось применить подключение. Предыдущая рабочая конфигурация сохранена."
@@ -3320,7 +3637,7 @@ class Handler(BaseHTTPRequestHandler):
                                          "connections":connection_specs})
                 if not result.get("ok"):
                     create_error(result.get("message","Ошибка создания подписки"),int(result.get("status",400))); return
-            elif kind in ("web","mtproto","vless","hysteria","awg20","awg31"):
+            elif kind in ("web","mtproto","vless","hysteria","awg20","awg31","naive","mieru"):
                 try:
                     common={"protocol":kind,"name":name,
                         "devices":form.get("direct_devices","1"),
@@ -3333,6 +3650,8 @@ class Handler(BaseHTTPRequestHandler):
                             raise connection_store.ConnectionError("Выбранное подключение не найдено.")
                         if selected.get("protocol") in ("awg20","awg31"):
                             selected=connection_store.claim_awg_port(CONNECTIONS_FILE,connection_id,users())
+                        elif selected.get("protocol") in ("naive","mieru"):
+                            selected=connection_store.claim_external_port(CONNECTIONS_FILE,connection_id)
                         common={**connection_store.request_for_connection(selected),"name":name,
                             "devices":form.get("direct_devices","1"),"traffic_limit_gb":form.get("traffic_limit_gb","0")}
                         kind=common["protocol"]
@@ -3352,6 +3671,8 @@ class Handler(BaseHTTPRequestHandler):
                     else: ctl_manager_json("add-json",common)
                 except ValueError as exc:
                     create_error(str(exc)); return
+                except extra_protocols.ServiceError as exc:
+                    create_error(str(exc),503); return
                 except Exception as exc:
                     print("create connection failed:",type(exc).__name__,file=sys.stderr,flush=True)
                     create_error("Не удалось создать подключение. Проверьте службы через SSH и повторите попытку.",503); return
@@ -3717,6 +4038,45 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             SUB_FETCH_SLOTS.release()
 
+    def serve_direct_profile(self,token):
+        if not re.fullmatch(r"[a-f0-9]{64}",token):
+            self.send_data("Not found",404); return
+        if not allow_subscription_request(client_id(self)):
+            self.send_data("Слишком много запросов. Повторите через минуту.",429,headers={"Retry-After":"60"}); return
+        if not SUB_FETCH_SLOTS.acquire(blocking=False):
+            self.send_data("Сервис занят. Повторите позже.",503,headers={"Retry-After":"15"}); return
+        try:
+            matched=None; matched_secret=""
+            for user in users():
+                if (user.get("subscription_id") or not user.get("enabled",True)
+                        or user.get("protocol") not in ("vless","hysteria")):
+                    continue
+                candidates=(user.get("device_secrets") if isinstance(user.get("device_secrets"),list)
+                            and user.get("device_secrets") else [user.get("secret","")])
+                for candidate in candidates:
+                    if candidate and secrets.compare_digest(direct_profile_token(user.get("id",""),candidate),token):
+                        matched=user; matched_secret=str(candidate); break
+                if matched is not None: break
+            if matched is None:
+                self.send_data("Not found",404); return
+            config=direct_profile_config(matched,matched_secret)
+            title=str(config.get("remarks") or "VLESS")
+            headers={"profile-title":"base64:"+base64.b64encode(title.encode()).decode(),
+                     "profile-update-interval":"6",
+                     "profile-web-page-url":direct_profile_url(matched,matched_secret)}
+            query=parse_qs(urlparse(self.path).query)
+            if query.get("download",[""])[0]=="1":
+                headers["Content-Disposition"]='attachment; filename="wpp-routing.json"'
+            payload=config if query.get("format",[""])[0]=="single" else [config]
+            self.send_data(json.dumps(payload,ensure_ascii=False,separators=(",",":")),
+                           mime="application/json; charset=utf-8",headers=headers)
+        except LookupError:
+            self.send_data("Not found",404)
+        except (KeyError,TypeError,ValueError,RuntimeError,OSError,routing_store.RoutingError):
+            self.send_data("Профиль временно недоступен.",503)
+        finally:
+            SUB_FETCH_SLOTS.release()
+
 def main():
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
 
@@ -3750,7 +4110,7 @@ PY
 fi
 
 python3 -m py_compile "$APP_FILE"
-python3 -m py_compile "$APP_DIR/wpp_subscriptions.py" "$APP_DIR/wpp_subscription_dashboard.py" "$APP_DIR/wpp_panel_extras.py" "$APP_DIR/wpp_ui.py" "$APP_DIR/wpp_metrics.py" "$APP_DIR/wpp_update.py" "$APP_DIR/wpp_nodes.py" "$APP_DIR/wpp_openflux.py" "$APP_DIR/wpp_awg.py" "$APP_DIR/wpp_firewall.py" "$APP_DIR/wpp_components.py" "$APP_DIR/wpp_cdn.py" "$APP_DIR/wpp_cdn_doctor.py" "$APP_DIR/wpp_connections.py" "$APP_DIR/wpp_backup.py" "$APP_DIR/wpp_routing.py"
+python3 -m py_compile "$APP_DIR/wpp_subscriptions.py" "$APP_DIR/wpp_subscription_dashboard.py" "$APP_DIR/wpp_panel_extras.py" "$APP_DIR/wpp_ui.py" "$APP_DIR/wpp_metrics.py" "$APP_DIR/wpp_update.py" "$APP_DIR/wpp_nodes.py" "$APP_DIR/wpp_openflux.py" "$APP_DIR/wpp_awg.py" "$APP_DIR/wpp_extra_protocols.py" "$APP_DIR/wpp_firewall.py" "$APP_DIR/wpp_components.py" "$APP_DIR/wpp_cdn.py" "$APP_DIR/wpp_cdn_doctor.py" "$APP_DIR/wpp_connections.py" "$APP_DIR/wpp_backup.py" "$APP_DIR/wpp_routing.py"
 
 
 # ---- Finish installation: service, Caddy route, permissions, start ----
@@ -3790,7 +4150,7 @@ fi
 echo "[4/6] Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=WEB PANEL PROXY V 2.7.0
+Description=WEB PANEL PROXY V 2.8.0
 After=network-online.target caddy.service tproxy-server.service mtproxy.service web-proxy-panel-firewall.service
 Wants=network-online.target
 Requires=web-proxy-panel-firewall.service
@@ -3954,7 +4314,7 @@ unlock_changes(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 show_info(){
     local d p version
-    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.7.0')"
+    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.8.0')"
     echo
     echo "============================================================"
     echo "                 WEB PANEL PROXY"
@@ -4183,6 +4543,10 @@ s = re.sub(
     '\n', s, flags=re.S,
 )
 s = re.sub(
+    r'\n\s*handle /wpp-direct/\*\s*\{\s*reverse_proxy 127\.0\.0\.1:8090\s*\}[ \t]*\n?',
+    '\n', s, flags=re.S,
+)
+s = re.sub(
     r'\n\s*handle /wpp-api/\*\s*\{\s*reverse_proxy 127\.0\.0\.1:8090\s*\}[ \t]*\n?',
     '\n', s, flags=re.S,
 )
@@ -4227,6 +4591,9 @@ route = (
     "        reverse_proxy 127.0.0.1:8090\n"
     "    }\n\n"
     "    handle /wpp-sub/* {\n"
+    "        reverse_proxy 127.0.0.1:8090\n"
+    "    }\n\n"
+    "    handle /wpp-direct/* {\n"
     "        reverse_proxy 127.0.0.1:8090\n"
     "    }\n\n"
     "    @web_panel_cdn_probe path /__wpp_cdn_probe\n"
@@ -4523,6 +4890,14 @@ if [[ -e /etc/web-proxy-panel/mita-package-owned ]]; then
     command -v mita >/dev/null 2>&1 && mita stop >/dev/null 2>&1 || true
     apt-get -o DPkg::Lock::Timeout=600 remove -y mita >/dev/null || die "Could not remove the WPP-owned Mieru package."
     rm -f /etc/web-proxy-panel/mita-package-owned
+    if ! getent group mita >/dev/null 2>&1; then
+        groupadd --system mita
+        touch /etc/web-proxy-panel/mita-group-owned
+    fi
+    if ! id -u mita >/dev/null 2>&1; then
+        useradd --system --gid mita --home-dir /var/lib/mita --create-home --shell /usr/sbin/nologin mita
+        touch /etc/web-proxy-panel/mita-user-owned
+    fi
 fi
 rm -f /etc/web-proxy-panel/mieru-server.json /etc/web-proxy-panel/mieru-port
 if [[ -e /etc/web-proxy-panel/naive-caddy-owned ]]; then
@@ -4533,9 +4908,9 @@ fi
 echo
 echo "============================================================"
 if [[ "$UPDATING" == "1" ]]; then
-echo "          WEB PANEL PROXY V 2.7.0 UPDATED"
+echo "          WEB PANEL PROXY V 2.8.0 UPDATED"
 else
-echo "         WEB PANEL PROXY V 2.7.0 IS READY"
+echo "         WEB PANEL PROXY V 2.8.0 IS READY"
 fi
 echo "============================================================"
 echo

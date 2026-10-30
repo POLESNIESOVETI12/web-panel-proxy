@@ -76,6 +76,17 @@ def endpoint_path(root, variant="direct"):
     return root + suffixes[variant]
 
 
+def client_endpoint_path(root, variant="direct"):
+    """Use a file-like Timeweb URL without moving the shared server endpoint.
+
+    Caddy already forwards the endpoint and its descendants to Xray. Timeweb
+    carries session/sequence metadata in query parameters, so /index.json can
+    be appended on the client while old links and the server path stay valid.
+    """
+    path = endpoint_path(root, variant)
+    return path + "/index.json" if str(variant or "direct") == "timeweb" else path
+
+
 def rewrite_caddy_xhttp_routes(source, root):
     """Align the managed Caddy matchers with the restored XHTTP root."""
     if not isinstance(source, str):
