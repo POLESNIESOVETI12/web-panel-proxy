@@ -8,7 +8,7 @@ export GIT_TERMINAL_PROMPT=0
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
 
-VERSION="${WEB_PANEL_PROXY_PACKAGE_VERSION:-2.8.0}"
+VERSION="${WEB_PANEL_PROXY_PACKAGE_VERSION:-2.8.1}"
 REPO_DIR="/root/tproxy-server"
 SITE_INPUT="/opt/tproxy-site"
 SITE_TARGET="/srv/tproxy-site"
@@ -489,7 +489,18 @@ if [[ "$REUSE_MT" != "1" ]]; then
         -e 's/^apt-get update$/apt-get -o DPkg::Lock::Timeout=600 update/' \
         -e 's/^apt-get install /apt-get -o DPkg::Lock::Timeout=600 install /' \
         "$MT_INSTALLER"
-    "$MT_INSTALLER"
+    # Public Telegram metadata can be unreachable from some VPS networks.
+    # Bound the request and retain upstream format checks and atomic writes.
+    MT_DOWNLOAD_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mtproxy-download.sh"
+    [[ -s "$MT_DOWNLOAD_HELPER" ]] || die "Package is incomplete: mtproxy-download.sh is missing."
+    if (
+        source "$MT_DOWNLOAD_HELPER"
+        "$MT_INSTALLER"
+    ); then
+        :
+    else
+        die "MTProxy bootstrap failed. Check access to core.telegram.org or use a fresh verified offline bootstrap package."
+    fi
 else
     echo "      MTProxy installation skipped; existing instance is already listening on :2398."
 fi

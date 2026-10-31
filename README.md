@@ -2,7 +2,7 @@
   <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
 </p>
 
-<h1 align="center">WEB PANEL PROXY 2.8.0</h1>
+<h1 align="center">WEB PANEL PROXY 2.8.1</h1>
 
 <p align="center">WEB Proxy, MTProto, VLESS XHTTP, Hysteria2, NaiveProxy, Mieru, OpenFlux и аккуратная панель управления для собственного VPS</p>
 
@@ -21,7 +21,13 @@
 - Проверка обновлений и безопасное обновление с временным автоматическим откатом.
 - Ручной экспорт и импорт полной резервной копии настроек через браузер без накопления архивов на VPS.
 
-## Изменения в 2.8.0
+## Изменения в 2.8.1
+
+- Исправлена остановка установки при недоступности `core.telegram.org` с VPS: загрузка служебных файлов MTProxy выполняется через IPv4 с ограничением времени и одной повторной попыткой.
+- При ошибке сети или некорректном ответе используются общедоступные файлы Telegram из пакета. Проверяются формат и SHA-256; повреждённые копии не применяются.
+- Исправление включено в обычный установщик и полный архив; отдельный пакет обхода больше не требуется.
+
+## Возможности версии 2.8.0
 
 - Добавлены отдельные подключения NaiveProxy и Mieru; исправлены разрешения службы Mieru и экспорт для Shadowrocket.
 - Для одиночного VLESS/Hysteria2 доступен импорт полного JSON с маршрутизацией в Happ.
@@ -39,6 +45,8 @@
 
 Перед установкой убедитесь, что домен уже указывает на сервер. Дополнительные порты выбранных подключений панель покажет автоматически; их также нужно открыть во внешнем firewall личного кабинета VPS-провайдера.
 
+Установщик MTProxy сначала получает актуальные служебные файлы с `core.telegram.org` по HTTPS через IPv4. Для каждой из двух загрузок установлены тайм-аут соединения 10 секунд, ограничение одной попытки 30 секунд и одна повторная попытка. При недоступности адреса или некорректном ответе используются проверенные общедоступные файлы Telegram из пакета (снимок от 2026-10-31). Резервные копии проверяются по формату и SHA-256; повреждённые данные отклоняются. Снимок не блокируется по календарной дате; актуальные сетевые данные всегда имеют приоритет. Другие загрузки установщика выполняются как прежде. Успешное получение служебных файлов само по себе не подтверждает связь MTProxy с серверами Telegram.
+
 ## Быстрый старт
 
 Подключитесь к серверу по SSH и перейдите в режим `root`:
@@ -50,15 +58,15 @@ sudo -i
 ### Установка
 
 ```bash
-sudo -i bash -c 'curl -4fsSL "https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.8.0/install.sh" -o /tmp/wpp-install.sh && bash /tmp/wpp-install.sh; code=$?; rm -f /tmp/wpp-install.sh; exit $code'
+sudo -i bash -c 'curl -4fsSL "https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.8.1/install.sh" -o /tmp/wpp-install.sh && bash /tmp/wpp-install.sh; code=$?; rm -f /tmp/wpp-install.sh; exit $code'
 ```
 
-Команда доступна после публикации тега `v2.8.0` в GitHub. Установщик запросит домен, email для HTTPS-сертификата, логин и пароль панели. После установки он покажет адрес панели и данные для входа.
+Команда доступна после публикации тега `v2.8.1` в GitHub. Установщик запросит домен, email для HTTPS-сертификата, логин и пароль панели. После установки он покажет адрес панели и данные для входа.
 
 Локальная установка из ZIP:
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=600 install -y unzip && d=$(mktemp -d /root/wpp-install.XXXXXX) && unzip -q /root/WEB-PANEL-PROXY-V-2.8.0-GITLAB.zip -d "$d" && cd "$d" && chmod +x ./*.sh && bash ./install-final.sh
+apt-get -o DPkg::Lock::Timeout=600 install -y unzip && d=$(mktemp -d /root/wpp-install.XXXXXX) && unzip -q /root/WEB-PANEL-PROXY-V-2.8.1-GITLAB.zip -d "$d" && cd "$d" && chmod +x ./*.sh && bash ./install-final.sh
 ```
 
 ### После установки
@@ -79,7 +87,7 @@ apt-get -o DPkg::Lock::Timeout=600 install -y unzip && d=$(mktemp -d /root/wpp-i
 Локальное обновление из ZIP (сначала загрузите архив в `/root`):
 
 ```bash
-d=$(mktemp -d /root/wpp-update.XXXXXX) && unzip -q /root/WEB-PANEL-PROXY-V-2.8.0-GITLAB.zip -d "$d" && cd "$d" && chmod +x ./*.sh && ./update.sh --local
+d=$(mktemp -d /root/wpp-update.XXXXXX) && unzip -q /root/WEB-PANEL-PROXY-V-2.8.1-GITLAB.zip -d "$d" && cd "$d" && chmod +x ./*.sh && ./update.sh --local
 ```
 
 ### Удаление

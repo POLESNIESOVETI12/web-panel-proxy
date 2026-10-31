@@ -45,6 +45,9 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 for file in install-panel.sh install-webproxy-core.sh uninstall-web-proxy.sh update.sh panel-logo.png THIRD-PARTY-NOTICES.md wpp_subscriptions.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_extra_protocols.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py; do
     [[ -s "$BASE/$file" ]] || die "Package is incomplete: missing $file. Extract the complete archive."
 done
+for file in mtproxy-download.sh assets/mtproxy-bootstrap/proxy-secret assets/mtproxy-bootstrap/proxy-multi.conf; do
+    [[ -s "$BASE/$file" ]] || die "Package is incomplete: missing $file. Extract the complete archive."
+done
 [[ -s "$BASE/assets/OpenFlux-linux-amd64" || -s "$BASE/OpenFlux-linux-amd64" ]] ||
     die "Package is incomplete: missing OpenFlux-linux-amd64. Extract the complete archive."
 for file in amneziawg-go-linux-amd64 awg-linux-amd64 awg-quick-linux-amd64; do
@@ -75,7 +78,7 @@ trap finish_install EXIT
 wpp_progress_start "Проверка пакета"
 wpp_progress 5 "Подготовка сервера"
 
-echo "WEB PANEL PROXY V 2.8.0: preparing server..."
+echo "WEB PANEL PROXY V 2.8.1: preparing server..."
 
 PANEL_UPDATE=0
 if [[ -s /var/lib/tproxy-panel/data.json ]] &&
@@ -97,7 +100,7 @@ install -o root -g root -m 0755 \
 
 echo "Installing proxy services..."
 wpp_progress 10 "Установка прокси-служб"
-WEB_PANEL_PROXY_PACKAGE_VERSION="2.8.0" bash "$BASE/install-webproxy-core.sh"
+WEB_PANEL_PROXY_PACKAGE_VERSION="2.8.1" bash "$BASE/install-webproxy-core.sh"
 wpp_progress 55 "Прокси-службы установлены"
 
 echo "Installing control panel..."
@@ -142,5 +145,5 @@ if ! systemctl start web-panel-proxy-component-auto-update.service; then
 fi
 echo "Installation complete."
 wpp_progress 100 "Установка завершена"
-printf '%s\n' '2.8.0' > /etc/web-proxy-panel/version
+printf '%s\n' '2.8.1' > /etc/web-proxy-panel/version
 chmod 0600 /etc/web-proxy-panel/version

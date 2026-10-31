@@ -501,9 +501,9 @@ XRAY_PATH="$(cat "$XRAY_PATH_FILE")"
 [[ "$XRAY_PATH" =~ ^/vless-[a-f0-9]{24}$ || "$XRAY_PATH" =~ ^/assets/[a-f0-9]{12}/[a-f0-9]{12}$ ]] || die "Stored VLESS path is invalid."
 
 if [[ "$UPDATING" == "1" ]]; then
-    echo "Updating WEB PANEL PROXY V 2.8.0..."
+    echo "Updating WEB PANEL PROXY V 2.8.1..."
 else
-    echo "Configuring WEB PANEL PROXY V 2.8.0..."
+    echo "Configuring WEB PANEL PROXY V 2.8.1..."
 fi
 INSTALL_CREDENTIALS="/etc/web-proxy-panel/install-credentials"
 if [[ "$UPDATING" == "1" ]]; then
@@ -2994,7 +2994,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.api_auth(): return
             if path==node_api.API_PREFIX+"/status":
                 loc=node_api.load_location(LOCATION_FILE)
-                self.send_json({"ok":True,"api_version":1,"version":"2.8.0","domain":DOMAIN,
+                self.send_json({"ok":True,"api_version":1,"version":"2.8.1","domain":DOMAIN,
                     "location":loc,"capabilities":["vless","hysteria","federation"]}); return
             if path==node_api.API_PREFIX+"/profiles":
                 result=[]
@@ -4150,7 +4150,7 @@ fi
 echo "[4/6] Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=WEB PANEL PROXY V 2.8.0
+Description=WEB PANEL PROXY V 2.8.1
 After=network-online.target caddy.service tproxy-server.service mtproxy.service web-proxy-panel-firewall.service
 Wants=network-online.target
 Requires=web-proxy-panel-firewall.service
@@ -4314,7 +4314,7 @@ unlock_changes(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 show_info(){
     local d p version
-    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.8.0')"
+    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.8.1')"
     echo
     echo "============================================================"
     echo "                 WEB PANEL PROXY"
@@ -4908,9 +4908,9 @@ fi
 echo
 echo "============================================================"
 if [[ "$UPDATING" == "1" ]]; then
-echo "          WEB PANEL PROXY V 2.8.0 UPDATED"
+echo "          WEB PANEL PROXY V 2.8.1 UPDATED"
 else
-echo "         WEB PANEL PROXY V 2.8.0 IS READY"
+echo "         WEB PANEL PROXY V 2.8.1 IS READY"
 fi
 echo "============================================================"
 echo

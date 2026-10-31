@@ -9,7 +9,7 @@ from urllib.parse import urlencode, urlsplit, parse_qs
 import wpp_extra_protocols as extra_protocols
 import wpp_routing as routing_store
 
-VERSION = '2.8.0'
+VERSION = '2.8.1'
 
 
 def esc(value): return html.escape(str(value), quote=True)

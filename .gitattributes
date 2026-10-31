@@ -8,3 +8,4 @@ LICENSE text eol=lf
 *.png binary
 *.gz binary
 assets/* binary
+assets/mtproxy-bootstrap/* binary
