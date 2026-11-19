@@ -97,7 +97,7 @@ class TimewebPaths(unittest.TestCase):
         with patch.object(doctor, '_resolve', return_value=['192.0.2.1']), \
              patch.object(doctor, '_tls', return_value=('TLSv1.3', 100)), \
              patch.object(doctor, '_request', return_value=(
-                 200, {'x-wpp-cdn-probe': 'ok'}, b'{}', 1)), \
+                 200, {'x-request-id': cdn.probe_signature(ROOTS[0])}, b'{}', 1)), \
              patch.object(doctor, '_local_port', return_value=True):
             report = doctor.run(profile, 'vpn.example', ROOTS[0])
         self.assertTrue(report['ok'])

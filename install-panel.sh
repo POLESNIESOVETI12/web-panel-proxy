@@ -117,10 +117,13 @@ MTPROTO_HOST="${MTPROTO_HOST:-$DOMAIN}"
 [[ -s "$PRIMARY_SECRET" ]] || die "Primary install-time secret not found."
 [[ -s "$LOGO_SOURCE" ]] || die "Panel logo file is missing: panel-logo.png"
 [[ -s "$AWG_GUIDE_SOURCE" ]] || die "AWG video guide is missing: assets/awg-routing-guide.mp4"
-for module in wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_extra_protocols.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
+for module in wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_update_data.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_extra_protocols.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py wpp_cascade.py wpp_cascade_ui.py wpp_ssh_cascade.py wpp_ssh_cascade_ui.py wpp_ssh_relay_agent.py wpp_cascade_ops.py wpp_cascade_ops_ui.py; do
     [[ -s "$BASE/$module" ]] || die "Missing panel module: $module; extract the complete archive."
 done
 FLAG_ARCHIVE="$BASE/wpp-panel/flags.tar.gz"
+for asset in editor.css editor.html production.js methods.css methods.html methods.js; do
+    [[ -s "$BASE/frontend/cascade/$asset" ]] || die "Missing cascade UI asset: $asset."
+done
 [[ -s "$FLAG_ARCHIVE" ]] ||
     die "Panel flag bundle is missing; extract the complete archive."
 
@@ -306,6 +309,8 @@ Type=simple
 User=caddy
 Group=caddy
 ExecStart=/usr/local/bin/caddy-naive run --config /etc/web-proxy-panel/extra-protocols/Caddyfile.naive --adapter caddyfile
+RuntimeDirectory=web-panel-proxy-naive
+RuntimeDirectoryMode=0750
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=1048576
@@ -378,6 +383,10 @@ EOF
 chmod 0644 /etc/systemd/system/caddy.service.d/tproxy.conf
 
 export DEBIAN_FRONTEND=noninteractive
+if ! python3 -c 'import paramiko' >/dev/null 2>&1; then
+    apt-get -o DPkg::Lock::Timeout=600 update
+    apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends python3-paramiko
+fi
 if ! command -v qrencode >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1 || ! command -v xz >/dev/null 2>&1; then
     apt-get -o DPkg::Lock::Timeout=600 update
     apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends qrencode unzip xz-utils
@@ -501,9 +510,9 @@ XRAY_PATH="$(cat "$XRAY_PATH_FILE")"
 [[ "$XRAY_PATH" =~ ^/vless-[a-f0-9]{24}$ || "$XRAY_PATH" =~ ^/assets/[a-f0-9]{12}/[a-f0-9]{12}$ ]] || die "Stored VLESS path is invalid."
 
 if [[ "$UPDATING" == "1" ]]; then
-    echo "Updating WEB PANEL PROXY V 2.8.1..."
+    echo "Updating WEB PANEL PROXY V 2.9.0..."
 else
-    echo "Configuring WEB PANEL PROXY V 2.8.1..."
+    echo "Configuring WEB PANEL PROXY V 2.9.0..."
 fi
 INSTALL_CREDENTIALS="/etc/web-proxy-panel/install-credentials"
 if [[ "$UPDATING" == "1" ]]; then
@@ -536,9 +545,13 @@ fi
 
 echo "[1/6] Writing manager..."
 
-for module in wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_extra_protocols.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
+for module in wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_update_data.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_extra_protocols.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py wpp_cascade.py wpp_cascade_ui.py wpp_ssh_cascade.py wpp_ssh_cascade_ui.py wpp_ssh_relay_agent.py wpp_cascade_ops.py wpp_cascade_ops_ui.py; do
     [[ -s "$BASE/$module" ]] || die "Package is incomplete: $module is missing."
     install -o root -g root -m 0644 "$BASE/$module" "$APP_DIR/$module"
+done
+install -d -o root -g root -m 0755 "$APP_DIR/cascade-ui"
+for asset in editor.css editor.html production.js methods.css methods.html methods.js; do
+    install -o root -g root -m 0644 "$BASE/frontend/cascade/$asset" "$APP_DIR/cascade-ui/$asset"
 done
 install -d -o root -g tproxy -m 0750 /srv/tproxy-site
 for asset in "${PRESET_ASSETS[@]}"; do
@@ -585,6 +598,7 @@ PY
 cat > "$MANAGER" <<'PY'
 #!/usr/bin/env python3
 import copy, fcntl, grp, json, os, re, secrets, shutil, subprocess, sys, time, uuid
+from pathlib import Path
 sys.path.insert(0,"/opt/tproxy-panel")
 from wpp_subscriptions import mutate as mutate_subscription, issue as issue_subscription, SubscriptionError
 import wpp_awg
@@ -593,6 +607,9 @@ import wpp_firewall
 import wpp_cdn
 import wpp_connections
 import wpp_cdn_doctor
+import wpp_cascade
+import wpp_ssh_cascade
+import wpp_cascade_ops
 
 USERS="/etc/web-proxy-panel/users.json"
 CONNECTIONS="/etc/web-proxy-panel/connections.json"
@@ -622,6 +639,9 @@ HYSTERIA_PORT=8443
 CADDYFILE="/etc/caddy/Caddyfile"
 TRAFFIC_FILE="/var/lib/tproxy-panel/traffic.json"
 TRAFFIC_LOCK="/var/lib/tproxy-panel/traffic.lock"
+CASCADE_STATE="/etc/web-proxy-panel/cascades.json"
+SSH_CASCADE_STATE="/etc/web-proxy-panel/ssh-cascades.json"
+CASCADE_NODES="/var/lib/tproxy-panel/nodes.json"
 UFW_HYSTERIA_MARKER="/etc/web-proxy-panel/hysteria-ufw-owned"
 UFW_MTPROTO_MARKER="/etc/web-proxy-panel/mtproto-ufw-owned"
 UFW_AWG_MARKER="/etc/web-proxy-panel/awg-ufw-owned"
@@ -645,6 +665,7 @@ def load():
             d.setdefault("users",[])
             d.setdefault("traffic",{})
             d.setdefault("subscriptions",[])
+            d.pop("issued_key_limit", None)
             for sub in d["subscriptions"]:
                 supported=[p for p in sub.get("protocols",[]) if p in ("vless","hysteria")]
                 sub["protocols"]=supported or ["vless","hysteria"]
@@ -774,6 +795,8 @@ def sync_firewall(d):
     hysteria_enabled=any(u.get("enabled",True) and u.get("protocol")=="hysteria" for u in d["users"])
     awg_users=[u for u in d["users"] if u.get("enabled",True) and u.get("protocol") in wpp_awg.PROTOCOLS]
     connection_registry=wpp_connections.ensure(CONNECTIONS,d["users"],persist=False)
+    if not hysteria_enabled:
+        hysteria_enabled=bool(wpp_cascade.hysteria_probe_clients(wpp_cascade.load(CASCADE_STATE),connection_registry))
     hysteria_port=wpp_connections.hysteria_port(connection_registry,HYSTERIA_PORT)
     enabled_extra_connections={str(item.get("id","")):item for item in connection_registry.get("connections",[])
         if item.get("enabled",True) and item.get("protocol") in wpp_extra_protocols.PROTOCOLS}
@@ -809,6 +832,12 @@ def sync_firewall(d):
         lines.append("nft 'add rule inet web_proxy_panel input iifname != \"lo\" tcp dport { %s } counter drop'" % ",".join(map(str,sorted(stats))))
     if hysteria_enabled:
         lines.append("nft 'add rule inet web_proxy_panel input udp dport %d counter accept'" % hysteria_port)
+        if hysteria_port != 443:
+            # Keep the legacy listener and its credentials. Redirect only packets
+            # addressed to this server, never transit traffic through an AWG peer.
+            for chain, hook in (("hysteria_ingress", "prerouting"), ("hysteria_local", "output")):
+                lines.append("nft 'add chain inet web_proxy_panel %s { type nat hook %s priority dstnat; policy accept; }'" % (chain, hook))
+                lines.append("nft 'add rule inet web_proxy_panel %s fib daddr type local udp dport 443 counter redirect to :%d'" % (chain, hysteria_port))
     for u in awg_users:
         uid=u["id"]; port=int(u["backend_port"])
         lines.append("nft 'add rule inet web_proxy_panel input iifname != \"lo\" udp dport %d counter accept comment \"wpp:%s:up\"'"%(port,uid))
@@ -848,7 +877,7 @@ def sync_firewall(d):
     external_if=match.group(1) if match else ""
     wpp_firewall.reconcile(
         tcp={443,*mtproto_ports} | {int(u["backend_port"]) for u in extra_users if u.get("protocol")=="naive" or str(u.get("transport","TCP")).upper()=="TCP"},
-        udp=({hysteria_port} if hysteria_enabled else set()) | {int(u["backend_port"]) for u in awg_users} | {int(u["backend_port"]) for u in extra_users if str(u.get("transport","TCP")).upper()=="UDP"},
+        udp=({443,hysteria_port} if hysteria_enabled else set()) | {int(u["backend_port"]) for u in awg_users} | {int(u["backend_port"]) for u in extra_users if str(u.get("transport","TCP")).upper()=="UDP"},
         routes={(u["awg_interface"],external_if) for u in awg_users if external_if},
     )
 
@@ -861,6 +890,8 @@ def maintain_firewall(d):
     hysteria_enabled=any(u.get("enabled",True) and u.get("protocol")=="hysteria" for u in d["users"])
     awg_users=[u for u in d["users"] if u.get("enabled",True) and u.get("protocol") in wpp_awg.PROTOCOLS]
     connection_registry=wpp_connections.ensure(CONNECTIONS,d["users"],persist=False)
+    if not hysteria_enabled:
+        hysteria_enabled=bool(wpp_cascade.hysteria_probe_clients(wpp_cascade.load(CASCADE_STATE),connection_registry))
     hysteria_port=wpp_connections.hysteria_port(connection_registry,HYSTERIA_PORT)
     enabled_extra_connections={str(item.get("id","")) for item in connection_registry.get("connections",[])
         if item.get("enabled",True) and item.get("protocol") in wpp_extra_protocols.PROTOCOLS}
@@ -877,7 +908,7 @@ def maintain_firewall(d):
     external_if=match.group(1) if match else ""
     wpp_firewall.reconcile(
         tcp={443,*mtproto_ports} | {int(u["backend_port"]) for u in extra_users if u.get("protocol")=="naive" or str(u.get("transport","TCP")).upper()=="TCP"},
-        udp=({hysteria_port} if hysteria_enabled else set()) | {int(u["backend_port"]) for u in awg_users} | {int(u["backend_port"]) for u in extra_users if str(u.get("transport","TCP")).upper()=="UDP"},
+        udp=({443,hysteria_port} if hysteria_enabled else set()) | {int(u["backend_port"]) for u in awg_users} | {int(u["backend_port"]) for u in extra_users if str(u.get("transport","TCP")).upper()=="UDP"},
         routes={(u["awg_interface"],external_if) for u in awg_users if external_if},
     )
 
@@ -972,14 +1003,15 @@ def sync_xray(d):
         xray_path=f.read().strip()
     if not wpp_cdn.valid_path_root(xray_path):
         raise RuntimeError("Invalid stored VLESS path")
-    vless=[]
+    cascade_state=wpp_cascade.load(CASCADE_STATE)
+    vless=wpp_cascade.relay_clients(cascade_state)
     vless_cdn=[]
     vless_beget=[]
     vless_selectel=[]
     vless_vk=[]
     vless_timeweb=[]
-    hysteria=[]
     registry=wpp_connections.ensure(CONNECTIONS,d["users"],persist=False)
+    hysteria=wpp_cascade.hysteria_probe_clients(cascade_state,registry)
     advanced_by_bucket={}
     advanced_owner={}
     def remember_advanced(bucket,user):
@@ -995,6 +1027,8 @@ def sync_xray(d):
     def customize(inbound,bucket,protocol):
         template=next((item for item in registry.get("connections",[]) if wpp_connections._xray_bucket(item)==bucket),{})
         value=advanced_by_bucket.get(bucket,("",template.get("advanced",{})))[1]
+        if bucket=="direct":
+            inbound["streamSettings"]["xhttpSettings"]=wpp_connections.effective_xhttp({"protocol":"vless","config":{"route":"direct"},"advanced":value},xray_path)
         return wpp_connections.apply_server_advanced(inbound,value,protocol)
     for u in d["users"]:
         if not u.get("enabled",True):
@@ -1151,6 +1185,9 @@ def sync_xray(d):
         "inbounds":inbounds,
         "outbounds":[{"tag":"direct","protocol":"freedom"}]
     }
+    config=wpp_cascade.overlay(config,cascade_state,registry,d["users"],direct_secrets)
+    direct_connection=next((item for item in registry["connections"] if wpp_connections._xray_bucket(item)=="direct"),{})
+    wpp_cascade.check_relay_listener(config,cascade_state,wpp_connections.inbound_tag(direct_connection) if direct_connection else "vless-xhttp")
     with open(CADDYFILE,encoding="utf-8") as stream: caddy_text=stream.read()
     caddy_text=wpp_cdn_doctor.connection_routes(caddy_text,xray_path,registry)
     inactive=[]
@@ -1642,6 +1679,52 @@ def edit_user(uid,enabled=None,name=None):
             except Exception: raise RuntimeError('Не удалось восстановить службы. Проверьте VPS через SSH.')
             raise
 
+
+def direct_key_count(value):
+    raw = str(value).strip()
+    if not re.fullmatch(r"[0-9]{1,2}", raw) or not 1 <= int(raw) <= 20:
+        raise ValueError("Укажите количество ключей от 1 до 20.")
+    return int(raw)
+
+
+def edit_direct_key_count(uid, requested_count, current_count):
+    count = direct_key_count(requested_count)
+    before = load()
+    target = next((u for u in before["users"] if u.get("id") == uid), None)
+    if uid == "primary" or target is None or target.get("subscription_id") or target.get("federation_id"):
+        raise ValueError("Отдельный клиент не найден или недоступен для изменения.")
+    protocol = target.get("protocol", "web")
+    if protocol not in ("web", "mtproto", "vless", "hysteria"):
+        raise ValueError("У этого подключения один ключ или профиль на клиента.")
+    current = direct_secrets(target)
+    if count == len(current):
+        return
+    if str(current_count) != str(len(current)):
+        raise ValueError("Количество ключей уже изменилось. Обновите список клиентов и повторите попытку.")
+
+    keys = current[:count]
+    for _ in range(len(keys), count):
+        keys.append(secrets.token_hex(16) if protocol in ("web", "mtproto") else str(uuid.uuid4()))
+    after = copy.deepcopy(before)
+    user = next(u for u in after["users"] if u["id"] == uid)
+    user.update(secret=keys[0], device_secrets=keys, max_devices=count)
+    if not user.get("enabled", True):
+        save(after)
+        return
+
+    collect_traffic(before)
+    save(after)
+    try:
+        apply(after, True, before)
+    except Exception:
+        save(before)
+        try:
+            apply(before, True, after)
+        except Exception:
+            raise RuntimeError("Не удалось восстановить службы. Проверьте VPS через SSH.")
+        raise
+
+
 def edit_primary_secret(secret):
     secret=normalize_proxy_secret(secret)
     with open(PRIMARY_SECRET,encoding="ascii") as f: old_secret=f.read().strip()
@@ -1789,7 +1872,110 @@ def delete_connection(request):
         try: apply(before,True,after)
         except Exception: pass
         raise
+    if os.path.exists(CASCADE_STATE): result["cleanup_pending"]=cascade_controller().detach(cid)
+    if os.path.exists(SSH_CASCADE_STATE): result["cleanup_pending"]=ssh_cascade_controller().detach(cid) or result.get("cleanup_pending",False)
     print(json.dumps(result,ensure_ascii=True))
+
+def cascade_domain():
+    value=os.environ.get("WEBPROXY_DOMAIN","") or os.environ.get("TPROXY_HOSTNAME","")
+    if not value:
+        with open("/etc/systemd/system/caddy.service.d/tproxy.conf",encoding="utf-8") as stream:
+            match=re.search(r"(?m)^Environment=TPROXY_HOSTNAME=([^\s]+)$",stream.read())
+        value=match.group(1) if match else ""
+    return wpp_cascade.hostname(value)
+
+def cascade_description():
+    registry=wpp_connections.load(CONNECTIONS)
+    connection=next((item for item in registry["connections"] if wpp_connections._xray_bucket(item)=="direct"),{})
+    with open(XRAY_PATH_FILE,encoding="utf-8") as stream: root=stream.read().strip()
+    base={"tag":"vless-xhttp","listen":"127.0.0.1","port":10000,"protocol":"vless",
+          "settings":{"clients":[],"decryption":"none"},
+          "streamSettings":{"network":"xhttp","security":"none","xhttpSettings":wpp_connections.effective_xhttp({"protocol":"vless",**connection},root)}}
+    inbound=wpp_connections.apply_server_advanced(base,connection.get("advanced",{}),"vless")
+    transport=inbound.get("streamSettings",{})
+    settings=transport.get("xhttpSettings",{})
+    if transport.get("network")!="xhttp" or settings.get("uplinkHTTPMethod","POST")!="POST":
+        raise ValueError("Служебный вход моста требует стандартный VLESS XHTTP с методом POST.")
+    return {"ok":True,"capabilities":[wpp_cascade.CAPABILITY],
+            "listener_hash":wpp_cascade.listener_hash(inbound),
+            "endpoint":wpp_cascade.endpoint({"host":cascade_domain(),"path":settings.get("path")},with_key=False)}
+
+def cascade_apply_runtime():
+    data=load()
+    # A health key can start or stop Hysteria2 before any client keys exist.
+    registry=wpp_connections.ensure(CONNECTIONS,data["users"],persist=False)
+    probe_active=bool(wpp_cascade.hysteria_probe_clients(wpp_cascade.load(CASCADE_STATE),registry))
+    had_hysteria=False
+    try:
+        with open(XRAY_CONFIG,encoding="utf-8") as stream:
+            had_hysteria=any(row.get("protocol")=="hysteria" for row in json.load(stream).get("inbounds",[]))
+    except FileNotFoundError:
+        pass
+    collect_traffic(data)
+    sync_xray(data)
+    if had_hysteria!=probe_active and not any(u.get("enabled",True) and u.get("protocol")=="hysteria" for u in data["users"]):
+        sync_firewall(data)
+
+def cascade_controller():
+    return wpp_cascade.Controller(CASCADE_STATE,CONNECTIONS,CASCADE_NODES,cascade_domain(),
+        cascade_apply_runtime,lambda target:wpp_cascade.probe(XRAY_BIN,target,details=True),
+        verify_entry=cascade_hysteria_probe)
+
+def ssh_exit_ip():
+    import socket
+    try:
+        value=Path('/etc/web-proxy-panel/mtproto-host').read_text().strip()
+        return wpp_ssh_cascade.public_ip(value)
+    except (OSError,ValueError):
+        for item in socket.getaddrinfo(cascade_domain(),443,socket.AF_INET,socket.SOCK_STREAM):
+            try:return wpp_ssh_cascade.public_ip(item[4][0])
+            except ValueError:continue
+    raise ValueError('Укажите публичный IPv4 зарубежного сервера.')
+
+def ssh_cascade_probe(connection,host,port):
+    if connection['protocol']=='hysteria':
+        return cascade_hysteria_probe(connection,host=host,port=port)
+    return wpp_cascade_ops.stable_probe(CASCADE_STATE,connection,cascade_domain(),cascade_description(),
+        cascade_apply_runtime,XRAY_BIN,host,port)
+
+
+def cascade_hysteria_probe(connection,target=None,host=None,port=443):
+    domain=cascade_domain()
+    if target is not None:
+        return wpp_cascade_ops.tentative_hysteria_probe(CASCADE_STATE,connection,domain,cascade_apply_runtime,XRAY_BIN,target)
+    return wpp_cascade_ops.stable_probe(CASCADE_STATE,connection,domain,{},cascade_apply_runtime,XRAY_BIN,host or domain,port)
+
+
+def cascade_local_health():
+    services={}
+    for unit in ('caddy.service','web-panel-proxy-xray.service'):
+        try:services[unit]=run('systemctl','is-active','--quiet',unit,timeout=3).returncode==0
+        except Exception:services[unit]=False
+    transport=wpp_cascade_ops.transport_status(cascade_domain(),connect_to='127.0.0.1')
+    if not all(services.values()):transport['problem']='Не запущены службы: '+', '.join(unit for unit,active in services.items() if not active)
+    return {'service_ok':all(services.values()),'services':services,**transport}
+
+
+def cascade_probe_current(connection):
+    if not connection.get('enabled',True):raise ValueError('Подключение отключено.')
+    kind=wpp_cascade_ops.route_kind(connection)
+    if kind=='panel':
+        state=wpp_cascade.load(CASCADE_STATE);entry=state['entries'].get(connection['id'],{})
+        if entry.get('plan_hash')!=wpp_cascade.plan_hash(connection['config']['cascade']):
+            raise ValueError('Сохранённая цепочка не применена.')
+    if kind=='panel':
+        return ssh_cascade_probe(connection,cascade_domain(),443)
+    entry=connection.get('config',{}).get('ssh_entry',{})
+    return ssh_cascade_probe(connection,entry.get('host',cascade_domain()),entry.get('port',443))
+
+
+def cascade_operations():
+    return wpp_cascade_ops.Operations(wpp_cascade_ops.Inspector(CONNECTIONS,cascade_controller(),
+        ssh_cascade_controller(),cascade_probe_current,cascade_local_health))
+
+
+def ssh_cascade_controller():
+    return wpp_ssh_cascade.Controller(SSH_CASCADE_STATE,CONNECTIONS,cascade_domain(),ssh_exit_ip,ssh_cascade_probe)
 
 def subscription_command():
     try:
@@ -1839,7 +2025,31 @@ if cmd not in ("users",):
         except BlockingIOError:
             if time.monotonic()>deadline: raise SystemExit("Менеджер занят. Повторите запрос позже.")
             time.sleep(0.1)
+if os.path.exists(CASCADE_STATE+".transaction") and cmd!="users": cascade_controller().recover()
+if os.path.exists(SSH_CASCADE_STATE+".transaction") and cmd!="users": ssh_cascade_controller().recover()
 if cmd=="init": init()
+elif cmd in ('cascade-ops','cascade-monitor','cascade-health'):
+    try:
+        result=(cascade_local_health() if cmd=='cascade-health' else
+                cascade_operations().tick() if cmd=='cascade-monitor' else cascade_operations().execute(json.load(sys.stdin)))
+        print(json.dumps(result,ensure_ascii=True))
+    except (wpp_cascade_ops.OperationsError,wpp_ssh_cascade.SSHError,wpp_cascade.CascadeError) as exc:
+        print(json.dumps({'ok':False,'message':str(exc)},ensure_ascii=True))
+    except Exception:
+        print(json.dumps({'ok':False,'message':'Диагностика не завершена. Проверьте настройки и доступность служб.'},ensure_ascii=True))
+elif cmd=="cascade-status": print(json.dumps(cascade_description()))
+elif cmd=="cascade-cleanup": print(json.dumps({"ok":True,"cleanup_pending":cascade_controller().cleanup()}))
+elif cmd=="ssh-cascade":
+    try: print(json.dumps(ssh_cascade_controller().execute(json.load(sys.stdin)),ensure_ascii=True))
+    except (wpp_ssh_cascade.SSHError,wpp_cascade.CascadeError) as exc:
+        print(json.dumps({'ok':False,'message':str(exc)},ensure_ascii=True))
+elif cmd=="ssh-cascade-cleanup":print(json.dumps({'ok':True,'cleanup_pending':ssh_cascade_controller().cleanup()}))
+elif cmd in ("cascade-save","cascade-check"):
+    print(json.dumps(cascade_controller().execute(json.load(sys.stdin),check_only=cmd=="cascade-check")))
+elif cmd in ("cascade-prepare","cascade-delete"):
+    description=cascade_description() if cmd=="cascade-prepare" else {}
+    print(json.dumps(wpp_cascade.mutate_relay(CASCADE_STATE,json.load(sys.stdin),cascade_domain(),cascade_apply_runtime,
+        delete=cmd=="cascade-delete",local_endpoint=description.get("endpoint"),local_listener_hash=description.get("listener_hash"))))
 elif cmd=="subscription": subscription_command()
 elif cmd=="add": add(sys.argv[2]," ".join(sys.argv[3:]))
 elif cmd=="add-json": add_json(json.load(sys.stdin))
@@ -1856,6 +2066,10 @@ elif cmd=="set-user":
 elif cmd=="rename-user":
     edit_user(sys.argv[2],name=sys.argv[3])
     print(json.dumps({'ok':True}))
+elif cmd=="direct-key-count":
+    request = json.load(sys.stdin)
+    edit_direct_key_count(request.get("id", ""), request.get("count"), request.get("current_count"))
+    print(json.dumps({"ok": True}))
 elif cmd=="set-secret": set_secret(json.load(sys.stdin))
 elif cmd=="mtproxy-economy": print(json.dumps(set_mtproxy_economy(json.load(sys.stdin)),ensure_ascii=True))
 elif cmd=="mtproxy-economy-status": print(json.dumps(mtproxy_economy_state(),ensure_ascii=True))
@@ -2127,6 +2341,8 @@ Wants=network-online.target
 Type=simple
 User=xray
 Group=xray
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ExecStart=$XRAY_BIN run -config $XRAY_CONFIG
 Restart=on-failure
 RestartSec=2
@@ -2190,6 +2406,9 @@ import wpp_cdn_doctor as cdn_doctor
 import wpp_connections as connection_store
 import wpp_backup as backup_store
 import wpp_routing as routing_store
+import wpp_cascade_ops as cascade_ops_store
+import wpp_cascade_ui as cascade_ui_store
+import wpp_cascade as cascade_store
 
 HOST="127.0.0.1"
 PORT=8090
@@ -2202,6 +2421,7 @@ PRIMARY="/etc/web-proxy-panel/primary-secret"
 PROFILES="/etc/tproxy-server/profiles.json"
 USERS="/etc/web-proxy-panel/users.json"
 CONNECTIONS_FILE="/etc/web-proxy-panel/connections.json"
+CASCADE_STATE_FILE="/etc/web-proxy-panel/cascades.json"
 ROUTING_FILE="/var/lib/tproxy-panel/routing.json"
 OPENCCK_RU_CACHE="/var/lib/tproxy-panel/opencck-ru-amnezia.json"
 XRAY_RUNTIME_CONFIG="/etc/web-panel-proxy-xray/config.json"
@@ -2718,13 +2938,13 @@ def ctl_subscription(request):
     return {"ok":False,"status":503,"message":"Менеджер занят или недоступен. Повторите позже."}
 def ctl_manager_json(command,request):
     r=subprocess.run([MANAGER,command],input=json.dumps(request),stdout=subprocess.PIPE,
-                     stderr=subprocess.PIPE,text=True,timeout=180)
+                     stderr=subprocess.PIPE,text=True,timeout=600 if command.startswith("cascade-") or command=="ssh-cascade" else 180)
     if r.returncode:
         message=r.stderr.strip() or "manager failed"
         marker="ServiceError: "
         if marker in message:
             raise extra_protocols.ServiceError(message.rsplit(marker,1)[-1].strip())
-        for marker in ("ValueError: ","ConnectionError: "):
+        for marker in ("ValueError: ","ConnectionError: ","CascadeError: "):
             if marker in message: raise ValueError(message.rsplit(marker,1)[-1].strip())
         raise RuntimeError(message)
     value=json.loads(r.stdout)
@@ -2789,6 +3009,8 @@ def proxy_connection_name(user,fallback):
 def connections_with_runtime(connections):
     """Attach the currently applied inbound for the authenticated editor UI."""
     result=copy.deepcopy(connections)
+    try: cascade_entries=cascade_store.load(CASCADE_STATE_FILE)["entries"]
+    except cascade_store.CascadeError: cascade_entries={}
     try:
         with open(XRAY_RUNTIME_CONFIG,encoding="utf-8") as stream: runtime=json.load(stream)
         by_tag={str(item.get("tag","")):item for item in runtime.get("inbounds",[]) if isinstance(item,dict)}
@@ -2799,14 +3021,18 @@ def connections_with_runtime(connections):
         protocol=item.get("protocol")
         cfg=item.get("config") if isinstance(item.get("config"),dict) else {}
         tag=connection_store.inbound_tag(item) if protocol in ("vless","hysteria") else ""
-        if tag and tag in by_tag: item["runtime_inbound"]=copy.deepcopy(by_tag[tag])
+        if tag and tag in by_tag:
+            item["runtime_inbound"]=copy.deepcopy(by_tag[tag])
+            settings=item["runtime_inbound"].get("settings",{})
+            if isinstance(settings.get("clients"),list):
+                settings["clients"]=[client for client in settings["clients"] if not str(client.get("email","")).startswith("cascade:")]
         elif tag:
             bucket=connection_store._xray_bucket(item)
             if protocol=="vless":
                 ports={"direct":10000,"cdn":10001,"beget":10002,"selectel":10003,"vk":10004,"timeweb":10005}
                 base={"tag":tag,"listen":"127.0.0.1","port":ports[bucket],"protocol":"vless",
                       "settings":{"clients":[],"decryption":"none"},
-                      "streamSettings":{"network":"xhttp","security":"none","xhttpSettings":cdn.server_xhttp(cdn.endpoint_path(xray_path(),bucket),True if bucket=="cdn" else bucket)},
+                      "streamSettings":{"network":"xhttp","security":"none","xhttpSettings":connection_store.effective_xhttp(item,xray_path())},
                       "sniffing":{"enabled":True,"destOverride":["http","tls","quic"],"routeOnly":True}}
             else:
                 base={"tag":tag,"listen":"0.0.0.0","port":8443,"protocol":"hysteria",
@@ -2816,6 +3042,8 @@ def connections_with_runtime(connections):
             item["runtime_inbound"]=connection_store.apply_server_advanced(base,item.get("advanced",{}),protocol)
         item["shared_inbound_names"]=[other.get("name",other.get("id","")) for other in result
             if other.get("id")!=item.get("id") and tag and connection_store._xray_bucket(other)==connection_store._xray_bucket(item)]
+        cascade=cascade_store.clean_plan(cfg.get("cascade"))
+        item["cascade_ready"]=cascade_entries.get(item.get("id"),{}).get("plan_hash")==cascade_store.plan_hash(cascade)
         profile=routing_profiles.get(str(item.get("id","")))
         if isinstance(profile,dict) and profile.get("enabled",True):
             try:
@@ -2837,25 +3065,30 @@ def proxy_link(protocol,secret,port=443,name="Proxy",username=""):
         route=cdn.vless_route(DOMAIN,user.get("cdn") if user else None)
         connection=proxy_connection(user)
         if connection:
-            route=connection_store.apply_client_advanced(route,connection.get("advanced",{}))
+            if not route["enabled"]:
+                route["fingerprint"]=connection.get("config",{}).get("fingerprint","chrome")
+            if connection.get("advanced",{}).get("inbound") or connection.get("advanced",{}).get("server"):
+                route["extra"]=None
+            route=connection_store.ssh_cascade.apply_client(route,connection)
         route_path=cdn.client_endpoint_path(xray_path(),route.get("path_variant","cdn" if route["enabled"] else "direct"))
         if connection:
-            xhttp=connection.get("advanced",{}).get("inbound",{}).get("streamSettings",{}).get("xhttpSettings",{})
+            xhttp=connection_store.effective_xhttp(connection,xray_path())
             route_path=connection_store.client_path(connection,xray_path())
+            route["extra"]={**(route.get("extra") or {}),**{key:value for key,value in xhttp.items() if key not in ("path","mode","host")}}
+            route=connection_store.apply_client_advanced(route,connection.get("advanced",{}))
             if xhttp.get("mode") and xhttp["mode"]!="auto":
                 route["mode"]=xhttp["mode"]
                 if route.get("extra") and "mode" in route["extra"]: route["extra"]["mode"]=xhttp["mode"]
-            route["extra"]={**(route.get("extra") or {}),**{key:value for key,value in xhttp.items() if key not in ("path","mode","host")}}
         query_values={"encryption":"none","security":"tls","sni":route["sni"],"fp":route["fingerprint"],"type":"xhttp","host":route["host"],"path":route_path,"mode":route["mode"],"alpn":",".join(route.get("alpn") or ["h2"])}
         if route.get("extra"):
+            route["extra"]["mode"]=route["mode"]
             query_values["extra"]=json.dumps(route["extra"],ensure_ascii=True,separators=(",",":"))
         query=urlencode(query_values)
-        return "vless://"+quote(secret,safe="-")+"@"+route["address"]+":443?"+query+"#"+label
+        return "vless://"+quote(secret,safe="-")+"@"+route["address"]+":"+str(route.get("port",443))+"?"+query+"#"+label
     if protocol=="hysteria":
+        route=connection_store.ssh_cascade.apply_client({"address":DOMAIN,"port":443},proxy_connection(user))
         query=urlencode({"sni":DOMAIN,"alpn":"h3"})
-        connection=proxy_connection(user)
-        port=connection.get("advanced",{}).get("inbound",{}).get("port",HYSTERIA_PORT) if connection else HYSTERIA_PORT
-        return "hysteria2://"+quote(secret,safe="-")+"@"+DOMAIN+":"+str(port)+"/?"+query+"#"+label
+        return "hysteria2://"+quote(secret,safe="-")+"@"+route["address"]+":"+str(route["port"])+"/?"+query+"#"+label
     if protocol in awg.PROTOCOLS:
         user=next((u for u in users() if u.get("protocol")==protocol and secrets.compare_digest(str(u.get("secret","")),str(secret))),None)
         if user is None: raise RuntimeError("Профиль AWG не найден")
@@ -2994,8 +3227,16 @@ class Handler(BaseHTTPRequestHandler):
             if not self.api_auth(): return
             if path==node_api.API_PREFIX+"/status":
                 loc=node_api.load_location(LOCATION_FILE)
-                self.send_json({"ok":True,"api_version":1,"version":"2.8.1","domain":DOMAIN,
-                    "location":loc,"capabilities":["vless","hysteria","federation"]}); return
+                self.send_json({"ok":True,"api_version":1,"version":"2.9.0","domain":DOMAIN,
+                    "location":loc,"capabilities":["vless","hysteria","federation",cascade_store.CAPABILITY]}); return
+            if path==node_api.API_PREFIX+"/cascade/health":
+                try:self.send_json(ctl_manager_json('cascade-health',{}))
+                except Exception:self.send_json({'ok':False,'message':'Диагностика служб недоступна.'},503)
+                return
+            if path==node_api.API_PREFIX+"/cascade/status":
+                try: self.send_json(ctl_manager_json("cascade-status",{}))
+                except Exception: self.send_json({"ok":False,"message":"Служебный вход VLESS недоступен."},503)
+                return
             if path==node_api.API_PREFIX+"/profiles":
                 result=[]
                 for user in users():
@@ -3085,6 +3326,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({'clients':clients})
             return
 
+        if path==PANEL_PATH+'/cascade-monitor':
+            try:self.send_json(cascade_ops_store.public_view())
+            except Exception:self.send_json({'ok':False,'message':'Не удалось прочитать мониторинг.'},503)
+            return
+
         if path==PANEL_PATH+"/users":
             current_users=users()
             registry=connection_store.ensure(CONNECTIONS_FILE,current_users)
@@ -3099,8 +3345,20 @@ class Handler(BaseHTTPRequestHandler):
         if path==PANEL_PATH+"/connections":
             current_users=users()
             registry=connection_store.ensure(CONNECTIONS_FILE,current_users)
-            body=connections_ui(connections_with_runtime(registry["connections"]),current_users,PANEL_PATH,self.csrf(),subscription_registry(),openflux.profile_states())
+            body=connections_ui(connections_with_runtime(registry["connections"]),current_users,PANEL_PATH,self.csrf(),subscription_registry(),openflux.profile_states(),
+                cascade_options={"nodes":[node_api.public_node(n) for n in node_api.load_nodes(NODES_FILE)],"local":node_api.load_location(LOCATION_FILE),"domain":DOMAIN})
             self.send_html(layout("Подключения",body,"connections")); return
+        if path in (PANEL_PATH+'/monitoring',PANEL_PATH+'/cascade'):
+            current_users=users()
+            registry=connection_store.ensure(CONNECTIONS_FILE,current_users)
+            nodes=[node_api.public_node(node) for node in node_api.load_nodes(NODES_FILE)]
+            if path.endswith('/monitoring'):
+                body=cascade_ui_store.monitoring_page(registry['connections'],nodes,DOMAIN,PANEL_PATH,self.csrf())
+                self.send_html(layout('Мониторинг',body,'monitoring'))
+            else:
+                body=cascade_ui_store.page(registry['connections'],nodes,node_api.load_location(LOCATION_FILE),DOMAIN,PANEL_PATH,self.csrf())
+                self.send_html(layout('Мост',body,'cascade'))
+            return
         if path==PANEL_PATH+"/routing":
             current_users=users()
             registry=connection_store.ensure(CONNECTIONS_FILE,current_users)
@@ -3252,6 +3510,9 @@ class Handler(BaseHTTPRequestHandler):
             if not self.api_auth(): return
             try:
                 request=self.json_request()
+                if path in (node_api.API_PREFIX+"/cascade/prepare",node_api.API_PREFIX+"/cascade/delete"):
+                    result=ctl_manager_json("cascade-prepare" if path.endswith("/prepare") else "cascade-delete",request)
+                    self.send_json(result); return
                 if path==node_api.API_PREFIX+"/federation/sync":
                     result=ctl_manager_json("federation-sync",request)
                     profiles=[{"id":u["id"],"protocol":u["protocol"],
@@ -3473,6 +3734,43 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"message":"Автовосстановление не завершено: "+str(exc)},503)
             return
 
+        if path==PANEL_PATH+'/cascade-ops':
+            try:
+                request=json.loads(form.get('request','{}'))
+                if not isinstance(request,dict) or request.get('operation') not in ('inspect','forget','reserve','restore','settings','test'):
+                    raise ValueError('Неизвестная операция мониторинга.')
+                result=ctl_manager_json('cascade-ops',request)
+                self.send_json(result,200 if result.get('ok') else 400)
+            except ValueError as exc:self.send_json({'ok':False,'message':str(exc)},400)
+            except Exception:self.send_json({'ok':False,'message':'Не удалось выполнить операцию. Повторите диагностику.'},503)
+            return
+
+        if path==PANEL_PATH+"/ssh-cascade-action":
+            try:
+                operation=form.get('operation','')
+                if operation not in ('inspect','provision','check','remove'):raise ValueError('Неизвестная операция SSH-моста.')
+                request={key:form.get(key,'') for key in ('operation','id','host','ssh_port','listen_port','exit_ip','fingerprint','password')}
+                if form.get('middle'):request['middle']=json.loads(form['middle'])
+                result=ctl_manager_json('ssh-cascade',request)
+                self.send_json(result,200 if result.get('ok') else 400)
+            except ValueError as exc:self.send_json({'ok':False,'message':str(exc)},400)
+            except Exception as exc:
+                print('SSH cascade action failed:',type(exc).__name__,file=sys.stderr,flush=True)
+                self.send_json({'ok':False,'message':'Не удалось настроить RU-вход. Пароль не сохранён; проверьте SSH и повторите проверку.'},503)
+            return
+
+        if path==PANEL_PATH+"/cascade-action":
+            try:
+                operation=form.get("operation","")
+                if operation not in ("save","check"): raise ValueError("Неизвестная операция моста.")
+                request={"id":form.get("id",""),"name":form.get("name",""),"cascade":json.loads(form.get("cascade","{}"))}
+                self.send_json(ctl_manager_json("cascade-"+operation,request))
+            except ValueError as exc: self.send_json({"ok":False,"message":str(exc)},400)
+            except Exception as exc:
+                print("cascade action failed:",type(exc).__name__,file=sys.stderr,flush=True)
+                self.send_json({"ok":False,"message":"Не удалось применить цепочку. Проверьте доступность нод и повторите попытку."},503)
+            return
+
         if path==PANEL_PATH+"/connection-action":
             previous_registry=None
             async_request=self.headers.get("X-WPP-Async","")=="1"
@@ -3527,6 +3825,11 @@ class Handler(BaseHTTPRequestHandler):
                         raise connection_store.ConnectionError("Подключение не найдено.")
                     updated=dict(existing)
                     updated["enabled"]=not bool(existing.get("enabled",True))
+                    plan=cascade_store.clean_plan(existing.get("config",{}).get("cascade"))
+                    if updated["enabled"] and plan["mode"]!="direct":
+                        entry=cascade_store.load(CASCADE_STATE_FILE)["entries"].get(connection_id,{})
+                        if entry.get("plan_hash")!=cascade_store.plan_hash(plan):
+                            raise connection_store.ConnectionError("Сначала откройте карандаш и примените цепочку серверов для этого подключения.")
                     result_enabled=updated["enabled"]
                     connection_store.upsert(CONNECTIONS_FILE,updated)
                     ctl_manager_json("connections-refresh",{})
@@ -3607,6 +3910,9 @@ class Handler(BaseHTTPRequestHandler):
                     node_api.add_node(NODES_FILE,form)
                 elif operation=="delete":
                     nodes=node_api.load_nodes(NODES_FILE); uid=form.get("id","")
+                    registry=connection_store.load(CONNECTIONS_FILE)
+                    if any(uid in cascade_store.clean_plan(item.get("config",{}).get("cascade"))["nodes"] for item in registry["connections"]):
+                        raise node_api.NodeError("Эта нода используется в мосте. Сначала измените цепочку подключения.")
                     selected=next((n for n in nodes if n.get("id")==uid),None)
                     if selected is None: raise node_api.NodeError("Нода не найдена.")
                     # Revoke remotely before forgetting the only credential that
@@ -3740,8 +4046,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({'message':'У основного подключения можно изменить только секрет.'},400); return
             if operation=='state' and form.get('enabled') not in ('0','1'):
                 self.send_json({'message':'Некорректное состояние доступа.'},400); return
-            if kind not in ('subscription','direct') or operation not in ('state','rename','secret'):
+            if kind not in ('subscription','direct') or operation not in ('state','rename','secret','key-count'):
                 self.send_json({'message':'Недопустимая операция.'},400); return
+            if operation=='key-count' and kind!='direct':
+                self.send_json({'message':'Настройка количества ключей доступна для отдельного клиента.'},400); return
             if operation=='secret' and (kind!='direct' or not re.fullmatch(r'(?:dd)?[0-9A-Fa-f]{32}',form.get('secret','').strip())):
                 self.send_json({'message':'Секрет должен содержать 32 символа 0–9, a–f; префикс dd допускается.'},400); return
             if operation=='rename' and (not form.get('name','').strip() or len(form['name'].strip())>80 or any(ord(c)<32 for c in form['name'])):
@@ -3760,8 +4068,13 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     if operation=='state': ctl('set-user',uid,form['enabled'])
                     elif operation=='rename': ctl('rename-user',uid,form.get('name',''))
+                    elif operation=='key-count':
+                        ctl_manager_json('direct-key-count',{'id':uid,'count':form.get('count'),
+                                                            'current_count':form.get('current_count')})
                     else: ctl_manager_json('set-secret',{'id':uid,'secret':form.get('secret','')})
                 self.send_json({'ok':True})
+            except ValueError as exc:
+                self.send_json({'ok':False,'message':str(exc)},400)
             except Exception:
                 self.send_json({'message':'Изменение не применено. Проверьте службы через SSH и обновите список.'},503)
             return
@@ -4077,6 +4390,16 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             SUB_FETCH_SLOTS.release()
 
+def serialize_connection_changes(method):
+    def wrapped(self):
+        path=urlparse(self.path).path
+        if path in {PANEL_PATH+suffix for suffix in ("/connection-action","/cascade-action","/cascade-ops","/ssh-cascade-action","/node-action","/backup-restore")}:
+            with STATE_LOCK: return method(self)
+        return method(self)
+    return wrapped
+
+Handler.do_POST=serialize_connection_changes(Handler.do_POST)
+
 def main():
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
 
@@ -4110,7 +4433,7 @@ PY
 fi
 
 python3 -m py_compile "$APP_FILE"
-python3 -m py_compile "$APP_DIR/wpp_subscriptions.py" "$APP_DIR/wpp_subscription_dashboard.py" "$APP_DIR/wpp_panel_extras.py" "$APP_DIR/wpp_ui.py" "$APP_DIR/wpp_metrics.py" "$APP_DIR/wpp_update.py" "$APP_DIR/wpp_nodes.py" "$APP_DIR/wpp_openflux.py" "$APP_DIR/wpp_awg.py" "$APP_DIR/wpp_extra_protocols.py" "$APP_DIR/wpp_firewall.py" "$APP_DIR/wpp_components.py" "$APP_DIR/wpp_cdn.py" "$APP_DIR/wpp_cdn_doctor.py" "$APP_DIR/wpp_connections.py" "$APP_DIR/wpp_backup.py" "$APP_DIR/wpp_routing.py"
+python3 -m py_compile "$APP_DIR/wpp_subscriptions.py" "$APP_DIR/wpp_subscription_dashboard.py" "$APP_DIR/wpp_panel_extras.py" "$APP_DIR/wpp_ui.py" "$APP_DIR/wpp_metrics.py" "$APP_DIR/wpp_update.py" "$APP_DIR/wpp_update_data.py" "$APP_DIR/wpp_nodes.py" "$APP_DIR/wpp_openflux.py" "$APP_DIR/wpp_awg.py" "$APP_DIR/wpp_extra_protocols.py" "$APP_DIR/wpp_firewall.py" "$APP_DIR/wpp_components.py" "$APP_DIR/wpp_cdn.py" "$APP_DIR/wpp_cdn_doctor.py" "$APP_DIR/wpp_connections.py" "$APP_DIR/wpp_backup.py" "$APP_DIR/wpp_routing.py" "$APP_DIR/wpp_cascade.py" "$APP_DIR/wpp_cascade_ui.py" "$APP_DIR/wpp_ssh_cascade.py" "$APP_DIR/wpp_ssh_cascade_ui.py" "$APP_DIR/wpp_ssh_relay_agent.py" "$APP_DIR/wpp_cascade_ops.py" "$APP_DIR/wpp_cascade_ops_ui.py"
 
 
 # ---- Finish installation: service, Caddy route, permissions, start ----
@@ -4150,7 +4473,7 @@ fi
 echo "[4/6] Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=WEB PANEL PROXY V 2.8.1
+Description=WEB PANEL PROXY V 2.9.0
 After=network-online.target caddy.service tproxy-server.service mtproxy.service web-proxy-panel-firewall.service
 Wants=network-online.target
 Requires=web-proxy-panel-firewall.service
@@ -4175,6 +4498,11 @@ EOF
 chmod 0644 "$SERVICE_FILE"
 
 echo "[4.2/6] Installing WPP console menu..."
+# Keep the version controller outside the release-owned application directory.
+install -d -o root -g root -m 0700 /usr/local/lib/web-panel-proxy-updater
+for controller_file in update.sh wpp_update_data.py wpp_update.py wpp_metrics.py uninstall-web-proxy.sh; do
+    install -o root -g root -m 0600 "$BASE/$controller_file" "/usr/local/lib/web-panel-proxy-updater/$controller_file"
+done
 install -o root -g root -m 0755 "$BASE/update.sh" /usr/local/sbin/web-panel-proxy-update
 cat > /etc/systemd/system/web-panel-proxy-web-update.service <<'UNIT'
 [Unit]
@@ -4314,7 +4642,7 @@ unlock_changes(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 show_info(){
     local d p version
-    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.8.1')"
+    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.9.0')"
     echo
     echo "============================================================"
     echo "                 WEB PANEL PROXY"
@@ -4498,6 +4826,8 @@ test -s "$CADDYFILE" || die "Caddyfile is missing."
 
 python3 - "$CADDYFILE" "$PANEL_PATH" "$DOMAIN" "$ACME_EMAIL" "$XRAY_PATH" <<'PY'
 import re, sys
+sys.path.insert(0, "/opt/tproxy-panel")
+import wpp_cdn_doctor
 from pathlib import Path
 p, path, domain, email, xray_path = sys.argv[1:]
 s = Path(p).read_text(encoding="utf-8")
@@ -4532,7 +4862,11 @@ s = s.replace("{$ACME_EMAIL}", email)
 # The CDN doctor probe is a managed route.  Remove every older copy before
 # adding the canonical block below so updates remain idempotent.
 s = re.sub(
-    r'(?ms)^[ \t]*@web_panel_cdn_probe[ \t]+path[ \t]+/__wpp_cdn_probe[ \t]*\n'
+    r'(?ms)^[ \t]*# WPP HTTPS HEADERS BEGIN\n.*?^[ \t]*# WPP HTTPS HEADERS END\n?',
+    '', s,
+)
+s = re.sub(
+    r'(?ms)^[ \t]*@web_panel_cdn_probe[ \t]+path[ \t]+[^\r\n]+\n'
     r'[ \t]*handle[ \t]+@web_panel_cdn_probe[ \t]*\{[ \t]*\n'
     r'.*?^[ \t]*\}[ \t]*\n?',
     '',
@@ -4596,91 +4930,8 @@ route = (
     "    handle /wpp-direct/* {\n"
     "        reverse_proxy 127.0.0.1:8090\n"
     "    }\n\n"
-    "    @web_panel_cdn_probe path /__wpp_cdn_probe\n"
-    "    handle @web_panel_cdn_probe {\n"
-    "        header X-WPP-CDN-Probe \"ok\"\n"
-    "        header Cache-Control \"no-store, no-cache, must-revalidate\"\n"
-    "        header CDN-Cache-Control \"no-store\"\n"
-    "        header Pragma \"no-cache\"\n"
-    "        respond `{\"ok\":true,\"service\":\"wpp-cdn-doctor\"}` 200\n"
-    "    }\n\n"
-    "    # WPP XRAY ROUTES BEGIN\n"
-    "    @web_panel_vless_direct path " + direct_path + " " + direct_path + "/*\n"
-    "    handle @web_panel_vless_direct {\n"
-    "        reverse_proxy 127.0.0.1:10000 {\n"
-    "            transport http {\n"
-    "                versions h2c\n"
-    "            }\n"
-    "            flush_interval -1\n"
-    "        }\n"
-    "    }\n\n"
-    "    @web_panel_vless_cdn path " + cdn_path + " " + cdn_path + "/*\n"
-    "    handle @web_panel_vless_cdn {\n"
-    "        header Cache-Control \"no-store, no-cache\"\n"
-    "        header CDN-Cache-Control \"no-store\"\n"
-    "        header X-Accel-Buffering \"no\"\n"
-    "        reverse_proxy 127.0.0.1:10001 {\n"
-    "            transport http {\n"
-    "                versions h2c\n"
-    "            }\n"
-    "            flush_interval -1\n"
-    "        }\n"
-    "    }\n"
-    "\n"
-    "    @web_panel_vless_beget path " + beget_path + " " + beget_path + "/*\n"
-    "    handle @web_panel_vless_beget {\n"
-    "        header Cache-Control \"no-store, no-cache\"\n"
-    "        header CDN-Cache-Control \"no-store\"\n"
-    "        header X-Accel-Buffering \"no\"\n"
-    "        reverse_proxy 127.0.0.1:10002 {\n"
-    "            transport http {\n"
-    "                versions h2c\n"
-    "            }\n"
-    "            flush_interval -1\n"
-    "        }\n"
-    "    }\n"
-    "\n"
-    "    @web_panel_vless_vk path " + vk_path + " " + vk_path + "/*\n"
-    "    handle @web_panel_vless_vk {\n"
-    "        header Cache-Control \"no-store, no-cache\"\n"
-    "        header CDN-Cache-Control \"no-store\"\n"
-    "        header X-Accel-Buffering \"no\"\n"
-    "        reverse_proxy 127.0.0.1:10004 {\n"
-    "            transport http {\n"
-    "                versions h2c\n"
-    "            }\n"
-    "            flush_interval -1\n"
-    "        }\n"
-    "    }\n"
-    "\n"
-    "    @web_panel_vless_selectel path " + selectel_path + " " + selectel_path + "/*\n"
-    "    handle @web_panel_vless_selectel {\n"
-    "        header Cache-Control \"no-store, no-cache\"\n"
-    "        header CDN-Cache-Control \"no-store\"\n"
-    "        header X-Accel-Buffering \"no\"\n"
-    "        header Accept-Ranges \"none\"\n"
-    "        reverse_proxy 127.0.0.1:10003 {\n"
-    "            transport http {\n"
-    "                versions h2c\n"
-    "            }\n"
-    "            flush_interval -1\n"
-    "        }\n"
-    "    }\n"
-    "\n"
-    "    @web_panel_vless_timeweb path " + timeweb_path + " " + timeweb_path + "/*\n"
-    "    handle @web_panel_vless_timeweb {\n"
-    "        header Cache-Control \"no-store, no-cache\"\n"
-    "        header CDN-Cache-Control \"no-store\"\n"
-    "        header X-Accel-Buffering \"no\"\n"
-    "        reverse_proxy 127.0.0.1:10005 {\n"
-    "            transport http {\n"
-    "                versions h2c\n"
-    "            }\n"
-    "            flush_interval -1\n"
-    "        }\n"
-    "    }\n"
-    "    # WPP XRAY ROUTES END\n\n"
-    "    handle " + path + "/* {\n"
+    + wpp_cdn_doctor._managed_routes(xray_path)
+    + "    handle " + path + "/* {\n"
     "        reverse_proxy 127.0.0.1:8090\n"
     "    }\n\n"
 )
@@ -4736,6 +4987,19 @@ if grep -Eq '\{\$(TPROXY_HOSTNAME|ACME_EMAIL)\}' "$CADDYFILE"; then
     exit 1
 fi
 
+python3 - "$CADDYFILE" "$DOMAIN" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, '/opt/tproxy-panel')
+from wpp_cdn_doctor import restore_caddyfile
+from wpp_extra_protocols import naive_ingress, reserve_hysteria_port, strip_hysteria_caddy
+
+path, domain = sys.argv[1:]
+text = Path(path).read_text(encoding="utf-8")
+updated = reserve_hysteria_port(naive_ingress(strip_hysteria_caddy(text), domain))
+if updated != text:
+    restore_caddyfile(path, updated)
+PY
 caddy fmt --overwrite "$CADDYFILE" >/dev/null 2>&1 || true
 
 if ! caddy validate --config "$CADDYFILE" --adapter caddyfile; then
@@ -4744,6 +5008,30 @@ if ! caddy validate --config "$CADDYFILE" --adapter caddyfile; then
     sed -n '1,100p' "$CADDYFILE" || true
     exit 1
 fi
+
+cat > /etc/systemd/system/web-panel-proxy-cascade-monitor.service <<'UNIT'
+[Unit]
+Description=WEB PANEL PROXY cascade health and failover
+After=network-online.target tproxy-panel.service
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+Nice=10
+ExecStart=/usr/local/sbin/web-proxy-panelctl cascade-monitor
+TimeoutStartSec=600
+UNIT
+cat > /etc/systemd/system/web-panel-proxy-cascade-monitor.timer <<'UNIT'
+[Unit]
+Description=WEB PANEL PROXY cascade monitoring schedule
+[Timer]
+OnActiveSec=45
+OnUnitInactiveSec=60
+AccuracySec=10
+Unit=web-panel-proxy-cascade-monitor.service
+[Install]
+WantedBy=timers.target
+UNIT
 
 systemctl daemon-reload
 echo "      Activating Caddy..."
@@ -4874,6 +5162,8 @@ if ! curl -k -fsS --max-time 10 "https://${DOMAIN}${PANEL_PATH}/__health" >/dev/
     exit 1
 fi
 
+systemctl enable --now web-panel-proxy-cascade-monitor.timer
+
 # Retire components owned by the withdrawn experimental integrations only
 # after the stable panel, Caddy and proxy services have passed health checks.
 if [[ -e /etc/web-proxy-panel/mieru-ufw-owned ]]; then
@@ -4908,9 +5198,9 @@ fi
 echo
 echo "============================================================"
 if [[ "$UPDATING" == "1" ]]; then
-echo "          WEB PANEL PROXY V 2.8.1 UPDATED"
+echo "          WEB PANEL PROXY V 2.9.0 UPDATED"
 else
-echo "         WEB PANEL PROXY V 2.8.1 IS READY"
+echo "         WEB PANEL PROXY V 2.9.0 IS READY"
 fi
 echo "============================================================"
 echo

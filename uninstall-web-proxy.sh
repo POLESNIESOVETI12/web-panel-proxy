@@ -92,6 +92,7 @@ for unit in \
   web-panel-proxy-web-update.service \
   web-panel-proxy-auto-update.timer web-panel-proxy-auto-update.service \
   web-panel-proxy-component-update.service \
+  web-panel-proxy-cascade-monitor.timer web-panel-proxy-cascade-monitor.service \
   web-panel-proxy-metrics.timer web-panel-proxy-metrics.service \
   tproxy-panel.service web-proxy-panel.service web-proxy-panel-mtproxy.service \
   web-proxy-panel-firewall.service web-proxy-panel-firewall-maintenance.timer web-proxy-panel-firewall-maintenance.service \
@@ -164,6 +165,11 @@ if [[ "$((CADDY_OWNED + CADDY_SHARED))" -gt 0 && -n "$DOMAIN" && -f /etc/caddy/C
 import re,sys
 source,target,domain=sys.argv[1:]
 text=open(source,encoding="utf-8").read()
+text=re.sub(r"(?ms)\n[ \t]*# WPP HYSTERIA SERVERS BEGIN\n.*?^[ \t]*# WPP HYSTERIA SERVERS END","",text)
+text=re.sub(r"(?ms)^[ \t]*# WPP HYSTERIA PROTOCOLS BEGIN\n"
+            r"(?:([ \t]*)# WPP HYSTERIA PREVIOUS ([^\n]+)\n)?"
+            r".*?^[ \t]*# WPP HYSTERIA PROTOCOLS END\n",
+            lambda match: (match[1]+match[2]+"\n") if match[2] else "",text)
 text=re.sub(r"\n?[ \t]*# WPP NAIVE GLOBAL BEGIN\n.*?\n[ \t]*# WPP NAIVE GLOBAL END\n?","\n",text,flags=re.S)
 text=re.sub(r"\n?[ \t]*# WPP NAIVE BEGIN\n.*?\n[ \t]*# WPP NAIVE END\n?","\n",text,flags=re.S)
 text=re.sub(r"(?m)^\s*:443,\s*"+re.escape(domain)+r"\s*\{\s*$",domain+" {",text,count=1)
@@ -259,6 +265,8 @@ rm -f -- \
   /etc/systemd/system/web-panel-proxy-auto-update.timer \
   /etc/systemd/system/web-panel-proxy-component-update.service \
   /etc/systemd/system/web-panel-proxy-metrics.service \
+  /etc/systemd/system/web-panel-proxy-cascade-monitor.timer \
+  /etc/systemd/system/web-panel-proxy-cascade-monitor.service \
   /etc/systemd/system/web-panel-proxy-metrics.timer \
   /etc/systemd/system/tproxy-panel.service \
   /etc/systemd/system/web-proxy-panel.service \

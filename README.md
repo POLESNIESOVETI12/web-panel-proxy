@@ -2,7 +2,7 @@
   <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
 </p>
 
-<h1 align="center">WEB PANEL PROXY 2.8.1</h1>
+<h1 align="center">WEB PANEL PROXY 2.9.0</h1>
 
 <p align="center">WEB Proxy, MTProto, VLESS XHTTP, Hysteria2, NaiveProxy, Mieru, OpenFlux и аккуратная панель управления для собственного VPS</p>
 
@@ -10,8 +10,9 @@
 
 - Подписки и отдельные подключения с QR-кодами и готовыми конфигурациями.
 - VLESS XHTTP и Hysteria2, включая прямые и CDN-подключения VLESS.
+- **Мост** — доступен начиная с **2.9.0** для VLESS XHTTP и Hysteria2. Передаёт трафик через несколько серверов; сайты видят IP выходного VPS.
 - Отдельные профили AmneziaWG 2.0 и 3.1 с QR-кодом и файлом `.conf`.
-- NaiveProxy и Mieru с отдельным портом для каждого серверного подключения, ссылкой и QR-кодом.
+- NaiveProxy на TCP 443 и Mieru на отдельном порту, ссылкой и QR-кодом.
 - Отдельные профили MTProto и Telegram Web Proxy; экспериментальная интеграция OpenFlux через Яндекс Документы, Телемост, Mail.ru и MAX.
 - Управление пользователями, ограничениями устройств, трафиком и состоянием служб.
 - Переключение доступа без перезагрузки страницы: зелёное уведомление при включении, красное при выключении.
@@ -20,7 +21,6 @@
 - Готовые HTML-заглушки и собственные страницы с HTML, CSS, JavaScript, SEO и аналитикой.
 - Проверка обновлений и безопасное обновление с временным автоматическим откатом.
 - Ручной экспорт и импорт полной резервной копии настроек через браузер без накопления архивов на VPS.
-
 
 ## Требования
 
@@ -31,8 +31,6 @@
 - Свободный и открытый `443/tcp`. Порт `80/tcp` панель не занимает.
 
 Перед установкой убедитесь, что домен уже указывает на сервер. Дополнительные порты выбранных подключений панель покажет автоматически; их также нужно открыть во внешнем firewall личного кабинета VPS-провайдера.
-
-Установщик MTProxy сначала получает актуальные служебные файлы с `core.telegram.org` по HTTPS через IPv4. Для каждой из двух загрузок установлены тайм-аут соединения 10 секунд, ограничение одной попытки 30 секунд и одна повторная попытка. При недоступности адреса или некорректном ответе используются проверенные общедоступные файлы Telegram из пакета (снимок от 2026-10-31). Резервные копии проверяются по формату и SHA-256; повреждённые данные отклоняются. Снимок не блокируется по календарной дате; актуальные сетевые данные всегда имеют приоритет. Другие загрузки установщика выполняются как прежде. Успешное получение служебных файлов само по себе не подтверждает связь MTProxy с серверами Telegram.
 
 ## Быстрый старт
 
@@ -45,15 +43,13 @@ sudo -i
 ### Установка
 
 ```bash
-sudo -i bash -c 'curl -4fsSL "https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.8.1/install.sh" -o /tmp/wpp-install.sh && bash /tmp/wpp-install.sh; code=$?; rm -f /tmp/wpp-install.sh; exit $code'
+sudo -i bash -c 'curl -4fsSL "https://raw.githubusercontent.com/POLESNIESOVETI12/web-panel-proxy/v2.9.0/install.sh" -o /tmp/wpp-install.sh && bash /tmp/wpp-install.sh; code=$?; rm -f /tmp/wpp-install.sh; exit $code'
 ```
-
-Команда доступна после публикации тега `v2.8.1` в GitHub. Установщик запросит домен, email для HTTPS-сертификата, логин и пароль панели. После установки он покажет адрес панели и данные для входа.
 
 Локальная установка из ZIP:
 
 ```bash
-apt-get -o DPkg::Lock::Timeout=600 install -y unzip && d=$(mktemp -d /root/wpp-install.XXXXXX) && unzip -q /root/WEB-PANEL-PROXY-V-2.8.1-GITLAB.zip -d "$d" && cd "$d" && chmod +x ./*.sh && bash ./install-final.sh
+apt-get -o DPkg::Lock::Timeout=600 install -y unzip && d=$(mktemp -d /root/wpp-install.XXXXXX) && unzip -q /root/WEB-PANEL-PROXY-V-2.9.0-FINAL-GITLAB.zip -d "$d" && cd "$d" && chmod +x ./*.sh && bash ./install-final.sh
 ```
 
 ### После установки
@@ -74,7 +70,7 @@ apt-get -o DPkg::Lock::Timeout=600 install -y unzip && d=$(mktemp -d /root/wpp-i
 Локальное обновление из ZIP (сначала загрузите архив в `/root`):
 
 ```bash
-d=$(mktemp -d /root/wpp-update.XXXXXX) && unzip -q /root/WEB-PANEL-PROXY-V-2.8.1-GITLAB.zip -d "$d" && cd "$d" && chmod +x ./*.sh && ./update.sh --local
+d=$(mktemp -d /root/wpp-update.XXXXXX) && unzip -q /root/WEB-PANEL-PROXY-V-2.9.0-FINAL-GITLAB.zip -d "$d" && cd "$d" && chmod +x ./*.sh && ./update.sh --local
 ```
 
 ### Удаление
@@ -90,9 +86,9 @@ d=$(mktemp -d /root/wpp-update.XXXXXX) && unzip -q /root/WEB-PANEL-PROXY-V-2.8.1
 | Назначение | Порт |
 |---|---:|
 | HTTPS, панель, защищённые подключения и продление сертификата | `443/tcp` |
-| Hysteria2 по умолчанию | `8443/udp` |
+| Hysteria2 | `443/udp`; прежний `8443/udp` сохраняется |
 | MTProto | выбранный порт, обычно `2399–2430/tcp` |
-| NaiveProxy | отдельный порт подключения, по умолчанию от `53000/tcp` |
+| NaiveProxy | `443/tcp` на домене панели; прежние порты сохраняются |
 | Mieru | отдельный порт подключения, по умолчанию от `54000/tcp` или UDP |
 
 Для Shadowrocket используйте ссылку Mieru `mierus://` или её QR-код. В настройках клиента также доступен полный профиль `mieru://` для официального приложения mieru CLI. Это два варианта экспорта одного ключа; создавать нового пользователя не нужно.
@@ -146,3 +142,16 @@ ss -lntup
 ## Лицензия
 
 Код панели распространяется по MIT License. Подробности находятся в файле [LICENSE](LICENSE). Лицензии и исходники встроенных сторонних компонентов перечислены в [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+<details>
+<summary>❤️</summary>
+
+**Поддержать разработку — USDT, сеть TRON (TRC20)**
+
+`TZHWxNszqmwjXbpYiH4wDHmJPGXkn8F9D9`
+
+<img src="assets/donation-usdt-trc20.png" alt="QR адреса USDT в сети TRON TRC20" width="232">
+
+Отправляйте USDT только в сети TRON (TRC20).
+
+</details>

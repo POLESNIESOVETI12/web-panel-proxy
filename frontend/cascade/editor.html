@@ -1,0 +1,55 @@
+<svg class="cascade-symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+  <symbol id="cascade-device" viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 18h4"/></symbol>
+  <symbol id="cascade-server" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h5M12 17.5h5"/></symbol>
+  <symbol id="cascade-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></symbol>
+  <symbol id="cascade-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6z"/><path d="m8 12 3 3 5-6"/></symbol>
+  <symbol id="cascade-route" viewBox="0 0 24 24"><circle cx="5" cy="18" r="2"/><circle cx="19" cy="6" r="2"/><path d="M7 18h5a3 3 0 0 0 3-3V9a3 3 0 0 1 2-3M5 16V6h5m-3-3 3 3-3 3"/></symbol>
+  <symbol id="cascade-arrow" viewBox="0 0 24 24"><path d="M4 12h16m-6-6 6 6-6 6"/></symbol>
+  <symbol id="cascade-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+</defs></svg>
+
+<dialog class="cascade-editor" id="cascadeEditor" aria-labelledby="cascadeTitle" data-cascade-editor>
+  <form id="cascadeForm">
+    <header class="cascade-head">
+      <div class="cascade-heading-mark"><svg><use href="#cascade-route"/></svg></div>
+      <div class="cascade-heading-copy"><div class="cascade-eyebrow">НАСТРОЙКА ПОДКЛЮЧЕНИЯ <span>ПРЕДПРОСМОТР</span></div><h2 id="cascadeTitle">Россия → Нидерланды</h2></div>
+      <button type="button" class="cascade-close" data-cascade-close aria-label="Закрыть настройку">×</button>
+    </header>
+    <div class="cascade-tabs" role="tablist" aria-label="Настройки подключения">
+      <button type="button" id="cascadeGeneralTab" role="tab" aria-selected="false" aria-controls="cascadeGeneral" tabindex="-1" data-cascade-tab="general">Основное</button>
+      <button type="button" id="cascadeChainTab" class="selected" role="tab" aria-selected="true" aria-controls="cascadeChain" data-cascade-tab="chain"><svg><use href="#cascade-route"/></svg>Цепочка серверов<span class="cascade-new">НОВОЕ</span></button>
+    </div>
+    <section id="cascadeGeneral" class="cascade-general" role="tabpanel" aria-labelledby="cascadeGeneralTab" hidden>
+      <h3>Основные настройки</h3><p>Название и входное подключение, которое получит пользователь.</p>
+      <label for="cascadeName">Название подключения</label><input id="cascadeName" maxlength="80" value="Россия → Нидерланды" required>
+      <label for="cascadeInbound">Входное подключение</label><select id="cascadeInbound"><option>VLESS XHTTP · порт 443</option></select>
+      <div class="cascade-general-note"><svg><use href="#cascade-device"/></svg><span>Пользователь добавляет одну ссылку на входной сервер. Цепочка настраивается на стороне серверов.</span></div>
+    </section>
+    <div id="cascadeChain" class="cascade-body" role="tabpanel" aria-labelledby="cascadeChainTab">
+      <section class="cascade-settings" aria-label="Выбор цепочки">
+        <div class="cascade-section-heading"><h3>Как передавать трафик</h3><p>Выберите количество серверов в цепочке</p></div>
+        <fieldset class="cascade-modes"><legend class="cascade-sr-only">Режим подключения</legend>
+          <label class="cascade-mode"><input type="radio" name="cascadeMode" value="direct"><span class="cascade-mode-top"><svg><use href="#cascade-arrow"/></svg><i></i></span><strong>Напрямую</strong><small>Один сервер</small></label>
+          <label class="cascade-mode"><input type="radio" name="cascadeMode" value="two"><span class="cascade-mode-top"><svg><use href="#cascade-route"/></svg><i></i></span><strong>Мост</strong><small>Два сервера</small></label>
+          <label class="cascade-mode"><input type="radio" name="cascadeMode" value="three" checked><span class="cascade-mode-top"><svg><use href="#cascade-server"/></svg><i></i></span><strong>Двойной мост</strong><small>Три сервера</small></label>
+        </fieldset>
+        <div class="cascade-section-label">СЕРВЕРЫ В ЦЕПОЧКЕ <span data-cascade-count>3 сервера</span></div>
+        <div class="cascade-server-fields">
+          <div class="cascade-server-field"><div class="cascade-field-title"><span class="cascade-step">1</span><label for="cascadeEntry">Входной сервер</label><span class="cascade-role">ВХОД</span></div><select id="cascadeEntry" data-cascade-node="entry" required></select><p>К этому серверу подключается устройство</p></div>
+          <div class="cascade-server-field" data-cascade-middle><div class="cascade-field-title"><span class="cascade-step">2</span><label for="cascadeMiddle">Промежуточный сервер</label><span class="cascade-role">ТРАНЗИТ</span></div><select id="cascadeMiddle" data-cascade-node="middle" required></select><p>Передаёт трафик на выходной сервер</p></div>
+          <div class="cascade-server-field" data-cascade-exit><div class="cascade-field-title"><span class="cascade-step" data-cascade-exit-number>3</span><label for="cascadeExit">Выходной сервер</label><span class="cascade-role exit">ВЫХОД</span></div><select id="cascadeExit" data-cascade-node="exit" required></select><p>Его IP-адрес будут видеть сайты</p></div>
+        </div>
+        <p class="cascade-validation" id="cascadeError" role="alert" hidden></p>
+        <div class="cascade-transport"><span>Связь между серверами</span><b>VLESS <small>Зашифрованное соединение</small></b></div>
+        <div class="cascade-fail-closed"><span class="cascade-shield"><svg><use href="#cascade-shield"/></svg></span><div><b>При обрыве цепочки — остановить трафик</b><small>Автоматического выхода напрямую не будет</small></div><svg class="cascade-policy-check"><use href="#cascade-check"/></svg></div>
+      </section>
+      <aside class="cascade-preview" aria-label="Схема подключения">
+        <div class="cascade-preview-heading"><span class="cascade-preview-icon"><svg><use href="#cascade-route"/></svg></span><div><h3>Путь вашего трафика</h3><p>От устройства до интернета</p></div></div>
+        <ol class="cascade-flow" data-cascade-flow></ol>
+        <div class="cascade-output"><span>Сайты увидят местоположение</span><b data-cascade-country>Нидерланды</b><small data-cascade-city>Выход через Амстердам</small></div>
+        <div class="cascade-one-link"><svg><use href="#cascade-device"/></svg><div><b>Одна ссылка для пользователя</b><p>Все переходы между серверами выполняются автоматически</p></div></div>
+      </aside>
+    </div>
+    <footer class="cascade-footer"><span class="cascade-preview-note"><i></i>Макет интерфейса · серверы не изменяются</span><div><button type="button" data-cascade-validate>Проверить выбор</button><button class="primary" type="submit"><svg><use href="#cascade-check"/></svg>Сохранить черновик</button></div></footer>
+  </form>
+</dialog>

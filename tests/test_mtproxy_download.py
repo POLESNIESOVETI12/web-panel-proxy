@@ -7,9 +7,10 @@ import tempfile
 import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
-BASH='C:/Program Files/Git/bin/bash.exe' if os.name=='nt' else '/bin/bash'
+BASH=shutil.which('bash') or ('C:/Program Files/Git/bin/bash.exe' if os.name=='nt' else '/bin/bash')
 
 
+@unittest.skipUnless(Path(BASH).is_file(), 'Bash is required for the MTProxy shell checks')
 class MTProxyBootstrap(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()

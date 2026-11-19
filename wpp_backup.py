@@ -27,8 +27,8 @@ PANEL_FILES = {
     "api.key", "custom-presets.json", "data.json", "location.json",
     "nodes.json", "routing.json", "site-draft.html", "site-source.html",
 }
-CONFIG_FILES = {"connections.json", "mtproxy-secrets", "primary-secret",
-                "users.json", "xray-path"}
+CONFIG_FILES = {"connections.json", "version-data.json", "mtproxy-secrets", "primary-secret",
+                "users.json", "xray-path", "cascades.json", "ssh-cascades.json", "cascade-ops.json"}
 CONFIG_DIRS = {"openflux", "awg"}
 REQUIRED = {"state/config/primary-secret", "state/config/users.json",
             "state/panel/data.json", "state/site/index.html"}
@@ -63,6 +63,8 @@ def _source_files():
 
 
 def export_bytes(version=""):
+    if any((ROOTS['config']/name).exists() for name in ('cascades.json.transaction','ssh-cascades.json.transaction')):
+        raise BackupError('Дождитесь завершения настройки моста и повторите скачивание копии.')
     files = []
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:

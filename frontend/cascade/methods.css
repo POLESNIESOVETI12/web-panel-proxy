@@ -1,0 +1,19 @@
+#cascadeMethodDialog{width:min(850px,calc(100vw - 28px));padding:0;max-height:92vh;overflow:auto}
+#cascadeMethodDialog .method-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:23px 25px;border-bottom:1px solid var(--line)}
+#cascadeMethodDialog h2{font-size:23px;margin:0 0 7px}#cascadeMethodDialog .method-heading p{font-size:14px;color:var(--muted);margin:0}
+#cascadeMethodDialog form{padding:24px}#cascadeMethodDialog .method-current{font-size:14px;color:var(--muted);margin:0 0 16px}
+#cascadeMethodDialog .method-options{display:grid;grid-template-columns:1fr 1fr;gap:14px;border:0;padding:0;margin:0}
+#cascadeMethodDialog .method-card{display:flex;position:relative;flex-direction:column;align-items:flex-start;gap:12px;margin:0;padding:21px;border:1px solid var(--line);border-radius:13px;background:var(--input);cursor:pointer}
+#cascadeMethodDialog .method-card[hidden]{display:none}
+#cascadeMethodDialog .method-card:has(input:checked){border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--tint)}
+#cascadeMethodDialog .method-card:has(input:disabled){opacity:.55;cursor:not-allowed}#cascadeMethodDialog .method-card input{position:absolute;right:18px;top:20px;width:19px;height:19px;margin:0;accent-color:var(--accent)}
+#cascadeMethodDialog .method-card svg{width:29px;height:29px;fill:none;stroke:var(--accent);stroke-width:1.7}
+#cascadeMethodDialog .method-card strong{display:block;font-size:18px;line-height:1.4;padding-right:20px;color:var(--text)}#cascadeMethodDialog .method-card span{font-size:15px;line-height:1.6;color:var(--muted)}
+#cascadeMethodDialog .method-card em{font-size:13px;font-style:normal;color:var(--accent);margin-top:auto;padding-top:2px}
+#cascadeMethodDialog .method-detail{margin-top:18px;padding:17px 18px;background:var(--raised);border:1px solid var(--line);border-radius:11px;font-size:15px;line-height:1.7;overflow-wrap:anywhere}
+#cascadeMethodDialog .method-detail b{display:block;margin-bottom:5px}#cascadeMethodDialog .method-detail p{margin:0;color:var(--muted);font-size:14px}
+#cascadeMethodDialog .method-warning{margin-top:16px;padding:13px 15px;border:1px solid var(--amber);border-radius:10px;color:var(--amber);font-size:14px;line-height:1.6}
+#cascadeMethodDialog .method-actions{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;margin-top:22px}#cascadeMethodDialog .method-actions button{font-size:14px;min-height:43px}
+#cascadeMethodDialog .method-note{font-size:14px;line-height:1.6;color:var(--muted);margin:16px 0 0}
+#sshCascadeDialog .ssh-method-back{font-size:14px;margin:0 0 16px}
+@media(max-width:600px){#cascadeMethodDialog .method-options{grid-template-columns:1fr}#cascadeMethodDialog form{padding:18px}#cascadeMethodDialog .method-heading{padding:20px 18px}#cascadeMethodDialog .method-card{gap:8px;padding:17px}#cascadeMethodDialog .method-card svg{width:24px;height:24px}}

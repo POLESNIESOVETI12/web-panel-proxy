@@ -24,6 +24,7 @@ import wpp_connections as connections
 import wpp_cdn as cdn
 import wpp_cdn_doctor as doctor
 import wpp_routing as routing
+import wpp_cascade as cascade
 import wpp_ui as ui
 
 INSTALLER = (ROOT / 'install-panel.sh').read_text(encoding='utf-8')
@@ -143,6 +144,7 @@ class ConnectionJSON(unittest.TestCase):
         row=copy.deepcopy(self.registry['connections'][0]); row['advanced']=self.advanced()
         runtime=self.root/'runtime.json'; runtime.write_text(json.dumps({'inbounds':[self.edited()]}))
         ns={'copy':copy,'json':json,'XRAY_RUNTIME_CONFIG':str(runtime),'connection_store':connections,
+            'cascade_store':cascade,'CASCADE_STATE_FILE':str(self.root/'cascade.json'),
             'routing_store':routing,'ROUTING_FILE':str(self.root/'routing.json'),'cdn':cdn,'xray_path':lambda:PATH}
         functions(PANEL,{'connections_with_runtime'},ns)
         self.assertEqual(ns['connections_with_runtime']([row])[0]['runtime_inbound'],self.edited())
@@ -169,6 +171,7 @@ class ConnectionJSON(unittest.TestCase):
         caddy=self.root/'Caddyfile'; caddy.write_text('vpn.example {\nreverse_proxy 127.0.0.1:8080 {\n}\n}')
         captures=[]
         ns={'copy':copy,'json':json,'os':os,'wpp_connections':connections,'wpp_cdn':cdn,'wpp_cdn_doctor':doctor,
+            'wpp_cascade':cascade,'CASCADE_STATE':str(self.root/'cascade.json'),
             'CONNECTIONS':str(self.file),'XRAY_PATH_FILE':str(path_file),'CADDYFILE':str(caddy),
             'XRAY_API':'127.0.0.1:10085','HYSTERIA_PORT':8443,'XRAY_CERT':'unused','XRAY_KEY':'unused',
             'XRAY_VLESS_PORT':10000,'XRAY_VLESS_CDN_PORT':10001,'XRAY_VLESS_BEGET_PORT':10002,

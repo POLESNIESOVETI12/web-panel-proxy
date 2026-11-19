@@ -14,6 +14,8 @@ import secrets
 import tempfile
 import time
 import wpp_cdn
+from wpp_cascade import clean_plan, CascadeError, ENTRY_PROTOCOLS
+import wpp_ssh_cascade as ssh_cascade
 
 SCHEMA = 1
 PROTOCOLS = {"vless", "hysteria", "mtproto", "web", "awg20", "awg31", "naive", "mieru"}
@@ -252,6 +254,19 @@ def apply_server_advanced(inbound, advanced, protocol="vless"):
     if "inbound" in clean:
         result=copy.deepcopy(clean["inbound"])
         result.setdefault("settings",{})["clients"]=copy.deepcopy(inbound.get("settings",{}).get("clients",[]))
+        default_stream=inbound.get("streamSettings",{})
+        default_xhttp=default_stream.get("xhttpSettings",{})
+        stream=result.get("streamSettings",{})
+        xhttp=stream.get("xhttpSettings",{})
+        # Saving the old editor's unmodified JSON stored a complete inbound.
+        # It is still the standard transport, so inherit compatible defaults.
+        # A single explicit transport option opts out of this migration.
+        if (protocol=="vless" and default_stream.get("network")=="xhttp"
+                and stream.get("network")=="xhttp" and isinstance(xhttp,dict)
+                and set(xhttp)<= {"path","mode","host"}
+                and xhttp.get("mode")=="auto"
+                and all(default_xhttp.get(key)==value for key,value in wpp_cdn.direct_extra().items())):
+            stream["xhttpSettings"]={**copy.deepcopy(default_xhttp),**xhttp}
         return result
     server=clean.get("server",{})
     for section in SERVER_SECTIONS:
@@ -280,6 +295,31 @@ def client_path(connection, root):
     if bucket == "timeweb" and not path.endswith("/index.json"):
         return path.rstrip("/") + "/index.json"
     return path
+
+
+def effective_xhttp(connection, root):
+    """Export the transport actually used by Xray, including partial overrides."""
+    if connection.get("protocol") != "vless":
+        return {}
+    bucket = _xray_bucket(connection)
+    preset = True if bucket == "cdn" else bucket
+    advanced = connection.get("advanced", {})
+    settings = wpp_cdn.server_xhttp(wpp_cdn.endpoint_path(root, bucket), preset)
+    # Legacy forms saved mode:auto as a server patch for ordinary direct
+    # connections. It is the default, not a custom transport. Settings outside
+    # streamSettings (for example sniffing) also leave the transport standard.
+    # An authoritative full inbound takes precedence over the server section.
+    server = advanced.get("server", {}) if "inbound" not in advanced else {}
+    stream = server.get("streamSettings", {})
+    xhttp = stream.get("xhttpSettings", {})
+    standard = (set(stream) <= {"xhttpSettings"} and isinstance(xhttp, dict)
+                and set(xhttp) <= {"mode"} and xhttp.get("mode", "auto") == "auto")
+    if bucket == "direct" and not standard:
+        settings = {"path": wpp_cdn.endpoint_path(root, bucket), "mode": "auto"}
+    base = {"settings": {"clients": []}, "streamSettings": {"network":"xhttp", "security":"none",
+        "xhttpSettings": settings}}
+    inbound = apply_server_advanced(base, advanced, "vless")
+    return copy.deepcopy(inbound.get("streamSettings", {}).get("xhttpSettings", {}))
 
 
 def client_advanced(advanced, protocol="vless"):
@@ -356,6 +396,17 @@ def validate(raw, existing=None):
             if transport not in ("TCP", "UDP"): raise ConnectionError("Mieru поддерживает TCP или UDP.")
             result["config"]["transport"] = transport
     result["advanced"] = normalize_advanced(raw.get("advanced", old.get("advanced", {})), protocol)
+    if config.get("cascade") is not None:
+        try: cascade = clean_plan(config["cascade"])
+        except CascadeError as exc: raise ConnectionError(str(exc)) from exc
+        if protocol not in ENTRY_PROTOCOLS and cascade["mode"] != "direct":
+            raise ConnectionError("Мост доступен только для VLESS и Hysteria2.")
+        if protocol in ENTRY_PROTOCOLS: result["config"]["cascade"] = cascade
+    if config.get("ssh_entry"):
+        if not ssh_cascade.supports_connection(result) or result["config"].get("cascade",{}).get("mode","direct")!="direct":
+            raise ConnectionError("SSH-вход RU доступен для Hysteria2 и прямого VLESS без моста между панелями.")
+        try:result["config"]["ssh_entry"]=ssh_cascade.client_entry(config["ssh_entry"])
+        except ssh_cascade.SSHError as exc:raise ConnectionError(str(exc)) from exc
     return result
 
 
@@ -657,6 +708,11 @@ def clone(path, cid, users=None):
     if not source: raise ConnectionError("Подключение не найдено.")
     previous = copy.deepcopy(data)
     item = copy.deepcopy(source); item["id"] = secrets.token_hex(8); item["name"] += " · копия"; item["created_at"] = int(time.time())
+    if item.get("config",{}).pop("ssh_entry",None):item["enabled"]=False
+    if item.get("config", {}).get("cascade", {}).get("mode", "direct") != "direct":
+        # A cloned entry has no committed relay generation yet. Keep it off
+        # until its own chain is applied, rather than allowing a direct exit.
+        item["enabled"] = False
     if item.get("protocol") in AWG_PROTOCOLS | EXTERNAL_PROTOCOLS: item["config"] = {**item.get("config", {}), "port": 0}
     data["connections"].append(item); save(path, data)
     try:

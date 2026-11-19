@@ -1,4 +1,5 @@
 """Strict validation and routing helpers for per-profile VLESS XHTTP CDN."""
+import hashlib
 import re
 
 PROVIDERS = {"yandex", "vk", "beget", "selectel", "timeweb", "custom"}
@@ -85,6 +86,20 @@ def client_endpoint_path(root, variant="direct"):
     """
     path = endpoint_path(root, variant)
     return path + "/index.json" if str(variant or "direct") == "timeweb" else path
+
+
+def probe_path(root):
+    """Use an installation-specific health URL instead of a public WPP marker."""
+    if not valid_path_root(root):
+        raise CDNError("Некорректный локальный путь XHTTP.")
+    token = hashlib.sha256(("health-path:" + root).encode()).hexdigest()[:24]
+    return "/assets/" + token + "/status.json"
+
+
+def probe_signature(root):
+    if not valid_path_root(root):
+        raise CDNError("Некорректный локальный путь XHTTP.")
+    return hashlib.sha256(("health-response:" + root).encode()).hexdigest()[:32]
 
 
 def rewrite_caddy_xhttp_routes(source, root):
@@ -332,9 +347,36 @@ def _selectel_server_extra():
     return result
 
 
+def direct_extra():
+    """Random padding with the existing framing, also accepted by cached links.
+
+    Keep Referer/x_padding and path-based session metadata unchanged: changing
+    either would require every existing client and bridge hop to refresh at once.
+    Xray's tokenish validator also accepts the legacy repeat-X padding.
+    """
+    return {
+        "mode": "auto",
+        "xPaddingBytes": "100-1000",
+        "xPaddingObfsMode": True,
+        "xPaddingPlacement": "queryInHeader",
+        "xPaddingHeader": "Referer",
+        "xPaddingKey": "x_padding",
+        "xPaddingMethod": "tokenish",
+        "noSSEHeader": True,
+        "noGRPCHeader": True,
+        "xmux": {
+            "maxConcurrency": "8-16", "maxConnections": 0,
+            "cMaxReuseTimes": 0, "hMaxRequestTimes": "600-900",
+            "hMaxReusableSecs": "900-1800", "hKeepAlivePeriod": 0,
+        },
+    }
+
+
 def server_xhttp(path, preset="direct"):
     result = {"path": path, "mode": "auto"}
-    if preset is True or preset == "get":
+    if preset == "direct":
+        result.update(direct_extra())
+    elif preset is True or preset == "get":
         result.update(_get_only_extra())
     elif preset == "vk":
         result.update(_vk_extra())
@@ -381,7 +423,7 @@ def vless_route(origin_domain, profile=None):
             "sni": origin_domain,
             "host": origin_domain,
             "mode": "auto",
-            "extra": None,
+            "extra": direct_extra(),
             "fingerprint": value.get("fingerprint", "chrome"),
             "path_suffix": "",
             "path_variant": "direct",

@@ -362,6 +362,8 @@ def add_node(path, request_data):
     loc = location(status.get('location'))
     node = {'id': secrets.token_hex(8), 'url': url, 'token': token, **loc, 'enabled': True}
     node['version'] = str(status.get('version', ''))[:32]
+    node['capabilities'] = [value for value in status.get('capabilities', [])
+                            if isinstance(value, str) and len(value) < 64]
     nodes.append(node)
     save_nodes(path, nodes)
     return public_node(node)

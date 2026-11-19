@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Safe in-place updater for WEB PANEL PROXY V 2.8.1.
+# Safe in-place updater for WEB PANEL PROXY V 2.9.0.
 set -Eeuo pipefail
 umask 077
 
@@ -18,6 +18,7 @@ wpp_progress_start() {
 wpp_progress() {
     local percent="$1" label="$2" width=28 filled empty bar
     (( percent < 0 )) && percent=0; (( percent > 100 )) && percent=100
+    if [[ "${WPP_WEB_UPDATE:-0}" == 1 ]]; then printf 'WPP_PANEL_PROGRESS %d %s\n' "$percent" "$label"; fi
     filled=$((percent*width/100)); empty=$((width-filled))
     printf -v bar '%*s' "$filled" ''; bar="${bar// /#}"
     printf -v empty '%*s' "$empty" ''; bar+="${empty// /-}"
@@ -47,24 +48,146 @@ REQUESTED_REF="${WEB_PANEL_PROXY_REF:-}"
 RELEASE_REF="$REQUESTED_REF"
 LOCAL_SOURCE=""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONTROLLER_VERSION="3.0.0-alpha49"
+CONTROLLER_REVISION=2026111901
+CONTROLLER_DIR=/usr/local/lib/web-panel-proxy-updater
+CONTROLLER_ENTRY=/usr/local/sbin/web-panel-proxy-update
+CONTROLLER_UNINSTALL=/usr/local/sbin/web-panel-proxy-uninstall
+SELECTED_RELEASE_SHA=""
+if [[ "${1:-}" == --ref && $# == 2 ]]; then
+    REQUESTED_REF="$2"
+    RELEASE_REF="$REQUESTED_REF"
+    shift 2
+fi
+
+# WPP_GITHUB_RELEASE_BEGIN
+git_release() {
+    GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_COUNT=0 \
+        git -c credential.helper= "$@"
+}
+fetch_github_release() {
+    local destination="$1" tag="$2" refs expected actual
+    [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || die "Invalid GitHub release tag."
+    refs="$(git_release ls-remote --exit-code "$REPOSITORY" "refs/tags/$tag" "refs/tags/$tag^{}")" ||
+        die "Could not read the selected release tag from GitHub."
+    expected="$(printf '%s\n' "$refs" | awk -v ref="refs/tags/$tag" '$2==ref {base=$1} $2==ref"^{}" {peeled=$1} END {print peeled?peeled:base}')"
+    [[ "$expected" =~ ^[0-9a-f]{40}$ ]] || die "GitHub release commit is missing or invalid."
+    git_release -c init.defaultBranch=main init -q "$destination"
+    git_release -C "$destination" remote add origin "$REPOSITORY"
+    git_release -C "$destination" fetch --no-tags --depth 1 origin "refs/tags/$tag"
+    git_release -C "$destination" checkout --detach --force "$expected"
+    actual="$(git_release -C "$destination" rev-parse HEAD)"
+    [[ "$actual" == "$expected" ]] || die "Downloaded release does not match the GitHub tag."
+    SELECTED_RELEASE_SHA="$actual"
+    printf 'WPP_RELEASE_SOURCE GitHub %s %s\n' "$tag" "$actual"
+}
+# WPP_GITHUB_RELEASE_END
+
+# WPP_CONTROLLER_BUNDLE_BEGIN
+stage_update_controller() {
+    local candidate version revision current_compare candidate_compare file source use_candidate=0
+    candidate="$TEMP_DIR/source/update.sh"
+    version="$(sed -n 's/^CONTROLLER_VERSION="\([0-9A-Za-z.+-]*\)"$/\1/p' "$candidate" | head -n1)"
+    revision="$(sed -n 's/^CONTROLLER_REVISION=\([0-9]*\)$/\1/p' "$candidate" | head -n1)"
+    # The recovery controller has its own revision. An older helper packaged
+    # with a higher panel version must not replace the fixed controller.
+    if [[ "$revision" =~ ^[0-9]{1,12}$ ]]; then
+        if (( 10#$revision >= CONTROLLER_REVISION )); then use_candidate=1; fi
+    elif [[ "${CONTROLLER_REVISION:-0}" == 0 && "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-](alpha|beta|rc)[0-9]+)?$ ]]; then
+        current_compare="$(sed -E 's/[.-](alpha|beta|rc)([0-9]+)$/~\1\2/' <<<"$CONTROLLER_VERSION")"
+        candidate_compare="$(sed -E 's/[.-](alpha|beta|rc)([0-9]+)$/~\1\2/' <<<"$version")"
+        dpkg --compare-versions "$candidate_compare" ge "$current_compare" && use_candidate=1
+    fi
+    install -d -m 0700 "$TEMP_DIR/controller"
+    if [[ "$use_candidate" == 1 ]]; then
+        cp -- "$candidate" "$TEMP_DIR/controller/update.sh"
+    else
+        cp -- "$0" "$TEMP_DIR/controller/update.sh"
+    fi
+    for file in wpp_update_data.py wpp_update.py wpp_metrics.py uninstall-web-proxy.sh; do
+        if [[ "$use_candidate" == 1 ]]; then source="$TEMP_DIR/source/$file"
+        elif [[ -s "$SCRIPT_DIR/$file" ]]; then source="$SCRIPT_DIR/$file"
+        elif [[ -s "$CONTROLLER_DIR/$file" ]]; then source="$CONTROLLER_DIR/$file"
+        elif [[ "$file" == uninstall-web-proxy.sh ]]; then source="$CONTROLLER_UNINSTALL"
+        else source="/opt/tproxy-panel/$file"; fi
+        if [[ ! -s "$source" && "$file" == uninstall-web-proxy.sh ]]; then source="$TEMP_DIR/source/$file"; fi
+        [[ -s "$source" ]] || die "Version controller is incomplete: $file"
+        cp -- "$source" "$TEMP_DIR/controller/$file"
+    done
+}
+install_update_controller() {
+    local file
+    install -d -o root -g root -m 0700 "$CONTROLLER_DIR"
+    for file in update.sh wpp_update_data.py wpp_update.py wpp_metrics.py uninstall-web-proxy.sh; do
+        install -o root -g root -m 0600 "$TEMP_DIR/controller/$file" "$CONTROLLER_DIR/$file"
+    done
+    install -o root -g root -m 0755 "$TEMP_DIR/controller/update.sh" "$CONTROLLER_ENTRY"
+    install -o root -g root -m 0755 "$TEMP_DIR/controller/uninstall-web-proxy.sh" "$CONTROLLER_UNINSTALL"
+}
+# WPP_CONTROLLER_BUNDLE_END
+
+# WPP_RELAY_UMASK_COMPAT_BEGIN
+prepare_relay_repair() {
+    # Old tags carry the pre-fix launcher. Change only that temporary wrapper;
+    # the pinned relay source, tests and production permissions stay intact.
+    python3 - "$1" <<'PY'
+from pathlib import Path
+import re,sys
+path=Path(sys.argv[1])
+source=path.read_text(encoding='utf-8')
+call='bash "$WORK/source/deploy/update-relay.sh"'
+safe='(\n    umask 022\n    '+call+'\n)'
+if safe not in source:
+    pattern=r'(?m)^([ \t]*)bash "\$WORK/source/deploy/update-relay\.sh"[ \t]*$'
+    matches=list(re.finditer(pattern,source))
+    if len(matches)>1:
+        raise SystemExit('Cannot safely prepare relay updater: ambiguous launcher.')
+    if matches:
+        match=matches[0];indent=match[1]
+        replacement=indent+'(\n'+indent+'    umask 022\n'+indent+'    '+call+'\n'+indent+')'
+        source=source[:match.start()]+replacement+source[match.end():]
+        with path.open('w',encoding='utf-8',newline='\n') as stream:stream.write(source)
+        print('Applied relay test permission compatibility fix to the downloaded wrapper.')
+PY
+}
+# WPP_RELAY_UMASK_COMPAT_END
+
+# WPP_PANEL_RELEASE_PREPARE_BEGIN
+prepare_panel_release() {
+    wpp_progress 50 "Проверка выбранной версии"
+    if [[ "$MIGRATING_LEGACY" != 1 ]]; then
+        echo "Existing relay retained. Installing only the selected panel release; relay rebuild is not part of version switching."
+        return 0
+    fi
+    # A first-generation installation still needs the public-site migration.
+    if [[ -f "$TEMP_DIR/source/repair-landing-pages.sh" ]]; then
+        prepare_relay_repair "$TEMP_DIR/source/repair-landing-pages.sh"
+        chmod 0700 "$TEMP_DIR/source/repair-landing-pages.sh"
+        bash "$TEMP_DIR/source/repair-landing-pages.sh"
+    fi
+}
+# WPP_PANEL_RELEASE_PREPARE_END
+
+
 # A complete extracted ZIP is itself the requested release. Prefer it
 # automatically so `bash ./update.sh` never falls back to an older public tag.
 AUTO_LOCAL=0
-if [[ $# == 0 && -s "$SCRIPT_DIR/install-panel.sh" && -s "$SCRIPT_DIR/wpp_ui.py" &&
+if [[ -z "$REQUESTED_REF" && $# == 0 && -s "$SCRIPT_DIR/install-panel.sh" && -s "$SCRIPT_DIR/wpp_ui.py" &&
       -s "$SCRIPT_DIR/assets/amneziawg-go-linux-amd64" ]]; then
     AUTO_LOCAL=1
 fi
 if [[ "${1:-}" == "--local" || "$AUTO_LOCAL" == 1 ]]; then
     LOCAL_SOURCE="$SCRIPT_DIR"
-    RELEASE_REF="v2.8.1"
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png THIRD-PARTY-NOTICES.md wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_extra_protocols.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
+    RELEASE_REF="v2.9.0"
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png THIRD-PARTY-NOTICES.md wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_update_data.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_extra_protocols.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py wpp_cascade.py wpp_cascade_ui.py wpp_ssh_cascade.py wpp_ssh_cascade_ui.py wpp_ssh_relay_agent.py wpp_cascade_ops.py wpp_cascade_ops_ui.py frontend/cascade/editor.css frontend/cascade/editor.html frontend/cascade/production.js frontend/cascade/methods.css frontend/cascade/methods.html frontend/cascade/methods.js; do
         [[ -s "$LOCAL_SOURCE/$file" ]] || { echo "Incomplete local archive: $file is missing." >&2; exit 1; }
     done
     [[ -s "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" || -s "$LOCAL_SOURCE/OpenFlux-linux-amd64" ]] || {
         echo "Incomplete local archive: OpenFlux-linux-amd64 is missing." >&2; exit 1;
     }
     for file in mtproxy-download.sh assets/mtproxy-bootstrap/proxy-secret assets/mtproxy-bootstrap/proxy-multi.conf; do
-        [[ -s "$LOCAL_SOURCE/$file" ]] || { echo "Incomplete local archive: $file is missing." >&2; exit 1; }
+        [[ -s "$LOCAL_SOURCE/$file" ]] || { echo "Incomplete archive: $file is missing." >&2; exit 1; }
     done
     for file in amneziawg-go-linux-amd64 awg-linux-amd64 awg-quick-linux-amd64; do
         [[ -s "$LOCAL_SOURCE/assets/$file" ]] || {
@@ -83,7 +206,7 @@ if [[ "${1:-}" == "--local" || "$AUTO_LOCAL" == 1 ]]; then
         }
     done
 elif [[ $# != 0 ]]; then
-    echo "Usage: bash update.sh [--local]" >&2; exit 1
+    echo "Usage: bash update.sh [--local | --ref vX.Y.Z]" >&2; exit 1
 fi
 SERVICE="/etc/systemd/system/tproxy-panel.service"
 LEGACY_SERVICE="/etc/systemd/system/web-proxy-panel.service"
@@ -97,7 +220,7 @@ exec 9>/run/lock/web-panel-proxy.lock
 flock -n 9 || die "Another WEB PANEL PROXY install, update or removal is already running."
 
 echo "============================================================"
-echo "     WEB PANEL PROXY V 2.8.1 — SAFE UPDATE"
+echo "     WEB PANEL PROXY V 2.9.0 — SAFE UPDATE"
 echo "============================================================"
 echo "Users, administrator password, panel URL and site HTML will be retained."
 wpp_progress_start "Проверка установленной версии"
@@ -151,6 +274,12 @@ else
     [[ -s "$PRIMARY_SECRET" ]] || die "Primary Secret is missing from the existing panel installation."
 fi
 
+TRAFFIC_WAS_RUNNING=0
+systemctl is-active --quiet web-proxy-panel-traffic.timer && TRAFFIC_WAS_RUNNING=1
+systemctl stop web-proxy-panel-traffic.timer web-proxy-panel-traffic.service 2>/dev/null || true
+CASCADE_WAS_RUNNING=0
+systemctl is-active --quiet web-panel-proxy-cascade-monitor.timer && CASCADE_WAS_RUNNING=1
+systemctl stop web-panel-proxy-cascade-monitor.timer web-panel-proxy-cascade-monitor.service 2>/dev/null || true
 # Pause the HTTP writer before taking a snapshot of subscription slots/keys.
 # Proxy services keep running. Recover the panel if snapshot/download fails.
 PANEL_WAS_RUNNING=0
@@ -160,10 +289,10 @@ if systemctl is-active --quiet tproxy-panel.service; then
 fi
 BACKUP="$(mktemp -d /tmp/web-panel-proxy-rollback.XXXXXX)"
 chmod 0700 "$BACKUP"
-early_finish() { local code=$?; if [[ "$PANEL_WAS_RUNNING" == 1 ]]; then systemctl start tproxy-panel.service || true; fi; rm -rf -- "${BACKUP:-}"; wpp_progress_finish "$code"; }
+early_finish() { local code=$?; if [[ "$TRAFFIC_WAS_RUNNING" == 1 ]]; then systemctl start web-proxy-panel-traffic.timer || true; fi; if [[ "$CASCADE_WAS_RUNNING" == 1 ]]; then systemctl start web-panel-proxy-cascade-monitor.timer || true; fi; if [[ "$PANEL_WAS_RUNNING" == 1 ]]; then systemctl start tproxy-panel.service || true; fi; rm -rf -- "${BACKUP:-}"; wpp_progress_finish "$code"; }
 trap early_finish EXIT
 BACKUP_ITEMS=()
-for item in /opt/tproxy-panel /opt/web-panel-proxy /opt/MTProxy /usr/local/bin/caddy /usr/local/bin/tproxy-server /usr/local/bin/amneziawg-go /usr/local/bin/awg /usr/local/bin/awg-quick /usr/local/sbin/web-proxy-panelctl /usr/local/sbin/web-proxy-panel-user-firewall /usr/local/sbin/web-panel-proxy-sync-tls /usr/local/sbin/web-panel-proxy-awg-run /usr/local/sbin/web-panel-proxy-awg-up /usr/local/sbin/web-panel-proxy-awg-down /usr/local/sbin/web-proxy-panel-update /usr/local/sbin/web-panel-proxy-uninstall /usr/local/sbin/WPP /usr/local/sbin/wpp /etc/systemd/system/tproxy-panel.service /etc/systemd/system/tproxy-panel.service.d/go-runtime.conf /etc/systemd/system/web-panel-proxy-web-update.service.d/go-runtime.conf /etc/systemd/system/web-panel-proxy-auto-update.service.d/go-runtime.conf /etc/systemd/system/web-panel-proxy-awg@.service.d/go-runtime.conf /etc/systemd/system/web-proxy-panel-firewall.service /etc/systemd/system/web-proxy-panel-traffic.service /etc/systemd/system/web-proxy-panel-traffic.timer /etc/systemd/system/web-panel-proxy-xray.service /etc/systemd/system/web-panel-proxy-openflux.service /etc/systemd/system/web-panel-proxy-awg@.service /etc/systemd/system/web-panel-proxy-sync-tls.service /etc/systemd/system/web-panel-proxy-sync-tls.timer /etc/systemd/system/web-panel-proxy-component-update.service /etc/systemd/system/tproxy-server.service /etc/systemd/system/mtproxy.service /etc/systemd/system/caddy.service.d/tproxy.conf /etc/caddy/Caddyfile /etc/tproxy-server /etc/mtproxy /etc/mita /etc/web-panel-proxy-xray /etc/sysctl.d/90-web-panel-proxy-awg.conf /var/lib/web-panel-proxy-xray /var/lib/web-panel-proxy-components /var/lib/tproxy-panel /etc/web-proxy-panel /srv/tproxy-site; do
+for item in /usr/local/lib/web-panel-proxy-updater /usr/local/sbin/web-panel-proxy-update /opt/tproxy-panel /opt/web-panel-proxy /opt/MTProxy /usr/local/bin/caddy /usr/local/bin/tproxy-server /usr/local/bin/amneziawg-go /usr/local/bin/awg /usr/local/bin/awg-quick /usr/local/sbin/web-proxy-panelctl /usr/local/sbin/web-proxy-panel-user-firewall /usr/local/sbin/web-panel-proxy-sync-tls /usr/local/sbin/web-panel-proxy-awg-run /usr/local/sbin/web-panel-proxy-awg-up /usr/local/sbin/web-panel-proxy-awg-down /usr/local/sbin/web-proxy-panel-update /usr/local/sbin/web-panel-proxy-uninstall /usr/local/sbin/WPP /usr/local/sbin/wpp /etc/systemd/system/tproxy-panel.service /etc/systemd/system/tproxy-panel.service.d/go-runtime.conf /etc/systemd/system/web-panel-proxy-web-update.service.d/go-runtime.conf /etc/systemd/system/web-panel-proxy-auto-update.service.d/go-runtime.conf /etc/systemd/system/web-panel-proxy-awg@.service.d/go-runtime.conf /etc/systemd/system/web-proxy-panel-firewall.service /etc/systemd/system/web-proxy-panel-traffic.service /etc/systemd/system/web-proxy-panel-traffic.timer /etc/systemd/system/web-panel-proxy-xray.service /etc/systemd/system/web-panel-proxy-openflux.service /etc/systemd/system/web-panel-proxy-awg@.service /etc/systemd/system/web-panel-proxy-sync-tls.service /etc/systemd/system/web-panel-proxy-sync-tls.timer /etc/systemd/system/web-panel-proxy-component-update.service /etc/systemd/system/tproxy-server.service /etc/systemd/system/mtproxy.service /etc/systemd/system/caddy.service.d/tproxy.conf /etc/caddy/Caddyfile /etc/tproxy-server /etc/mtproxy /etc/mita /etc/web-panel-proxy-xray /etc/sysctl.d/90-web-panel-proxy-awg.conf /var/lib/web-panel-proxy-xray /var/lib/web-panel-proxy-components /var/lib/tproxy-panel /etc/web-proxy-panel /srv/tproxy-site; do
     [[ -e "$item" ]] && BACKUP_ITEMS+=("$item")
     [[ -e "$item" ]] && cp -a --parents "$item" "$BACKUP"
 done
@@ -173,7 +302,7 @@ for item in /usr/local/bin/caddy-naive /usr/local/bin/mita-wpp /etc/systemd/syst
     cp -a --parents "$item" "$BACKUP"
 done
 shopt -s nullglob
-for item in /etc/systemd/system/web-proxy-user-*.service /etc/systemd/system/web-panel-proxy-web-update.service /etc/systemd/system/web-panel-proxy-auto-update.service /etc/systemd/system/web-panel-proxy-auto-update.timer /etc/systemd/system/web-panel-proxy-metrics.service /etc/systemd/system/web-panel-proxy-metrics.timer; do
+for item in /etc/systemd/system/web-proxy-user-*.service /etc/systemd/system/web-panel-proxy-web-update.service /etc/systemd/system/web-panel-proxy-auto-update.service /etc/systemd/system/web-panel-proxy-auto-update.timer /etc/systemd/system/web-panel-proxy-metrics.service /etc/systemd/system/web-panel-proxy-metrics.timer /etc/systemd/system/web-panel-proxy-cascade-monitor.service /etc/systemd/system/web-panel-proxy-cascade-monitor.timer /etc/systemd/system/web-panel-proxy-smartdns.service; do
     [[ -e "$item" ]] || continue
     BACKUP_ITEMS+=("$item")
     cp -a --parents "$item" "$BACKUP"
@@ -209,6 +338,14 @@ HAD_FIREWALL_SERVICE=0
 [[ -e /etc/systemd/system/web-proxy-panel-firewall.service ]] && HAD_FIREWALL_SERVICE=1
 HAD_TRAFFIC_TIMER=0
 [[ -e /etc/systemd/system/web-proxy-panel-traffic.timer ]] && HAD_TRAFFIC_TIMER=1
+HAD_SMARTDNS_USER=0
+HAD_SMARTDNS_GROUP=0
+id wpp-smartdns >/dev/null 2>&1 && HAD_SMARTDNS_USER=1
+getent group wpp-smartdns >/dev/null 2>&1 && HAD_SMARTDNS_GROUP=1
+HAD_SMARTDNS_UNIT=0
+[[ -e /etc/systemd/system/web-panel-proxy-smartdns.service ]] && HAD_SMARTDNS_UNIT=1
+HAD_CASCADE_TIMER=0
+[[ -e /etc/systemd/system/web-panel-proxy-cascade-monitor.timer ]] && HAD_CASCADE_TIMER=1
 HAD_METRICS_TIMER=0
 [[ -e /etc/systemd/system/web-panel-proxy-metrics.timer ]] && HAD_METRICS_TIMER=1
 HAD_PANEL_DATA=0
@@ -247,21 +384,43 @@ id wpp-openflux >/dev/null 2>&1 && HAD_OPENFLUX_USER=1
 [[ -e /etc/systemd/system/web-panel-proxy-awg@.service || -x /usr/local/bin/amneziawg-go ]] && HAD_AWG=1
 [[ -e /etc/systemd/system/web-panel-proxy-naive.service || -e /etc/systemd/system/web-panel-proxy-mieru.service || -e /etc/systemd/system/web-panel-proxy-mieru@.service ]] && HAD_EXTRA_PROTOCOLS=1
 [[ -e /usr/local/sbin/WPP ]] && HAD_WPP_MENU=1
+HAD_UPDATE_CONTROLLER=0
+[[ -d "$CONTROLLER_DIR" ]] && HAD_UPDATE_CONTROLLER=1
+HAD_UPDATE_ENTRY=0
+[[ -e "$CONTROLLER_ENTRY" ]] && HAD_UPDATE_ENTRY=1
+HAD_UPDATE_UNINSTALL=0
+[[ -e "$CONTROLLER_UNINSTALL" ]] && HAD_UPDATE_UNINSTALL=1
+HAD_VERSION_DATA=0
+[[ -e /etc/web-proxy-panel/version-data.json ]] && HAD_VERSION_DATA=1
 UPDATE_COMMITTED=0
 rollback_update() {
     local code="$1"
     [[ "$UPDATE_COMMITTED" == 1 || "$code" == 0 ]] && return 0
     echo "Update failed; restoring the previous working state..." >&2
-    systemctl stop tproxy-panel.service web-proxy-panel-firewall.service web-proxy-panel-traffic.timer web-proxy-panel-traffic.service web-panel-proxy-metrics.timer web-panel-proxy-metrics.service web-panel-proxy-xray.service web-panel-proxy-openflux.service web-panel-proxy-naive.service web-panel-proxy-mieru.service web-panel-proxy-sync-tls.timer web-panel-proxy-auto-update.timer web-panel-proxy-auto-update.service 2>/dev/null || true
+    systemctl stop web-panel-proxy-smartdns.service web-panel-proxy-cascade-monitor.timer web-panel-proxy-cascade-monitor.service tproxy-panel.service web-proxy-panel-firewall.service web-proxy-panel-traffic.timer web-proxy-panel-traffic.service web-panel-proxy-metrics.timer web-panel-proxy-metrics.service web-panel-proxy-xray.service web-panel-proxy-openflux.service web-panel-proxy-naive.service web-panel-proxy-mieru.service web-panel-proxy-sync-tls.timer web-panel-proxy-auto-update.timer web-panel-proxy-auto-update.service 2>/dev/null || true
     for unit in $(systemctl list-units --all 'web-panel-proxy-awg@*.service' --no-legend 2>/dev/null | awk '{print $1}'); do systemctl stop "$unit" 2>/dev/null || true; done
     for unit in $(systemctl list-units --all 'web-panel-proxy-mieru@*.service' --no-legend 2>/dev/null | awk '{print $1}'); do systemctl stop "$unit" 2>/dev/null || true; done
     tar --numeric-owner -xpf "$BACKUP/state.tar" -C / 2>/dev/null || true
+    [[ "$HAD_VERSION_DATA" == 1 ]] || rm -f -- /etc/web-proxy-panel/version-data.json
+    [[ "$HAD_UPDATE_CONTROLLER" == 1 ]] || rm -rf -- /usr/local/lib/web-panel-proxy-updater
+    [[ "$HAD_UPDATE_ENTRY" == 1 ]] || rm -f -- /usr/local/sbin/web-panel-proxy-update
+    [[ "$HAD_UPDATE_UNINSTALL" == 1 ]] || rm -f -- /usr/local/sbin/web-panel-proxy-uninstall
     if [[ "$HAD_FIREWALL_SERVICE" == 0 ]]; then
         rm -f /etc/systemd/system/web-proxy-panel-firewall.service
         rm -f /usr/local/sbin/web-proxy-panel-user-firewall
     fi
     if [[ "$HAD_TRAFFIC_TIMER" == 0 ]]; then
         rm -f /etc/systemd/system/web-proxy-panel-traffic.service /etc/systemd/system/web-proxy-panel-traffic.timer
+    fi
+    if [[ "$HAD_SMARTDNS_USER" == 0 ]]; then userdel wpp-smartdns 2>/dev/null || true; fi
+    if [[ "$HAD_SMARTDNS_GROUP" == 0 ]]; then groupdel wpp-smartdns 2>/dev/null || true; fi
+    if [[ "$HAD_SMARTDNS_UNIT" == 0 ]]; then
+        systemctl disable web-panel-proxy-smartdns.service 2>/dev/null || true
+        rm -f /etc/systemd/system/web-panel-proxy-smartdns.service
+    fi
+    if [[ "$HAD_CASCADE_TIMER" == 0 ]]; then
+        systemctl disable web-panel-proxy-cascade-monitor.timer 2>/dev/null || true
+        rm -f /etc/systemd/system/web-panel-proxy-cascade-monitor.service /etc/systemd/system/web-panel-proxy-cascade-monitor.timer
     fi
     if [[ "$HAD_METRICS_TIMER" == 0 ]]; then
         systemctl disable web-panel-proxy-metrics.timer 2>/dev/null || true
@@ -345,6 +504,7 @@ rollback_update() {
         rm -rf -- /etc/web-proxy-panel/extra-protocols
     fi
     systemctl daemon-reload
+    [[ "$HAD_SMARTDNS_UNIT" == 1 ]] && systemctl start web-panel-proxy-smartdns.service 2>/dev/null || true
     systemctl restart mtproxy.service tproxy-server.service caddy.service tproxy-panel.service 2>/dev/null || true
     [[ -e /etc/web-proxy-panel/openflux/enabled ]] && systemctl restart web-panel-proxy-openflux.service 2>/dev/null || true
     [[ "$HAD_FIREWALL_SERVICE" == 1 ]] && systemctl restart web-proxy-panel-firewall.service 2>/dev/null || true
@@ -362,8 +522,17 @@ rollback_update() {
         done
     fi
     [[ "$HAD_TRAFFIC_TIMER" == 1 ]] && systemctl restart web-proxy-panel-traffic.timer 2>/dev/null || true
+    [[ "$HAD_CASCADE_TIMER" == 1 ]] && systemctl enable --now web-panel-proxy-cascade-monitor.timer 2>/dev/null || true
     [[ "$HAD_METRICS_TIMER" == 1 ]] && systemctl restart web-panel-proxy-metrics.timer 2>/dev/null || true
     [[ "$HAD_AUTO_UPDATE_UNITS" == 1 ]] && systemctl enable --now web-panel-proxy-auto-update.timer 2>/dev/null || true
+    if [[ -s "$TEMP_DIR/suspended-units" ]]; then
+        while read -r enabled active unit; do
+            if [[ "$enabled" == 1 ]]; then systemctl enable "$unit" 2>/dev/null || true
+            else systemctl disable "$unit" 2>/dev/null || true; fi
+            if [[ "$active" == 1 ]]; then systemctl start "$unit" 2>/dev/null || true
+            else systemctl stop "$unit" 2>/dev/null || true; fi
+        done < "$TEMP_DIR/suspended-units"
+    fi
     echo "Previous files restored; the temporary snapshot will now be removed." >&2
 }
 
@@ -384,8 +553,10 @@ fi
     die "Could not determine a valid published release tag."
 echo "Selected release: $RELEASE_REF"
 CURRENT_VERSION="$(cat /etc/web-proxy-panel/version 2>/dev/null || true)"
+CURRENT_COMPARE="$(sed -E 's/[.-](alpha|beta|rc)([0-9]+)$/~\1\2/' <<<"$CURRENT_VERSION")"
+TARGET_COMPARE="$(sed -E 's/[.-](alpha|beta|rc)([0-9]+)$/~\1\2/' <<<"${RELEASE_REF#v}")"
 if [[ -z "$REQUESTED_REF" && "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.+~-][A-Za-z0-9.+~-]+)?$ ]] &&
-   dpkg --compare-versions "$CURRENT_VERSION" ge "${RELEASE_REF#v}"; then
+   dpkg --compare-versions "$CURRENT_COMPARE" ge "$TARGET_COMPARE"; then
     echo "WEB PANEL PROXY ${CURRENT_VERSION} is already the latest published stable version."
     exit 0
 fi
@@ -412,7 +583,8 @@ if [[ -n "$LOCAL_SOURCE" ]]; then
     for file in mtproxy-download.sh assets/mtproxy-bootstrap/proxy-secret assets/mtproxy-bootstrap/proxy-multi.conf; do
         cp -a "$LOCAL_SOURCE/$file" "$TEMP_DIR/source/$file"
     done
-    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png THIRD-PARTY-NOTICES.md wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_extra_protocols.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py; do
+    install -d -m 0700 "$TEMP_DIR/source/frontend/cascade"
+    for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png THIRD-PARTY-NOTICES.md wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_update_data.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_extra_protocols.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py wpp_cascade.py wpp_cascade_ui.py wpp_ssh_cascade.py wpp_ssh_cascade_ui.py wpp_ssh_relay_agent.py wpp_cascade_ops.py wpp_cascade_ops_ui.py frontend/cascade/editor.css frontend/cascade/editor.html frontend/cascade/production.js frontend/cascade/methods.css frontend/cascade/methods.html frontend/cascade/methods.js; do
         cp -a "$LOCAL_SOURCE/$file" "$TEMP_DIR/source/$file"
     done
     if [[ -s "$LOCAL_SOURCE/assets/OpenFlux-linux-amd64" ]]; then
@@ -432,11 +604,47 @@ if [[ -n "$LOCAL_SOURCE" ]]; then
     install -d -m 0700 "$TEMP_DIR/source/wpp-panel"
     cp -a "$LOCAL_SOURCE/wpp-panel/flags.tar.gz" "$TEMP_DIR/source/wpp-panel/flags.tar.gz"
 else
-git clone --depth 1 --branch "$RELEASE_REF" "$REPOSITORY" "$TEMP_DIR/source"
+fetch_github_release "$TEMP_DIR/source" "$RELEASE_REF"
 fi
 [[ -f "$TEMP_DIR/source/install-panel.sh" ]] || die "Update package is incomplete."
 chmod 0700 "$TEMP_DIR/source/install-panel.sh"
 wpp_progress 40 "Файлы обновления подготовлены"
+
+# Retain newer records privately instead of forbidding an older release.
+stage_update_controller
+cp -- "$TEMP_DIR/controller/wpp_update_data.py" "$TEMP_DIR/update-data.py"
+install -d -m 0700 "$TEMP_DIR/status-helper"
+cp -- "$TEMP_DIR/controller/wpp_update.py" "$TEMP_DIR/controller/wpp_metrics.py" "$TEMP_DIR/status-helper/"
+DATA_CURRENT_VERSION="$(cat /etc/web-proxy-panel/version 2>/dev/null || printf '0.0.0')"
+python3 "$TEMP_DIR/update-data.py" prepare "$TEMP_DIR/source" /etc/web-proxy-panel "$DATA_CURRENT_VERSION" "${RELEASE_REF#v}" | tee "$TEMP_DIR/version-data-plan"
+python3 "$TEMP_DIR/update-data.py" prepare-caddy "$TEMP_DIR/source" /etc/caddy/Caddyfile
+# Disable services that the selected release cannot manage. Record their
+# previous state so a failed install restores both data and service activation.
+python3 - "$TEMP_DIR/version-data-plan" <<'PY' > "$TEMP_DIR/suspend-patterns"
+import json,sys
+line=next(line for line in open(sys.argv[1],encoding='utf-8') if line.startswith('WPP_VERSION_DATA '))
+plan=json.loads(line.split(' ',1)[1]);protocols=plan['protocols']
+if 'vless' not in protocols and 'hysteria' not in protocols:
+    print('web-panel-proxy-xray.service');print('web-panel-proxy-sync-tls.timer');print('web-panel-proxy-sync-tls.service')
+if 'awg20' not in protocols and 'awg31' not in protocols:print('web-panel-proxy-awg@*.service')
+if 'naive' not in protocols:print('web-panel-proxy-naive.service')
+if 'mieru' not in protocols:
+    print('web-panel-proxy-mieru.service');print('web-panel-proxy-mieru@*.service')
+if not plan['smartdns_supported']:print('web-panel-proxy-smartdns.service')
+if not plan['cascade_supported']:
+    print('web-panel-proxy-cascade-monitor.timer');print('web-panel-proxy-cascade-monitor.service')
+PY
+while IFS= read -r pattern; do
+    while read -r unit _; do
+        [[ "$unit" =~ ^web-panel-proxy-[a-z0-9@_.-]+\.(service|timer)$ && "$unit" != *@.service ]] || continue
+        unit_enabled=0;unit_active=0
+        systemctl is-enabled --quiet "$unit" 2>/dev/null && unit_enabled=1
+        systemctl is-active --quiet "$unit" 2>/dev/null && unit_active=1
+        [[ "$unit" == web-panel-proxy-cascade-monitor.timer && "$CASCADE_WAS_RUNNING" == 1 ]] && unit_active=1
+        printf '%s %s %s\n' "$unit_enabled" "$unit_active" "$unit" >> "$TEMP_DIR/suspended-units"
+        systemctl disable --now "$unit"
+    done < <(systemctl list-unit-files "$pattern" --no-legend 2>/dev/null)
+done < "$TEMP_DIR/suspend-patterns"
 
 if [[ "$MIGRATING_LEGACY" == 1 ]]; then
     DOMAIN="$(sed -n 's/^Environment=TPROXY_HOSTNAME=//p' /etc/systemd/system/caddy.service.d/tproxy.conf 2>/dev/null | head -n1 || true)"
@@ -483,13 +691,7 @@ EOF
     systemctl daemon-reload
 fi
 
-# Keep the relay binary current as part of the same public update command.
-# Configuration, users, secrets and public-site files are not replaced.
-if [[ -f "$TEMP_DIR/source/repair-landing-pages.sh" ]]; then
-    wpp_progress 50 "Проверка публичного сайта"
-    chmod 0700 "$TEMP_DIR/source/repair-landing-pages.sh"
-    bash "$TEMP_DIR/source/repair-landing-pages.sh"
-fi
+prepare_panel_release
 
 wpp_progress 60 "Установка компонентов панели"
 if [[ "$MIGRATING_LEGACY" == 1 ]]; then
@@ -499,9 +701,7 @@ if [[ "$MIGRATING_LEGACY" == 1 ]]; then
 else
     WEB_PANEL_PROXY_UPDATE=1 bash "$TEMP_DIR/source/install-panel.sh"
 fi
-install -o root -g root -m 0755 \
-    "$TEMP_DIR/source/uninstall-web-proxy.sh" \
-    /usr/local/sbin/web-panel-proxy-uninstall
+install_update_controller
 wpp_progress 90 "Финальная проверка служб"
 
 if [[ -f "$LEGACY_SERVICE" ]]; then
@@ -517,13 +717,24 @@ systemctl is-active --quiet web-proxy-panel-firewall.service ||
     die "Persistent user firewall did not start after the update."
 nft list table inet web_proxy_panel >/dev/null 2>&1 ||
     die "Persistent user firewall table is missing after the update."
+TARGET_HAS_XRAY="$(python3 - "$TEMP_DIR/version-data-plan" <<'PY'
+import json,sys
+line=next(line for line in open(sys.argv[1],encoding='utf-8') if line.startswith('WPP_VERSION_DATA '))
+protocols=json.loads(line.split(' ',1)[1])['protocols']
+print(int('vless' in protocols or 'hysteria' in protocols))
+PY
+)"
+if [[ "$TARGET_HAS_XRAY" == 1 ]]; then
 [[ -x /opt/web-panel-proxy/xray/xray ]] || die "Xray binary is missing after the update."
 [[ -s /etc/web-panel-proxy-xray/config.json ]] || die "Xray configuration is missing after the update."
+fi
 command -v caddy >/dev/null 2>&1 || die "Caddy is missing after the update."
 [[ -x /opt/MTProxy/objs/bin/mtproto-proxy ]] || die "MTProxy is missing after the update."
 systemctl is-active --quiet caddy.service || die "Caddy did not start after the update."
+if [[ "$TARGET_HAS_XRAY" == 1 ]]; then
 systemctl is-active --quiet web-panel-proxy-sync-tls.timer ||
     die "The Xray TLS synchronization timer did not start after the update."
+fi
 systemctl is-active --quiet web-panel-proxy-auto-update.timer ||
     die "The automatic update timer did not start after the update."
 PANEL_EXEC_START="$(systemctl show -p ExecStart --value tproxy-panel.service 2>/dev/null || true)"
@@ -534,20 +745,31 @@ if [[ ! -s /etc/web-proxy-panel/caddy-owned ]]; then
 fi
 printf '%s\n' "${RELEASE_REF#v}" > /etc/web-proxy-panel/version
 chmod 0600 /etc/web-proxy-panel/caddy-owned /etc/web-proxy-panel/version
+python3 "$TEMP_DIR/update-data.py" finalize /etc/web-proxy-panel
 UPDATE_COMMITTED=1
-# Versions up to 2.5.2 left automatic update snapshots in /root. They are not
-# user exports and are no longer needed now that the update passed all checks.
-shopt -s nullglob
-for old_snapshot in /root/web-panel-proxy-update-backup-*; do
-    resolved_snapshot="$(readlink -f -- "$old_snapshot" 2>/dev/null || true)"
-    [[ -d "$resolved_snapshot" && "$resolved_snapshot" == /root/web-panel-proxy-update-backup-* ]] || continue
-    rm -rf -- "$resolved_snapshot"
-done
-shopt -u nullglob
 wpp_progress 96 "Обновление Xray и OpenFlux"
 flock -u 9
-if ! systemctl start web-panel-proxy-component-auto-update.service; then
+if [[ -n "$REQUESTED_REF" ]]; then
+    echo "The selected release's Xray/OpenFlux versions are retained. Independent automatic-update settings are unchanged."
+elif [[ "$TARGET_HAS_XRAY" == 1 ]] && ! systemctl start web-panel-proxy-component-auto-update.service; then
     echo "WARNING: Latest Xray/OpenFlux check failed; the automatic timer will retry." >&2
+fi
+if [[ "${WPP_WEB_UPDATE:-0}" != 1 ]]; then
+    # The web worker owns its own result. A successful CLI install must replace
+    # a stale failed web attempt, including a reinstall of the same version.
+    if ! python3 - "$TEMP_DIR/status-helper" "$RELEASE_REF" "$SELECTED_RELEASE_SHA" <<'PY'
+import inspect,sys
+sys.path[:0]=[sys.argv[1],"/opt/tproxy-panel"]
+import wpp_update
+record=getattr(wpp_update,'record_cli_success',None)
+if record is not None:
+    source={'tag':sys.argv[2],'commit':sys.argv[3]} if sys.argv[3] else None
+    if 'release_source' in inspect.signature(record).parameters:record(release_source=source)
+    else:record()
+PY
+    then
+        echo "WARNING: Installation passed, but its result could not be recorded in the panel." >&2
+    fi
 fi
 wpp_progress 100 "Обновление завершено"
 echo

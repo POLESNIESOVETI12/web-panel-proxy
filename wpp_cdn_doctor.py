@@ -24,13 +24,19 @@ def _managed_routes(xray_path):
     vk_path = wpp_cdn.endpoint_path(xray_path, "vk")
     timeweb_path = wpp_cdn.endpoint_path(xray_path, "timeweb")
     return (
-        '    @web_panel_cdn_probe path /__wpp_cdn_probe\n'
+        '    # WPP HTTPS HEADERS BEGIN\n'
+        '    header {\n'
+        '        -Server\n'
+        '        -X-Powered-By\n'
+        '    }\n'
+        '    # WPP HTTPS HEADERS END\n\n'
+        f'    @web_panel_cdn_probe path {wpp_cdn.probe_path(xray_path)}\n'
         '    handle @web_panel_cdn_probe {\n'
-        '        header X-WPP-CDN-Probe "ok"\n'
+        f'        header X-Request-ID "{wpp_cdn.probe_signature(xray_path)}"\n'
         '        header Cache-Control "no-store, no-cache, must-revalidate"\n'
         '        header CDN-Cache-Control "no-store"\n'
         '        header Pragma "no-cache"\n'
-        '        respond `{"ok":true,"service":"wpp-cdn-doctor"}` 200\n'
+        '        respond `{"status":"ok"}` 200\n'
         '    }\n\n'
         '    # WPP XRAY ROUTES BEGIN\n'
         f'    @web_panel_vless_direct path {direct_path} {direct_path}/*\n'
@@ -138,7 +144,11 @@ def repair_caddy_text(text, xray_path):
     """Return an idempotently repaired Caddyfile without changing external CDN settings."""
     value = str(text or "")
     value = re.sub(
-        r'(?ms)^[ \t]*@web_panel_cdn_probe[ \t]+path[ \t]+/__wpp_cdn_probe[ \t]*\n'
+        r'(?ms)^[ \t]*# WPP HTTPS HEADERS BEGIN\n.*?^[ \t]*# WPP HTTPS HEADERS END\n?',
+        '', value,
+    )
+    value = re.sub(
+        r'(?ms)^[ \t]*@web_panel_cdn_probe[ \t]+path[ \t]+[^\r\n]+\n'
         r'[ \t]*handle[ \t]+@web_panel_cdn_probe[ \t]*\{[ \t]*\n'
         r'.*?^[ \t]*\}[ \t]*\n?',
         '', value,
@@ -230,7 +240,7 @@ def _request(host, method, path, timeout):
     started = time.monotonic()
     connection = http.client.HTTPSConnection(host, 443, timeout=timeout, context=ssl.create_default_context())
     headers = {
-        "User-Agent": "WPP-CDN-Doctor/1.0",
+        "User-Agent": "Mozilla/5.0",
         "Accept": "application/json",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
@@ -283,11 +293,12 @@ def run(profile, origin_domain, xray_path, timeout=7, connection=None):
     except (OSError, ssl.SSLError, ValueError) as exc:
         results.append(_result("tls", "HTTPS-сертификат CDN", "fail", str(exc), "Проверьте сертификат и HTTPS в настройках CDN."))
 
-    probe_path = "/__wpp_cdn_probe?doctor=" + quote(str(time.time_ns()))
+    probe_path = wpp_cdn.probe_path(xray_path) + "?v=" + quote(str(time.time_ns()))
+    expected_signature = wpp_cdn.probe_signature(xray_path)
     origin_ok = False
     try:
         status, headers, payload, latency = _request(origin_host, "GET", probe_path, timeout)
-        origin_ok = status == 200 and headers.get("x-wpp-cdn-probe") == "ok"
+        origin_ok = status == 200 and headers.get("x-request-id") == expected_signature
         if origin_ok:
             results.append(_result("origin", "Источник WPP", "pass", f"HTTP {status}, {latency} мс"))
         else:
@@ -298,7 +309,7 @@ def run(profile, origin_domain, xray_path, timeout=7, connection=None):
     cdn_headers = {}
     try:
         status, cdn_headers, payload, latency = _request(cdn_host, "GET", probe_path, timeout)
-        signature = cdn_headers.get("x-wpp-cdn-probe") == "ok"
+        signature = cdn_headers.get("x-request-id") == expected_signature
         if status == 200 and signature:
             results.append(_result("edge", "Маршрут через CDN", "pass", f"HTTP {status}, {latency} мс"))
         elif status == 403 and provider == "selectel":
@@ -320,7 +331,7 @@ def run(profile, origin_domain, xray_path, timeout=7, connection=None):
 
     try:
         status, headers, payload, latency = _request(cdn_host, method, probe_path, timeout)
-        if status == 200 and headers.get("x-wpp-cdn-probe") == "ok":
+        if status == 200 and headers.get("x-request-id") == expected_signature:
             results.append(_result("method", f"Метод {method}", "pass", f"Разрешён, {latency} мс"))
         elif status in (403, 405, 413, 501):
             results.append(_result("method", f"Метод {method}", "fail", f"CDN вернул HTTP {status}.", f"Разрешите метод {method} в настройках CDN."))

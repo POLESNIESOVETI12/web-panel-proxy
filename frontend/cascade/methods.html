@@ -1,0 +1,14 @@
+<dialog id="cascadeMethodDialog" aria-labelledby="cascadeMethodTitle">
+  <header class="method-heading"><div><h2 id="cascadeMethodTitle">Как настроить мост</h2><p data-method-connection></p></div><button type="button" data-method-close aria-label="Закрыть выбор способа">×</button></header>
+  <form>
+    <p class="method-current" data-method-current-label></p>
+    <fieldset class="method-options"><legend class="cascade-sr-only">Способ настройки моста</legend>
+      <label class="method-card"><input type="radio" name="cascadeMethod" value="panel" checked><svg aria-hidden="true"><use href="#cascade-server"/></svg><strong>Через панели</strong><span>Панель установлена на каждом сервере. Выбираете готовые ноды, добавленные по токену.</span><em>Два или три сервера</em></label>
+      <label class="method-card"><input type="radio" name="cascadeMethod" value="ssh"><svg aria-hidden="true"><use href="#cascade-route"/></svg><strong>По SSH без второй панели</strong><span>Панель остаётся на зарубежном VPS. RU-сервер настраивается по IP, SSH-порту и паролю root.</span><em>RU-вход → зарубежный выход</em></label>
+    </fieldset>
+    <section class="method-detail" aria-live="polite"><b data-method-flow></b><p data-method-explanation></p></section>
+    <p class="method-warning" role="status" data-method-warning hidden></p>
+    <div class="method-actions"><button type="button" data-method-current hidden>Открыть текущий способ</button><button type="button" data-method-back>Основные настройки</button><button type="submit" class="primary" data-method-continue>Продолжить</button></div>
+    <p class="method-note">Выбор способа открывает его настройки. Рабочее подключение изменится после применения настроек и проверки маршрута.</p>
+  </form>
+</dialog>

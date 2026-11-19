@@ -25,6 +25,7 @@ MIERU_BIN = "/usr/local/bin/mita-wpp"
 DATA_DIR = Path("/etc/web-proxy-panel/extra-protocols")
 NAIVE_CONFIG = DATA_DIR / "Caddyfile.naive"
 NAIVE_SERVICE = "web-panel-proxy-naive.service"
+NAIVE_SOCKET = Path("/run/web-panel-proxy-naive/shared.sock")
 MIERU_SERVICE = "web-panel-proxy-mieru.service"
 MIERU_CONFIG = DATA_DIR / "mieru-server.json"
 NAIVE_CERT = DATA_DIR / "naive-domain.crt"
@@ -148,6 +149,160 @@ def _eligible(users, connections, protocol):
     return result
 
 
+def global_end(text):
+    depth=0;quote='';comment=False;escaped=False
+    for index,char in enumerate(text):
+        if comment:
+            if char=='\n':comment=False
+            continue
+        if quote:
+            if escaped:escaped=False
+            elif char=='\\' and quote=='"':escaped=True
+            elif char==quote:quote=''
+            continue
+        if char=='#':comment=True
+        elif char in ('"','`'):quote=char
+        elif char=='{':depth+=1
+        elif char=='}':
+            depth-=1
+            if depth==0:return index+1
+    raise ValueError('Не удалось разобрать общий блок Caddy.')
+
+
+
+def reserve_hysteria_port(text):
+    """Leave the web listener on TCP and make UDP/443 available to Hysteria."""
+    if not re.match(r"\s*\{", text):
+        raise ValueError("Не найден общий блок настроек Caddy.")
+    options_end = global_end(text)
+    blocks = list(re.finditer(r"(?m)^[ \t]*servers(?:[ \t]+([^\n{]+?))?[ \t]*\{",
+                              text[:options_end]))
+    if not any(match[1] is None for match in blocks):
+        point = text.index("{") + 1
+        text = (text[:point] + "\n    # WPP HYSTERIA SERVERS BEGIN\n"
+                "    servers {\n        protocols h1 h2\n    }\n"
+                "    # WPP HYSTERIA SERVERS END" + text[point:])
+        options_end = global_end(text)
+        blocks = list(re.finditer(r"(?m)^[ \t]*servers(?:[ \t]+([^\n{]+?))?[ \t]*\{",
+                                  text[:options_end]))
+    for match in reversed(blocks):
+        address = (match[1] or "").strip()
+        if address and not address.endswith(":443"):
+            continue
+        start = match.end()
+        end = start - 1 + global_end(text[start - 1:])
+        body = text[start:end]
+        protocols = re.search(r"(?m)^([ \t]*)protocols[ \t]+([^\r\n#}]+)(?:#[^\r\n]*)?$", body)
+        if protocols:
+            values = [value for value in protocols[2].split() if value != "h3"]
+            for value in ("h1", "h2"):
+                if value not in values:
+                    values.append(value)
+            if values == protocols[2].split():
+                continue
+            indent = protocols[1]
+            old = protocols[0].strip()
+            override = (f"{indent}# WPP HYSTERIA PROTOCOLS BEGIN\n"
+                        f"{indent}# WPP HYSTERIA PREVIOUS {old}\n"
+                        f"{indent}protocols {' '.join(values)}\n"
+                        f"{indent}# WPP HYSTERIA PROTOCOLS END")
+            body = body[:protocols.start()] + override + body[protocols.end():]
+        else:
+            body = ("\n        # WPP HYSTERIA PROTOCOLS BEGIN\n        protocols h1 h2\n"
+                    "        # WPP HYSTERIA PROTOCOLS END" + body)
+        text = text[:start] + body + text[end:]
+    return text
+
+
+def strip_hysteria_caddy(text):
+    text = re.sub(r"(?ms)\n[ \t]*# WPP HYSTERIA SERVERS BEGIN\n.*?^[ \t]*# WPP HYSTERIA SERVERS END", "", text)
+    return re.sub(
+        r"(?ms)^[ \t]*# WPP HYSTERIA PROTOCOLS BEGIN\n"
+        r"(?:([ \t]*)# WPP HYSTERIA PREVIOUS ([^\n]+)\n)?"
+        r".*?^[ \t]*# WPP HYSTERIA PROTOCOLS END\n",
+        lambda match: (match[1] + match[2] + "\n") if match[2] else "",
+        text,
+    )
+
+
+def naive_ingress(text, domain):
+    """Serve authenticated HTTP/2 CONNECT on the panel's HTTPS listener."""
+    text = re.sub(
+        r"(?ms)^[ \t]*# WPP NAIVE((?: GLOBAL)?) BEGIN\n.*?^[ \t]*# WPP NAIVE\1 END\n",
+        "", text,
+    )
+    domain = str(domain).lower().rstrip(".")
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z0-9-]+", domain):
+        raise ValueError("Некорректный домен панели для NaiveProxy.")
+    site = re.search(r"(?m)^[ \t]*" + re.escape(domain) + r"[ \t]*\{[ \t]*\n", text)
+    if site is None:
+        raise ValueError("Не найден сайт панели в Caddyfile.")
+    matcher = [
+        "@wpp_naive_connect {",
+        "    method CONNECT",
+        "    header Proxy-Authorization *",
+        f'    expression {{http.request.tls.server_name}} == "{domain}"',
+        "}",
+    ]
+    proxy = [
+        f"reverse_proxy unix+h2c/{NAIVE_SOCKET.as_posix()} {{",
+        "    header_up Proxy-Authorization {http.request.header.Proxy-Authorization}",
+        "    header_up -Via",
+        "    header_up -X-Forwarded-For",
+        "    header_down -Via",
+        "    flush_interval -1",
+        "}",
+    ]
+
+    def route(fallback=False):
+        lines = matcher + ["log_skip @wpp_naive_connect", "handle @wpp_naive_connect {"]
+        lines += ["    " + line for line in proxy]
+        lines.append("}")
+        if fallback:
+            lines.extend(["handle {", "    respond 404", "}"])
+        return "".join("    " + line + "\n" for line in lines)
+
+    def add_route(match):
+        block = "    # WPP NAIVE BEGIN\n" + route() + "    # WPP NAIVE END\n"
+        return text[:match.end()] + block + text[match.end():]
+
+    text = add_route(site)
+    catchall = re.search(r"(?m)^https://[ \t]*\{[ \t]*\n", text)
+    if catchall is not None:
+        return add_route(catchall)
+    return (text.rstrip() + "\n\n# WPP NAIVE GLOBAL BEGIN\nhttps:// {\n" + route(True)
+            + "}\n# WPP NAIVE GLOBAL END\n")
+
+
+
+def naive_caddyfile(grouped):
+    lines = ["{", "\tadmin off", "\tauto_https off",
+             "\torder forward_proxy before respond"]
+    if grouped:
+        lines.extend([f"\tservers unix/{NAIVE_SOCKET.as_posix()} {{", "\t\tprotocols h1 h2c", "\t}"])
+    lines.extend(["}", ""])
+
+    def add_proxy(users):
+        lines.append("\tforward_proxy {")
+        for user in users:
+            username = str(user.get("username", ""))
+            password = str(user.get("secret", ""))
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", username) or not password or any(ch.isspace() for ch in password):
+                raise RuntimeError("Invalid NaiveProxy credentials")
+            lines.append(f"\t\tbasic_auth {username} {password}")
+        lines.extend(["\t\thide_ip", "\t\thide_via", "\t\tprobe_resistance", "\t}",
+                      '\trespond "Not Found" 404', "}", ""])
+
+    for value in grouped.values():
+        # Keep the TLS endpoints used by previously imported links.
+        lines.extend([f":{_port(value['connection'])} {{", f"\ttls {NAIVE_CERT} {NAIVE_KEY}"])
+        add_proxy(value["users"])
+    if grouped:
+        lines.extend(["http:// {", f"\tbind unix/{NAIVE_SOCKET.as_posix()}"])
+        add_proxy(user for value in grouped.values() for user in value["users"])
+    return "\n".join(lines)
+
+
 def _sync_naive(users, connections, domain, cert, key):
     _prepare_data_dir()
     selected = _eligible(users, connections, "naive")
@@ -160,24 +315,7 @@ def _sync_naive(users, connections, domain, cert, key):
         shutil.copyfile(key, NAIVE_KEY)
         shutil.chown(NAIVE_CERT, user="root", group="caddy"); os.chmod(NAIVE_CERT, 0o640)
         shutil.chown(NAIVE_KEY, user="root", group="caddy"); os.chmod(NAIVE_KEY, 0o640)
-    lines = ["{", "\tadmin off", "\tauto_https off",
-             "\torder forward_proxy before respond", "}", ""]
-    for value in grouped.values():
-        connection = value["connection"]
-        # A forward proxy must match CONNECT requests for arbitrary target
-        # hosts. A domain-only Caddy site label would reject those requests;
-        # the explicit TLS certificate still authenticates our public domain.
-        lines.extend([f":{_port(connection)} {{", f"\ttls {NAIVE_CERT} {NAIVE_KEY}",
-                      "\tforward_proxy {"])
-        for user in value["users"]:
-            username = str(user.get("username", ""))
-            password = str(user.get("secret", ""))
-            if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", username) or not password or any(ch.isspace() for ch in password):
-                raise RuntimeError("Invalid NaiveProxy credentials")
-            lines.append(f"\t\tbasic_auth {username} {password}")
-        lines.extend(["\t\thide_ip", "\t\thide_via", "\t\tprobe_resistance", "\t}",
-                      "\trespond \"Not Found\" 404", "}", ""])
-    _atomic(NAIVE_CONFIG, "\n".join(lines), 0o640)
+    _atomic(NAIVE_CONFIG, naive_caddyfile(grouped), 0o640)
     shutil.chown(NAIVE_CONFIG, user="root", group="caddy")
     if grouped:
         _run(NAIVE_BIN, "validate", "--config", str(NAIVE_CONFIG), "--adapter", "caddyfile")
@@ -186,6 +324,8 @@ def _sync_naive(users, connections, domain, cert, key):
         if _run("systemctl", "is-active", "--quiet", NAIVE_SERVICE, check=False).returncode:
             raise RuntimeError("NaiveProxy service did not start")
         _wait_listeners((("tcp", _port(value["connection"])) for value in grouped.values()), "NaiveProxy")
+        if not NAIVE_SOCKET.is_socket():
+            raise RuntimeError("NaiveProxy service does not listen on the shared Unix socket")
     else:
         _run("systemctl", "disable", "--now", NAIVE_SERVICE, check=False)
 
@@ -362,7 +502,7 @@ def client_link(user, connection, domain, name="Proxy"):
     username = quote(str(user.get("username", "")), safe="")
     password = quote(str(user.get("secret", "")), safe="")
     if protocol == "naive":
-        return f"naive+https://{username}:{password}@{domain}:{port}#{quote(str(name), safe='')}"
+        return f"naive+https://{username}:{password}@{domain}:443#{quote(str(name), safe='')}"
     if protocol == "mieru":
         transport = str((connection.get("config") or {}).get("transport", "TCP")).upper()
         # Shadowrocket imports the simple server profile, not the official
