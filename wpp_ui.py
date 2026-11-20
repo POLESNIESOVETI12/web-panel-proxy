@@ -9,8 +9,9 @@ from urllib.parse import urlencode, urlsplit, parse_qs
 import wpp_extra_protocols as extra_protocols
 import wpp_routing as routing_store
 import wpp_cascade_ui as cascade_ui
+import wpp_ssh_cascade_ui as ssh_ui
 
-VERSION = '2.9.0'
+VERSION = '2.9.1'
 
 
 def esc(value): return html.escape(str(value), quote=True)
@@ -964,7 +965,8 @@ def connections_ui(connections, profiles, path, csrf, subscriptions=None, openfl
     extra_script=f'''<script>(()=>{{const form=document.getElementById('connectionForm'),protocol=document.getElementById('connectionProtocol'),box=form?.querySelector('[data-extra-protocol]'),transport=form?.elements.extra_transport,transportLabel=box?.querySelector('[data-mieru-transport]'),items={dataset},byId=Object.fromEntries(items.map(item=>[item.id,item]));if(!form||!protocol||!box)return;function sync(){{const active=['naive','mieru'].includes(protocol.value);box.hidden=!active;box.querySelectorAll('input,select').forEach(control=>control.disabled=!active);transportLabel.hidden=protocol.value!=='mieru'}}function fill(item){{const config=item?.config||{{}};form.elements.port.value=config.port||'';transport.value=config.transport||'TCP';sync()}}document.getElementById('newConnection')?.addEventListener('click',()=>fill(null));document.querySelectorAll('[data-edit-connection]').forEach(button=>button.addEventListener('click',()=>fill(byId[button.dataset.editConnection])));protocol.addEventListener('change',sync);form.addEventListener('reset',()=>setTimeout(()=>fill(null),0));sync()}})();</script>'''
     if cascade_options:
         page+=cascade_ui.connection_shortcut(path)
-    return page+openflux_script+extra_script+advanced_script+routing_preview_script+state_script
+    page=page.replace('</section><div class="actions"><button type="button" data-close-connection>Отмена</button>',ssh_ui.inline_fields()+'</section><div class="actions"><button type="button" data-close-connection>Отмена</button>',1)
+    return page+openflux_script+extra_script+advanced_script+routing_preview_script+state_script+ssh_ui.inline_script(connections,path)
 
 
 def cdn_doctor_ui(profiles, path, csrf):

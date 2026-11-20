@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Safe in-place updater for WEB PANEL PROXY V 2.9.0.
+# Safe in-place updater for WEB PANEL PROXY V 2.9.1.
 set -Eeuo pipefail
 umask 077
 
@@ -49,7 +49,7 @@ RELEASE_REF="$REQUESTED_REF"
 LOCAL_SOURCE=""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONTROLLER_VERSION="3.0.0-alpha49"
-CONTROLLER_REVISION=2026111901
+CONTROLLER_REVISION=2026112001
 CONTROLLER_DIR=/usr/local/lib/web-panel-proxy-updater
 CONTROLLER_ENTRY=/usr/local/sbin/web-panel-proxy-update
 CONTROLLER_UNINSTALL=/usr/local/sbin/web-panel-proxy-uninstall
@@ -179,7 +179,7 @@ if [[ -z "$REQUESTED_REF" && $# == 0 && -s "$SCRIPT_DIR/install-panel.sh" && -s 
 fi
 if [[ "${1:-}" == "--local" || "$AUTO_LOCAL" == 1 ]]; then
     LOCAL_SOURCE="$SCRIPT_DIR"
-    RELEASE_REF="v2.9.0"
+    RELEASE_REF="v2.9.1"
     for file in install-panel.sh update.sh uninstall-web-proxy.sh repair-landing-pages.sh panel-logo.png THIRD-PARTY-NOTICES.md wpp_subscriptions.py wpp_subscription_dashboard.py wpp_panel_extras.py wpp_ui.py wpp_metrics.py wpp_update.py wpp_update_data.py wpp_nodes.py wpp_openflux.py wpp_awg.py wpp_extra_protocols.py wpp_firewall.py wpp_components.py wpp_cdn.py wpp_cdn_doctor.py wpp_connections.py wpp_backup.py wpp_routing.py wpp_presets.py wpp_cascade.py wpp_cascade_ui.py wpp_ssh_cascade.py wpp_ssh_cascade_ui.py wpp_ssh_relay_agent.py wpp_cascade_ops.py wpp_cascade_ops_ui.py frontend/cascade/editor.css frontend/cascade/editor.html frontend/cascade/production.js frontend/cascade/methods.css frontend/cascade/methods.html frontend/cascade/methods.js; do
         [[ -s "$LOCAL_SOURCE/$file" ]] || { echo "Incomplete local archive: $file is missing." >&2; exit 1; }
     done
@@ -220,7 +220,7 @@ exec 9>/run/lock/web-panel-proxy.lock
 flock -n 9 || die "Another WEB PANEL PROXY install, update or removal is already running."
 
 echo "============================================================"
-echo "     WEB PANEL PROXY V 2.9.0 — SAFE UPDATE"
+echo "     WEB PANEL PROXY V 2.9.1 — SAFE UPDATE"
 echo "============================================================"
 echo "Users, administrator password, panel URL and site HTML will be retained."
 wpp_progress_start "Проверка установленной версии"

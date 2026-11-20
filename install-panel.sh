@@ -510,9 +510,9 @@ XRAY_PATH="$(cat "$XRAY_PATH_FILE")"
 [[ "$XRAY_PATH" =~ ^/vless-[a-f0-9]{24}$ || "$XRAY_PATH" =~ ^/assets/[a-f0-9]{12}/[a-f0-9]{12}$ ]] || die "Stored VLESS path is invalid."
 
 if [[ "$UPDATING" == "1" ]]; then
-    echo "Updating WEB PANEL PROXY V 2.9.0..."
+    echo "Updating WEB PANEL PROXY V 2.9.1..."
 else
-    echo "Configuring WEB PANEL PROXY V 2.9.0..."
+    echo "Configuring WEB PANEL PROXY V 2.9.1..."
 fi
 INSTALL_CREDENTIALS="/etc/web-proxy-panel/install-credentials"
 if [[ "$UPDATING" == "1" ]]; then
@@ -2042,7 +2042,7 @@ elif cmd=="cascade-cleanup": print(json.dumps({"ok":True,"cleanup_pending":casca
 elif cmd=="ssh-cascade":
     try: print(json.dumps(ssh_cascade_controller().execute(json.load(sys.stdin)),ensure_ascii=True))
     except (wpp_ssh_cascade.SSHError,wpp_cascade.CascadeError) as exc:
-        print(json.dumps({'ok':False,'message':str(exc)},ensure_ascii=True))
+        print(json.dumps({'ok':False,'message':str(exc),'pending_commit':os.path.exists(SSH_CASCADE_STATE+'.transaction')},ensure_ascii=True))
 elif cmd=="ssh-cascade-cleanup":print(json.dumps({'ok':True,'cleanup_pending':ssh_cascade_controller().cleanup()}))
 elif cmd in ("cascade-save","cascade-check"):
     print(json.dumps(cascade_controller().execute(json.load(sys.stdin),check_only=cmd=="cascade-check")))
@@ -2409,6 +2409,7 @@ import wpp_routing as routing_store
 import wpp_cascade_ops as cascade_ops_store
 import wpp_cascade_ui as cascade_ui_store
 import wpp_cascade as cascade_store
+import wpp_ssh_cascade as ssh_store
 
 HOST="127.0.0.1"
 PORT=8090
@@ -3227,7 +3228,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.api_auth(): return
             if path==node_api.API_PREFIX+"/status":
                 loc=node_api.load_location(LOCATION_FILE)
-                self.send_json({"ok":True,"api_version":1,"version":"2.9.0","domain":DOMAIN,
+                self.send_json({"ok":True,"api_version":1,"version":"2.9.1","domain":DOMAIN,
                     "location":loc,"capabilities":["vless","hysteria","federation",cascade_store.CAPABILITY]}); return
             if path==node_api.API_PREFIX+"/cascade/health":
                 try:self.send_json(ctl_manager_json('cascade-health',{}))
@@ -3775,6 +3776,9 @@ class Handler(BaseHTTPRequestHandler):
             previous_registry=None
             async_request=self.headers.get("X-WPP-Async","")=="1"
             result_enabled=None
+            bridge_result=None
+            bridge_committed=False
+            runtime_attempted=False
             try:
                 operation=form.get("operation","")
                 if operation=="save":
@@ -3810,12 +3814,20 @@ class Handler(BaseHTTPRequestHandler):
                         if form.get("xray_json","").strip() and json.loads(form["xray_json"])!=current:
                             raise connection_store.ConnectionError("Измените маршрут и сохраните подключение, затем откройте карандаш заново для редактирования JSON нового маршрута.")
                         raw["advanced"]={"client":existing_advanced.get("client",{})}
+                    ssh_request=ssh_store.inline_request(form,raw) if form.get('ssh_inline')=='1' else None
                     saved_connection=connection_store.upsert(CONNECTIONS_FILE,raw)
                     if protocol in ("awg20","awg31"):
                         connection_store.claim_awg_port(CONNECTIONS_FILE,saved_connection["id"],users())
                     elif protocol in ("naive","mieru"):
                         connection_store.claim_external_port(CONNECTIONS_FILE,saved_connection["id"])
+                    runtime_attempted=True
                     ctl_manager_json("connections-refresh",{})
+                    if ssh_request is not None:
+                        bridge_result=ctl_manager_json('ssh-cascade',{**ssh_request,'id':saved_connection['id']})
+                        if not bridge_result.get('ok'):
+                            bridge_committed=bool(bridge_result.get('pending_commit'))
+                            raise ValueError(bridge_result.get('message') or 'Не удалось настроить RU-сервер. Проверьте IP и пароль root.')
+                        bridge_committed=True
                 elif operation=="clone": connection_store.clone(CONNECTIONS_FILE,form.get("id",""),users())
                 elif operation=="toggle":
                     previous_registry=connection_store.load(CONNECTIONS_FILE)
@@ -3839,17 +3851,19 @@ class Handler(BaseHTTPRequestHandler):
                     routing_store.delete_profile(ROUTING_FILE,deleted_id)
                 else: raise connection_store.ConnectionError("Неизвестная операция с подключением.")
                 if async_request:
-                    self.send_json({"ok":True,"operation":operation,"enabled":result_enabled})
+                    self.send_json({"ok":True,"operation":operation,"enabled":result_enabled,"bridge":bridge_result})
                 else:
                     self.redirect("/connections")
             except (connection_store.ConnectionError,ValueError) as exc:
-                if previous_registry is not None:
-                    try: connection_store.save(CONNECTIONS_FILE,previous_registry)
+                if previous_registry is not None and not bridge_committed:
+                    try:
+                        connection_store.save(CONNECTIONS_FILE,previous_registry)
+                        if runtime_attempted:ctl_manager_json('connections-refresh',{})
                     except Exception: pass
                 if async_request: self.send_json({"ok":False,"message":str(exc)},400)
                 else: self.send_html(esc(str(exc)),400)
             except Exception as exc:
-                if previous_registry is not None:
+                if previous_registry is not None and not bridge_committed:
                     try:
                         connection_store.save(CONNECTIONS_FILE,previous_registry)
                         ctl_manager_json("connections-refresh",{})
@@ -4473,7 +4487,7 @@ fi
 echo "[4/6] Creating systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=WEB PANEL PROXY V 2.9.0
+Description=WEB PANEL PROXY V 2.9.1
 After=network-online.target caddy.service tproxy-server.service mtproxy.service web-proxy-panel-firewall.service
 Wants=network-online.target
 Requires=web-proxy-panel-firewall.service
@@ -4642,7 +4656,7 @@ unlock_changes(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
 
 show_info(){
     local d p version
-    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.9.0')"
+    d="$(domain)"; p="$(panel_path)"; version="$(cat /etc/web-proxy-panel/version 2>/dev/null || echo '2.9.1')"
     echo
     echo "============================================================"
     echo "                 WEB PANEL PROXY"
@@ -5198,9 +5212,9 @@ fi
 echo
 echo "============================================================"
 if [[ "$UPDATING" == "1" ]]; then
-echo "          WEB PANEL PROXY V 2.9.0 UPDATED"
+echo "          WEB PANEL PROXY V 2.9.1 UPDATED"
 else
-echo "         WEB PANEL PROXY V 2.9.0 IS READY"
+echo "         WEB PANEL PROXY V 2.9.1 IS READY"
 fi
 echo "============================================================"
 echo
