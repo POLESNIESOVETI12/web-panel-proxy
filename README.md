@@ -2,7 +2,7 @@
   <img src="panel-logo.png" alt="WEB PANEL PROXY" width="190">
 </p>
 
-<h1 align="center">WEB PANEL PROXY 2.9.0</h1>
+<h1 align="center">WEB PANEL PROXY 2.9.1</h1>
 
 <p align="center">WEB Proxy, MTProto, VLESS XHTTP, Hysteria2, NaiveProxy, Mieru, OpenFlux и аккуратная панель управления для собственного VPS</p>
 
